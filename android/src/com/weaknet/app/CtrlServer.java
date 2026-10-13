@@ -185,14 +185,14 @@ public class CtrlServer implements Runnable {
                 }
                 android.content.Intent i = new android.content.Intent(ctx, VpnNetService.class);
                 if (enable) {
-                    VpnNetService.userStopped = false;
+                    // ACTION_START：显式启动意图，服务会清除 userStopped，保证停止后能再次接管
+                    i.setAction(VpnNetService.ACTION_START);
                     if (android.os.Build.VERSION.SDK_INT >= 26) ctx.startForegroundService(i);
                     else ctx.startService(i);
                 } else {
-                    // ACTION_STOP：让服务自行 stopSelf，避免 START_STICKY 把它重启
-                    i.setAction(VpnNetService.ACTION_STOP);
-                    if (android.os.Build.VERSION.SDK_INT >= 26) ctx.startForegroundService(i);
-                    else ctx.startService(i);
+                    // 同进程：先置停止意图，再 stopService。
+                    // 若系统因 START_STICKY 重启服务，onStartCommand 会据此直接 stopSelf，不会重建 tun。
+                    VpnNetService.userStopped = true;
                     try {
                         ctx.stopService(new android.content.Intent(ctx, VpnNetService.class));
                     } catch (Exception e) {

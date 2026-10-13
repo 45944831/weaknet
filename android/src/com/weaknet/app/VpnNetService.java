@@ -25,10 +25,13 @@ import java.util.concurrent.Executors;
  */
 public class VpnNetService extends VpnService {
     public static final String ACTION_STOP = "com.weaknet.app.STOP_VPN";
+    public static final String ACTION_START = "com.weaknet.app.START_VPN";
 
     public static volatile boolean active = false;
     /** 用户是否主动停止过接管。START_STICKY 会让系统在 stopService 后重启本服务，
-     *  若不记住这个意图，服务会「复活」重新建 tun —— 表现为点了停止却停不下来。 */
+     *  若不记住这个意图，服务会「复活」重新建 tun —— 表现为点了停止却停不下来。
+     *  注意：该标志只对「系统重启」生效；用户显式启动（ACTION_START）时必须清除，
+     *  否则停止一次后就再也启不来了。 */
     public static volatile boolean userStopped = false;
 
     private ParcelFileDescriptor tun;
@@ -45,14 +48,22 @@ public class VpnNetService extends VpnService {
     private Thread cleanThread;
 
     public int onStartCommand(Intent intent, int flags, int startId) {
-        if (intent != null && ACTION_STOP.equals(intent.getAction())) {
+        String act = (intent == null) ? null : intent.getAction();
+        if (ACTION_STOP.equals(act)) {
             userStopped = true;
             stopVpn();
             stopSelf();
             return START_NOT_STICKY;
         }
+        if (ACTION_START.equals(act)) {
+            // 用户显式启动：清除「已停止」意图，保证停止后能再次接管
+            userStopped = false;
+            if (!running) startVpn();
+            return START_STICKY;
+        }
+        // 走到这里说明 intent 为 null 或没有 action —— 典型情况是系统因 START_STICKY 重启本服务。
+        // 此时才尊重用户「已停止」的意图，避免服务复活重建 tun。
         if (userStopped) {
-            // 系统因 START_STICKY 重启本服务：尊重用户「已停止」的意图，不要复活
             stopSelf();
             return START_NOT_STICKY;
         }

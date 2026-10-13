@@ -54,7 +54,7 @@ public class MainActivity extends Activity {
         btn.setOnClickListener(new View.OnClickListener() {
             public void onClick(View v) {
                 if (VpnNetService.active) stopVpn();
-                else requestVpn();
+                else requestVpn(true);          // 用户主动点按钮
             }
         });
         btnFloat = new Button(this);
@@ -108,19 +108,24 @@ public class MainActivity extends Activity {
         updateStatus();
         handler.postDelayed(new Runnable() {
             public void run() {
-                requestVpn();
+                requestVpn(false);              // 自动接管（尊重上次停止意图）
             }
         }, 600);
         startStatusLoop();
     }
 
-    /** 自动申请 VPN 授权并接管（免手动配置代理） */
-    private void requestVpn() {
+    /**
+     * 申请 VPN 授权并接管（免手动配置代理）。
+     * @param userInitiated true=用户点了接管按钮；false=App 启动时的自动接管。
+     *   只有「自动接管」才需要尊重上次的停止意图；用户主动点按钮时必须放行，
+     *   否则停止一次后就再也启不来了。
+     */
+    private void requestVpn(boolean userInitiated) {
         if (VpnNetService.active) {
             updateStatus();
             return;
         }
-        if (VpnNetService.userStopped) {     // 用户刚点过停止，不要再自动接管
+        if (!userInitiated && VpnNetService.userStopped) {   // 自动接管：用户刚点过停止，不要自作主张
             updateStatus();
             return;
         }
@@ -191,8 +196,8 @@ public class MainActivity extends Activity {
     }
 
     private void startVpn() {
-        VpnNetService.userStopped = false;
         Intent i = new Intent(this, VpnNetService.class);
+        i.setAction(VpnNetService.ACTION_START);   // 显式启动意图：服务据此清除 userStopped
         if (Build.VERSION.SDK_INT >= 26) startForegroundService(i);
         else startService(i);
         handler.postDelayed(new Runnable() {
@@ -203,20 +208,15 @@ public class MainActivity extends Activity {
     }
 
     /**
-     * 停止接管。必须同时做两件事：
-     *   1) 发 ACTION_STOP —— 让服务自己 stopSelf，避免 START_STICKY 把它「复活」；
-     *   2) stopService —— 兜底。
-     * 只调 stopService 的话，服务会被系统重启、tun 重新建立，用户会觉得停不下来。
+     * 停止接管。
+     * 关键点：本服务与 App 同进程，直接置静态标志 userStopped 即可；
+     * 若系统随后因 START_STICKY 重启服务，onStartCommand 收到无 action 的 intent 时
+     * 会据此直接 stopSelf，不会重建 tun（表现就是「点了停止能真的停下」）。
+     * 这里刻意不用 startForegroundService 发 ACTION_STOP —— 那会在服务本已停止时
+     * 重新拉起实例，而它 5 秒内没调用 startForeground，Android 8+ 会报错。
      */
     private void stopVpn() {
-        try {
-            Intent i = new Intent(this, VpnNetService.class);
-            i.setAction(VpnNetService.ACTION_STOP);
-            if (Build.VERSION.SDK_INT >= 26) startForegroundService(i);
-            else startService(i);
-        } catch (Exception e) {
-            // ignore
-        }
+        VpnNetService.userStopped = true;
         try {
             stopService(new Intent(this, VpnNetService.class));
         } catch (Exception e) {
