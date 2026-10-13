@@ -43,6 +43,26 @@ public class WeakNet {
     /** 参数代数：每次切换场景 +1，用于打断黑洞等长时间挂起 */
     public volatile int profileGen = 0;
 
+    /** 接管范围：all=全部 App / only=仅下列 / exclude=排除下列（存包名） */
+    public volatile String scopeMode = "all";
+    public final java.util.List<String> scopePkgs =
+            java.util.Collections.synchronizedList(new java.util.ArrayList<String>());
+
+    /** 更新接管范围。返回规范化后的 mode。非法值回落为 all。 */
+    public synchronized String setScope(String mode, java.util.Collection<String> pkgs) {
+        if (!"only".equals(mode) && !"exclude".equals(mode)) mode = "all";
+        scopeMode = mode;
+        scopePkgs.clear();
+        if (pkgs != null) {
+            for (String p : pkgs) {
+                if (p == null) continue;
+                p = p.trim();
+                if (p.length() > 0 && !scopePkgs.contains(p)) scopePkgs.add(p);
+            }
+        }
+        return scopeMode;
+    }
+
     private Thread flapThread;
 
     public void log(String type, String msg) {

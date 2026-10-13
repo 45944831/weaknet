@@ -51,6 +51,22 @@ python weaknet.py --proxy-port 8888 --ctrl-port 8899
 
 自定义参数（13 项）：上下行带宽、基础延迟、抖动、丢包率、卡顿时长、随机断连率、黑洞超时率、DNS 故障率、周期断网开关与周期等。
 
+### 自定义栏（⭐ 我的自定义）
+
+调好一组参数后可以起个名字保存下来，之后像内置预设一样一键切换，不需要了就删掉：
+
+| 操作 | 位置 |
+|---|---|
+| 保存 | 展开「🎛 自定义参数」→ 填名字 → 点「保存为自定义」（GUI 版在同一张卡片的「保存为自定义场景」处） |
+| 切换 | 点「⭐ 我的自定义」里的名字即可生效 |
+| 删除 | Web 端点右侧 ✕（两步确认：✕ → 确认，避免在 WebView 里误删）；GUI 版选中后点「删除选中」，有二次确认 |
+
+- 保存的场景与内置预设并列常驻显示，切换后会显示为当前场景名
+- 重名自动加序号（如「地铁 3G (2)」），不会静默覆盖旧的那条
+- 存储：Windows 写程序目录下的 `weaknet_presets.json`（目录不可写时自动退回 `~/.weaknet/`）；Android 存在 App 私有的 SharedPreferences 里，卸载才丢
+
+对应接口：`GET /api/upresets`（列表）、`POST /api/upreset`（保存 / 按 id 覆盖）、`POST /api/upreset/del`（删除），应用时仍走 `/api/preset`，key 形如 `u:<id>`。
+
 ---
 
 ## 工作原理
@@ -126,7 +142,8 @@ weaknet/
 ├── WeakNet.exe           【产物】Windows GUI 版
 ├── WeakNet-CLI.exe       【产物】Windows 控制台版
 └── android/
-    ├── src/com/weaknet/app/    Java 源码（VpnService / TCP 状态机 / 限速 / 悬浮窗）
+    ├── src/com/weaknet/app/    Java 源码（VpnService / TCP 状态机 / 限速 / 悬浮窗 /
+    │                           MyPresets = 自定义场景持久化）
     ├── res/                    应用图标（mipmap 各密度 + adaptive icon）
     ├── assets/                 控制台页面
     ├── AndroidManifest.xml
@@ -146,6 +163,14 @@ weaknet/
 | 令牌桶切场景 | 取消限速 507ms 内放行（原需等待 25s） |
 | Android 真机 | 安装启动无崩溃，VPN 接管 `vpn_active=true` |
 | APK 停止接管 → 再次启动 | 真机三轮 `False/True` 交替正常，停止后 tun0 释放、ServiceRecord 归零 |
+| 指定目标接管 | 名单内进程限到 30 KB/s、名单外仍是全速（Windows）；Android 包名进出名单连接数 +69 / +0 |
+| 自定义栏（保存 / 列表 / 应用 / 删除 / 重启持久化） | 接口 29 项、GUI 25 项自检全通过 |
+| 打包产物回归（`_t_exe.py`） | 对 `WeakNet-CLI.exe` 本体跑 19 项：自定义栏增删改、真实流量限速、进程识别全过 |
+| Android 真机（`_t_apk_mine.py`） | 16/16：自定义栏保存/应用/删除、越界夹值全过，`/api/targets` 能列出已安装应用 |
+| Android 真机（`_t_apk_scope.py`） | 指定 App 接管：名单内 Chrome 连接数 +11、移出名单后 +0，无崩溃 |
+| 自定义参数越界值 | 丢包率等百分比字段夹到 0~100（修复前 999% 会变成「全丢」，与断网难区分） |
+
+> `_t_*.py` / `_t_dom_mine.cjs` 是自测脚本，`python _t_exe.py` 可直接验证打包后的 EXE。
 
 ---
 

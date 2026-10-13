@@ -57,6 +57,32 @@ canvas{width:100%;height:130px;display:block}
 .badge{padding:2px 10px;border-radius:999px;font-size:12px;font-weight:600;display:inline-block}
 .badge.ok{background:#e8f7ee;color:var(--green)}
 .badge.down{background:#fdecec;color:var(--red)}
+/* ---- 接管范围（指定程序 / 指定 App，可多选）---- */
+.scope-modes{display:flex;gap:16px;flex-wrap:wrap;margin-bottom:12px;font-size:13px}
+.scope-modes label{display:flex;align-items:center;gap:6px;cursor:pointer}
+.scope-modes input{accent-color:var(--accent);width:15px;height:15px}
+.scope-tip{font-size:12px;color:var(--muted);line-height:1.7;margin:0 0 10px}
+.scope-search{width:100%;border:1px solid var(--line);border-radius:8px;padding:7px 11px;font-size:13px;color:var(--text);background:#fff}
+.scope-search:focus{outline:none;border-color:var(--accent)}
+.scope-list{max-height:236px;overflow:auto;border:1px solid var(--line);border-radius:10px;margin-top:8px;background:#fbfcfe}
+.scope-row{display:flex;align-items:center;gap:9px;padding:7px 12px;font-size:13px;border-bottom:1px solid #eef1f6;cursor:pointer}
+.scope-row:last-child{border-bottom:0}
+.scope-row:hover{background:#eef3ff}
+.scope-row input{accent-color:var(--accent);width:15px;height:15px;flex:none}
+.scope-row .nm{font-weight:600}
+.scope-row .id{color:var(--muted);font-size:12px;font-variant-numeric:tabular-nums}
+.scope-empty{padding:14px;text-align:center;color:var(--muted);font-size:13px}
+/* ---- 自定义栏：用户命名保存的参数 ---- */
+.mychip{display:inline-flex;align-items:center;border:1px solid var(--line);background:#fff;border-radius:999px;overflow:hidden}
+.mychip .chip{border:0;border-radius:0;padding:7px 2px 7px 14px}
+.mychip .mc-del{border:0;background:#fff;color:var(--muted);font-size:13px;line-height:1;
+  padding:7px 11px;cursor:pointer;font-family:inherit}
+.mychip .mc-del:hover{background:#fdecec;color:var(--red)}
+.mychip .mc-del[data-armed="1"]{background:#fdecec;color:var(--red);font-weight:600}
+.my-empty{font-size:13px;color:var(--muted);margin:0 0 2px}
+.my-save{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:14px}
+.my-save .scope-search{flex:1 1 180px;width:auto}
+.my-save button{padding:8px 16px;font-size:13px}
 </style>
 </head>
 <body>
@@ -75,6 +101,12 @@ canvas{width:100%;height:130px;display:block}
   <div class="card">
     <h2>🎯 网络场景预设</h2>
     <div id="presets">加载中…</div>
+    <!-- 自定义栏：用户自己命名保存的参数，点一下即切换；老版本引擎无此接口时自动隐藏 -->
+    <div id="myBar" style="display:none">
+      <div class="group"><span class="cat-dot" style="background:#8b5cf6"></span>⭐ 我的自定义</div>
+      <div class="chips" id="myChips"></div>
+      <p class="my-empty" id="myEmpty">还没有保存的场景：展开下方「🎛 自定义参数」，调好后起个名字点「保存」。</p>
+    </div>
   </div>
 
   <div class="card">
@@ -91,9 +123,41 @@ canvas{width:100%;height:130px;display:block}
         <button class="primary" id="applyBtn">应用自定义参数</button>
         <button class="ghost" id="resetBtn">恢复默认值</button>
       </div>
+      <!-- 自定义栏的保存入口：把上面这组参数命名存下来，之后可一键切换 -->
+      <div class="my-save">
+        <input class="scope-search" id="myName" maxlength="40"
+               placeholder="给这组参数起个名字（如：地铁 3G 抖动）后保存">
+        <button class="ghost" id="saveMyBtn">保存为自定义</button>
+      </div>
+      <p class="my-empty" id="mySaveTip" style="margin-top:8px"></p>
     </div>
     <div class="btns">
       <button class="ghost" id="stopBtn">停止模拟（恢复直连）</button>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2 class="fold-toggle" id="scopeToggle" title="点击展开 / 收起接管范围">
+      <span class="fold-arrow" id="scopeArrow">▸</span> 🎯 接管范围
+      <span style="font-size:12px;color:var(--muted);font-weight:400">
+        <span id="scopeHint">点击展开</span> · 当前：<span id="scopeBrief">全部程序</span>
+      </span>
+    </h2>
+    <!-- 默认折叠：多数场景接管全部即可，需要隔离某个程序时才展开勾选 -->
+    <div id="scopeBody" style="display:none">
+      <div class="scope-modes">
+        <label><input type="radio" name="scopeMode" value="all" checked> 全部接管</label>
+        <label><input type="radio" name="scopeMode" value="only"> 仅接管选定项</label>
+        <label><input type="radio" name="scopeMode" value="exclude"> 排除选定项</label>
+      </div>
+      <p class="scope-tip" id="scopeTip"></p>
+      <input class="scope-search" id="scopeSearch" placeholder="搜索…">
+      <div class="scope-list" id="scopeList"></div>
+      <div class="btns">
+        <button class="primary" id="scopeApplyBtn">应用接管范围</button>
+        <button class="ghost" id="scopeReloadBtn">刷新列表</button>
+        <button class="ghost" id="scopeClearBtn">清空选择</button>
+      </div>
     </div>
   </div>
 
@@ -127,7 +191,7 @@ canvas{width:100%;height:130px;display:block}
 
 <script>
 const $ = id => document.getElementById(id);
-let sliderDirty = false, lastBytes = null;
+let sliderDirty = false, lastBytes = null, pollTick = 0;
 const hist = { down: [], up: [] };
 
 const SLIDERS = [
@@ -278,6 +342,17 @@ async function refresh(){
     }
     lastBytes = { down: s.stats.down, up: s.stats.up };
     drawChart();
+    // 引擎侧的接管范围可能被另一端（桌面 GUI）改过，这里同步回来；
+    // 但用户有未应用的改动时不覆盖，免得把他刚勾的选项冲掉
+    if (s.scope && !SCOPE.dirty) {
+      SCOPE.mode = s.scope.mode || "all";
+      SCOPE.list = (s.scope.list || []).slice();
+      const radio = document.querySelector('input[name=scopeMode][value="' + SCOPE.mode + '"]');
+      if (radio) radio.checked = true;
+      syncScopeBrief();
+    }
+    // 自定义栏：另一端（桌面 GUI）增删的场景隔几秒同步一次
+    if (MY.ok && (++pollTick % 5 === 0)) await syncMy();
   } catch (e) {}
 }
 
@@ -291,6 +366,191 @@ function initFold(){
     $("foldHint").textContent = open ? "点击展开" : "点击收起";
     if (!open) drawChart();      // 展开后卡片高度变化，顺带重绘图表避免画布拉伸
   };
+}
+
+// --------------------------------------------------------------------------
+// 接管范围：Windows 按进程名 / Android 按包名，可多选
+// 两端接口同构：GET /api/targets 取候选，GET·POST /api/scope 读写设置
+// --------------------------------------------------------------------------
+let SCOPE = { mode: "all", list: [], items: [], unit: "目标", dirty: false };
+
+function scopeBrief(){
+  if (SCOPE.mode === "all") return "全部" + SCOPE.unit;
+  return (SCOPE.mode === "only" ? "仅 " : "排除 ") + SCOPE.list.length + " 项";
+}
+function syncScopeBrief(){
+  $("scopeBrief").textContent = scopeBrief() + (SCOPE.dirty ? "（未应用）" : "");
+}
+
+function renderScopeList(){
+  const q = ($("scopeSearch").value || "").trim().toLowerCase();
+  const box = $("scopeList");
+  const items = SCOPE.items.filter(it => !q ||
+      String(it.name).toLowerCase().includes(q) ||
+      String(it.id).toLowerCase().includes(q));
+  if (!items.length){
+    box.innerHTML = '<div class="scope-empty">无匹配项。列表只收录已发起过网络连接的' +
+      SCOPE.unit + '；可先让目标访问一次网络，再点「刷新列表」。</div>';
+    return;
+  }
+  box.innerHTML = items.map(it =>
+      '<label class="scope-row"><input type="checkbox" value="' + escapeHtml(it.id) + '"' +
+      (SCOPE.list.indexOf(it.id) >= 0 ? " checked" : "") + '>' +
+      '<span class="nm">' + escapeHtml(it.name) + '</span>' +
+      (it.desc ? '<span class="id">' + escapeHtml(it.desc) + '</span>' : '') +
+      '</label>').join("");
+  box.querySelectorAll('input[type=checkbox]').forEach(cb => {
+    cb.onchange = () => {
+      const i = SCOPE.list.indexOf(cb.value);
+      if (cb.checked && i < 0) SCOPE.list.push(cb.value);
+      if (!cb.checked && i >= 0) SCOPE.list.splice(i, 1);
+      SCOPE.dirty = true;
+      syncScopeBrief();
+    };
+  });
+}
+
+async function loadScope(){
+  const t = await api("/api/targets");
+  SCOPE.items = Array.isArray(t.items) ? t.items : [];
+  SCOPE.unit = t.unit || "目标";
+  const s = await api("/api/scope");
+  SCOPE.mode = s.mode || "all";
+  SCOPE.list = Array.isArray(s.list) ? s.list.slice() : [];
+  SCOPE.dirty = false;
+  // 已选中但当前不在候选里的（例如目标已退出）也要显示，否则用户不知道自己选过什么
+  SCOPE.list.forEach(id => {
+    if (!SCOPE.items.some(it => it.id === id))
+      SCOPE.items.push({ id, name: id, desc: "（已选 · 当前未运行）" });
+  });
+  const radio = document.querySelector('input[name=scopeMode][value="' + SCOPE.mode + '"]');
+  if (radio) radio.checked = true;
+  $("scopeTip").textContent = (s.supported === false)
+    ? "当前平台无法按" + SCOPE.unit + "区分来源，接管范围设置不会生效。"
+    : (t.type === "package"
+       ? "仅选定的 App 会进入弱网模拟，其余 App 走真实网络（切换后会自动重建 VPN 通道）。"
+       : "Windows 的系统代理是进程无关的：范围外的程序同样会经过代理，但会被原样转发、不受任何弱网影响。" +
+         SCOPE.unit + "需先发起过网络连接才会出现在列表中。");
+  renderScopeList();
+  syncScopeBrief();
+}
+
+/** 接管范围默认折叠；首次展开时才拉取候选列表，避免无谓请求 */
+function initScopeFold(){
+  const t = $("scopeToggle"), b = $("scopeBody");
+  let loaded = false;
+  t.onclick = () => {
+    const open = b.style.display !== "none";
+    b.style.display = open ? "none" : "";
+    $("scopeArrow").textContent = open ? "▸" : "▾";
+    $("scopeHint").textContent = open ? "点击展开" : "点击收起";
+    if (!open && !loaded) { loaded = true; loadScope().catch(() => {}); }
+    if (!open) drawChart();
+  };
+}
+
+// --------------------------------------------------------------------------
+// 自定义栏：把调好的参数命名保存，之后一键切换 / 删除
+//   GET  /api/upresets     列表
+//   POST /api/upreset      保存 {name, profile, id?}
+//   POST /api/upreset/del  删除 {id}
+// 应用仍走 /api/preset —— 自定义场景的 key 是 "u:<id>"，与内置预设同一条通路
+// --------------------------------------------------------------------------
+let MY = { ok: false, items: [], pending: null };
+
+function kbpsText(v){
+  return v ? (v >= 1000 ? (v / 1000).toFixed(v % 1000 ? 1 : 0) + "M" : v + "k") : "∞";
+}
+function profBrief(p){
+  p = p || {};
+  let s = "↓" + kbpsText(p.down_kbps) + " ↑" + kbpsText(p.up_kbps)
+        + " · 延迟 " + (p.latency_down_ms || 0) + "/" + (p.latency_up_ms || 0) + "ms";
+  if (p.loss_pct) s += " · 丢包 " + p.loss_pct + "%";
+  if (p.timeout_pct) s += " · 黑洞 " + p.timeout_pct + "%";
+  if (p.dns_fail_pct) s += " · DNS " + p.dns_fail_pct + "%";
+  if (p.reject_pct) s += " · 拒连 " + p.reject_pct + "%";
+  return s;
+}
+function mySig(items){ return items.map(i => i.id).join(","); }
+
+function renderMy(){
+  const box = $("myChips");
+  if (!MY.items.length){ box.innerHTML = ""; $("myEmpty").style.display = ""; return; }
+  $("myEmpty").style.display = "none";
+  box.innerHTML = MY.items.map(it =>
+      '<span class="mychip">' +
+        '<button class="chip" data-key="u:' + escapeHtml(it.id) + '" title="' +
+          escapeHtml(profBrief(it.profile)) + '">' + escapeHtml(it.name) + '</button>' +
+        '<button class="mc-del" data-id="' + escapeHtml(it.id) + '" title="删除">✕</button>' +
+      '</span>').join("");
+  MY.pending = null;
+  box.querySelectorAll("button.chip").forEach(b => b.onclick = async () => {
+    await api("/api/preset", {key: b.dataset.key});
+    sliderDirty = false;
+    refresh();
+  });
+  // 两步删除：Android 内嵌 WebView 默认不弹 confirm()，做成「✕ → 确认」才不会点不掉
+  box.querySelectorAll("button.mc-del").forEach(b => b.onclick = async () => {
+    if (MY.pending !== b.dataset.id) {
+      const armed = box.querySelector('button.mc-del[data-armed="1"]');
+      if (armed) { armed.textContent = "✕"; armed.removeAttribute("data-armed"); }
+      MY.pending = b.dataset.id;
+      b.textContent = "确认";
+      b.setAttribute("data-armed", "1");
+      return;
+    }
+    MY.pending = null;
+    await api("/api/upreset/del", {id: b.dataset.id});
+    await loadMy();
+    refresh();
+  });
+}
+
+async function loadMy(){
+  let r;
+  try { r = await api("/api/upresets"); }
+  catch (e) {          // 老版本引擎没有这个接口：整栏隐藏，不误导
+    MY.ok = false; MY.items = [];
+    $("myBar").style.display = "none";
+    return false;
+  }
+  MY.ok = true;
+  MY.items = Array.isArray(r.items) ? r.items : [];
+  $("myBar").style.display = "";
+  renderMy();
+  return true;
+}
+
+/** 桌面 GUI 那端可能新增/删除了自定义场景，这里定期拉回来对齐 */
+async function syncMy(){
+  const r = await api("/api/upresets").catch(() => null);
+  if (!r || !Array.isArray(r.items)) return;
+  if (mySig(r.items) !== mySig(MY.items)) { MY.items = r.items; renderMy(); }
+}
+
+async function saveMy(){
+  const inp = $("myName"), name = (inp.value || "").trim();
+  if (!name){          // 名字是这个功能的意义所在，空名字直接提示，不静默存成无名场景
+    inp.style.borderColor = "var(--red)";
+    inp.focus();
+    $("mySaveTip").textContent = "请先给这组参数起个名字，再点保存。";
+    return;
+  }
+  inp.style.borderColor = "";
+  const prof = {};
+  SLIDERS.forEach(([f]) => prof[f] = +$("sl_" + f).value);
+  const b = $("saveMyBtn"), old = b.textContent;
+  b.disabled = true; b.textContent = "保存中…";
+  try {
+    const r = await api("/api/upreset", {name, profile: prof});
+    $("mySaveTip").textContent = "已保存：" + (r.name || name) + "（见上方「⭐ 我的自定义」）";
+    inp.value = "";
+    await loadMy();
+    refresh();
+  } catch (e) {
+    $("mySaveTip").textContent = "保存失败，请重试。";
+  }
+  b.disabled = false; b.textContent = old;
 }
 
 $("applyBtn").onclick = async () => {
@@ -315,6 +575,25 @@ $("stopBtn").onclick = async () => {
   sliderDirty = false;
   refresh();
 };
+$("scopeApplyBtn").onclick = async () => {
+  const mode = document.querySelector("input[name=scopeMode]:checked").value;
+  const r = await api("/api/scope", { mode, list: SCOPE.list });
+  SCOPE.mode = r.mode; SCOPE.list = Array.isArray(r.list) ? r.list.slice() : [];
+  SCOPE.dirty = false;
+  syncScopeBrief();
+  refresh();
+};
+$("scopeReloadBtn").onclick = async () => { await loadScope(); refresh(); };
+$("saveMyBtn").onclick = saveMy;
+$("myName").onkeydown = e => { if (e.key === "Enter") saveMy(); };
+$("scopeClearBtn").onclick = () => {
+  SCOPE.list = []; SCOPE.dirty = true;
+  renderScopeList(); syncScopeBrief();
+};
+$("scopeSearch").oninput = renderScopeList;
+document.querySelectorAll("input[name=scopeMode]").forEach(r => {
+  r.onchange = () => { SCOPE.mode = r.value; SCOPE.dirty = true; syncScopeBrief(); };
+});
 $("vpnBtn").onclick = async () => {
   const st = await api("/api/status");
   await api("/api/vpn", { enable: !st.vpn_active });
@@ -335,7 +614,16 @@ $("lanBtn").onclick = async () => {
 (async function init(){
   buildSliders();
   initFold();                     // 自定义参数默认折叠，点标题展开
+  initScopeFold();                // 接管范围同样默认折叠
   buildPresets(await api("/api/presets"));
+  // 自定义栏：保存过的场景。老引擎没有 /api/upresets 时 loadMy 会自行隐藏该栏
+  await loadMy();
+  // 老版本引擎没有 /api/targets（尚未支持接管范围）：直接隐藏该卡片，避免留一张空卡误导
+  try { await api("/api/targets"); }
+  catch (e) {
+    const card = $("scopeToggle") && $("scopeToggle").closest(".card");
+    if (card) card.style.display = "none";
+  }
   refresh();
   setInterval(refresh, 1000);
   window.addEventListener("resize", drawChart);

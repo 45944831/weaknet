@@ -31,6 +31,7 @@ public class CtrlServer implements Runnable {
         this.proxy = proxy;
         this.dashFile = dashFile;
         this.ctx = ctx;
+        MyPresets.bind(ctx);        // 自定义场景要落 SharedPreferences，先把上下文备好
     }
 
     public void run() {
@@ -139,6 +140,141 @@ public class CtrlServer implements Runnable {
                 respond(200, JSON_CT, a.toString().getBytes("UTF-8"));
                 return;
             }
+            // ---- 自定义栏：用户命名保存的参数（与桌面版接口一致）----
+            if ("/api/upresets".equals(path)) {
+                respond(200, JSON_CT, MyPresets.listJson().toString().getBytes("UTF-8"));
+                return;
+            }
+            if (method.equals("POST") && "/api/upreset".equals(path)) {
+                try {
+                    JSONObject d = new JSONObject(body);
+                    MyPresets.Item it = MyPresets.save(d.optString("id", ""),
+                            d.optString("name", ""), d.optJSONObject("profile"));
+                    WeakNet.I.log("config", "保存自定义场景：" + it.name);
+                    JSONObject o = new JSONObject();
+                    o.put("ok", true);
+                    o.put("id", it.id);
+                    o.put("name", it.name);
+                    o.put("items", MyPresets.toJsonArray());
+                    respond(200, JSON_CT, o.toString().getBytes("UTF-8"));
+                } catch (Exception e) {
+                    respond(400, JSON_CT, "{\"error\":\"bad request\"}".getBytes("UTF-8"));
+                }
+                return;
+            }
+            if (method.equals("POST") && "/api/upreset/del".equals(path)) {
+                String id = null;
+                try {
+                    id = new JSONObject(body).optString("id", "");
+                } catch (Exception e) {
+                    id = null;
+                }
+                if (id == null || id.length() == 0) {
+                    respond(400, JSON_CT, "{\"error\":\"bad request\"}".getBytes("UTF-8"));
+                    return;
+                }
+                MyPresets.Item hit = MyPresets.find(id);
+                boolean ok = MyPresets.delete(id);
+                if (ok) WeakNet.I.log("config", "删除自定义场景：" + (hit != null ? hit.name : id));
+                JSONObject o = new JSONObject();
+                try {
+                    o.put("ok", ok);
+                    o.put("items", MyPresets.toJsonArray());
+                } catch (Exception e) {
+                    // ignore
+                }
+                respond(200, JSON_CT, o.toString().getBytes("UTF-8"));
+                return;
+            }
+            if ("/api/targets".equals(path)) {
+                // 可接管的目标 = 已安装的、有启动入口的应用（过滤掉纯后台服务，便于用户辨认）
+                JSONObject o = new JSONObject();
+                o.put("type", "package");
+                o.put("unit", "应用");
+                JSONArray a = new JSONArray();
+                try {
+                    android.content.pm.PackageManager pm = ctx.getPackageManager();
+                    java.util.List<JSONObject> rows = new java.util.ArrayList<JSONObject>();
+                    // 首选：查「启动器」intent —— 与 Manifest 里 <queries> 声明的是同一个，
+                    // 也是官方推荐的写法（只看有启动入口的应用，过滤掉纯后台服务）。
+                    android.content.Intent main = new android.content.Intent(
+                            android.content.Intent.ACTION_MAIN);
+                    main.addCategory(android.content.Intent.CATEGORY_LAUNCHER);
+                    java.util.List<android.content.pm.ResolveInfo> ris =
+                            pm.queryIntentActivities(main, 0);
+                    for (android.content.pm.ResolveInfo ri : ris) {
+                        String pkg = ri.activityInfo.packageName;
+                        if (ctx.getPackageName().equals(pkg)) continue;
+                        JSONObject it = new JSONObject();
+                        it.put("id", pkg);
+                        it.put("name", ri.loadLabel(pm).toString());
+                        it.put("desc", pkg);
+                        rows.add(it);
+                    }
+                    // 兜底：上面查不到说明被包可见性挡住了，退回枚举已安装应用，
+                    // 宁可多列几个后台服务，也不能给用户一张空列表（选不出 App = 功能不可用）。
+                    if (rows.isEmpty()) {
+                        for (android.content.pm.ApplicationInfo ai
+                                : pm.getInstalledApplications(0)) {
+                            if (ctx.getPackageName().equals(ai.packageName)) continue;
+                            JSONObject it = new JSONObject();
+                            it.put("id", ai.packageName);
+                            it.put("name", pm.getApplicationLabel(ai).toString());
+                            it.put("desc", ai.packageName);
+                            rows.add(it);
+                        }
+                    }
+                    WeakNet.I.log("config", "应用列表：启动器 " + ris.size()
+                            + " 项，最终 " + rows.size() + " 个");
+                    // 按显示名排序，方便查找
+                    java.util.Collections.sort(rows, new java.util.Comparator<JSONObject>() {
+                        public int compare(JSONObject x, JSONObject y) {
+                            return x.optString("name").compareToIgnoreCase(y.optString("name"));
+                        }
+                    });
+                    for (JSONObject it : rows) a.put(it);
+                } catch (Exception e) {
+                    WeakNet.I.log("error", "读取应用列表失败：" + e.getMessage());
+                }
+                o.put("items", a);
+                respond(200, JSON_CT, o.toString().getBytes("UTF-8"));
+                return;
+            }
+            if ("/api/scope".equals(path)) {
+                if (method.equals("POST") && body != null && body.length() > 0) {
+                    try {
+                        JSONObject d = new JSONObject(body);
+                        JSONArray arr = d.optJSONArray("list");
+                        java.util.List<String> pkgs = new java.util.ArrayList<String>();
+                        if (arr != null) {
+                            for (int i = 0; i < arr.length(); i++) pkgs.add(arr.optString(i, ""));
+                        }
+                        String mode = WeakNet.I.setScope(d.optString("mode", "all"), pkgs);
+                        if ("only".equals(mode)) {
+                            WeakNet.I.log("config", "接管范围：仅 " + (pkgs.isEmpty()
+                                    ? "（空名单=不接管任何 App）" : joinPkgs(pkgs)));
+                        } else if ("exclude".equals(mode)) {
+                            WeakNet.I.log("config", "接管范围：排除 " + (pkgs.isEmpty()
+                                    ? "（空名单=全部接管）" : joinPkgs(pkgs)));
+                        } else {
+                            WeakNet.I.log("config", "接管范围：全部 App");
+                        }
+                        // 范围变了必须重建 tun：VpnService 的应用过滤只在 establish() 时生效
+                        if (VpnNetService.active) rebuildVpn();
+                    } catch (Exception e) {
+                        respond(400, JSON_CT, "{\"error\":\"bad request\"}".getBytes("UTF-8"));
+                        return;
+                    }
+                }
+                JSONObject o = new JSONObject();
+                o.put("mode", WeakNet.I.scopeMode);
+                o.put("supported", true);
+                JSONArray a = new JSONArray();
+                for (String p : new java.util.ArrayList<String>(WeakNet.I.scopePkgs)) a.put(p);
+                o.put("list", a);
+                respond(200, JSON_CT, o.toString().getBytes("UTF-8"));
+                return;
+            }
             if (method.equals("POST") && "/api/preset".equals(path)) {
                 String key = null;
                 try {
@@ -146,11 +282,11 @@ public class CtrlServer implements Runnable {
                 } catch (Exception e) {
                     // ignore
                 }
-                if (!isValidPreset(key)) {
+                Profile p = buildKeyProfile(key);       // 内置预设 或 自定义场景（u:<id>）
+                if (p == null) {
                     respond(400, JSON_CT, "{\"error\":\"bad request\"}".getBytes("UTF-8"));
                     return;
                 }
-                Profile p = Profile.build(key);
                 WeakNet.I.setProfile(p, key);
                 WeakNet.I.log("config", "切换场景：" + p.name);
                 respond(200, JSON_CT, "{\"ok\":true}".getBytes("UTF-8"));
@@ -222,12 +358,61 @@ public class CtrlServer implements Runnable {
             respond(404, "text/plain; charset=utf-8", "not found".getBytes("UTF-8"));
         }
 
+        /**
+         * key → Profile。内置预设走 Profile.build；用户自定义场景是 "u:<id>"，
+         * 取出来后必须再拷贝一份 —— 直接复用保存的实例，应用时的原地改动会串到存档上。
+         */
+        private Profile buildKeyProfile(String key) {
+            if (key == null) return null;
+            if (key.startsWith("u:")) {
+                MyPresets.Item it = MyPresets.find(key.substring(2));
+                return it == null ? null : it.profile.copy();
+            }
+            if (!isValidPreset(key)) return null;
+            return Profile.build(key);
+        }
+
         private boolean isValidPreset(String key) {
             if (key == null) return false;
             for (String k : Profile.KEYS) {
                 if (k.equals(key)) return true;
             }
             return false;
+        }
+
+        /**
+         * 重建 VPN 通道。VpnService 的「哪些 App 走 tun」只在 establish() 时生效，
+         * 因此改了接管范围后必须停掉再重建，否则新设置对当前连接无效。
+         * 用 ACTION_START 重启：它会清除 userStopped，避免被上一轮的「不复活」逻辑挡住。
+         */
+        private void rebuildVpn() {
+            VpnNetService.stop(ctx);
+            new android.os.Handler(ctx.getMainLooper()).postDelayed(new Runnable() {
+                public void run() {
+                    try {
+                        android.content.Intent i =
+                                new android.content.Intent(ctx, VpnNetService.class);
+                        i.setAction(VpnNetService.ACTION_START);
+                        if (android.os.Build.VERSION.SDK_INT >= 26) ctx.startForegroundService(i);
+                        else ctx.startService(i);
+                    } catch (Exception e) {
+                        WeakNet.I.log("error", "重建 VPN 失败：" + e.getMessage());
+                    }
+                }
+            }, 700);      // 等上一个 tun 完全释放再建，避免端口/路由冲突
+        }
+
+        // 注：这是 CtrlServer 的内部类，Java 8 不允许内部类有 static 方法，故用实例方法
+        private String joinPkgs(java.util.Collection<String> pkgs) {
+            StringBuilder sb = new StringBuilder();
+            int n = 0;
+            for (String p : pkgs) {
+                if (n > 0) sb.append(", ");
+                if (n >= 4) { sb.append("…"); break; }
+                sb.append(p);
+                n++;
+            }
+            return sb.toString();
         }
 
         private JSONObject statusJson() throws Exception {
@@ -241,6 +426,14 @@ public class CtrlServer implements Runnable {
             o.put("listen", listen);
             o.put("lan_ip", WeakNet.I.lanIp());
             o.put("vpn_active", VpnNetService.active);
+            // 接管范围（与 Windows 端同构，两端共用同一份控制台页面）
+            JSONObject sc = new JSONObject();
+            sc.put("mode", WeakNet.I.scopeMode);
+            sc.put("supported", true);
+            JSONArray sl = new JSONArray();
+            for (String p : new java.util.ArrayList<String>(WeakNet.I.scopePkgs)) sl.put(p);
+            sc.put("list", sl);
+            o.put("scope", sc);
             JSONObject st = new JSONObject();
             st.put("total", WeakNet.I.connTotal.get());
             st.put("active", WeakNet.I.connActive.get());

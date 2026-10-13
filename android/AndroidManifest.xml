@@ -9,6 +9,18 @@
     <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+    <!-- Android 11(API 30) 起有「包可见性」限制：不加声明时 getInstalledApplications()
+         只能看到自己，应用列表会是空的，用户就没法选择要接管哪个 App。
+         QUERY_ALL_PACKAGES 放开全部查询；<queries> 是官方推荐的更精确写法（只看有启动入口的），
+         两者都写是为了兼容不同版本的 aapt2/系统解析。 -->
+    <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES" />
+
+    <queries>
+        <intent>
+            <action android:name="android.intent.action.MAIN" />
+            <category android:name="android.intent.category.LAUNCHER" />
+        </intent>
+    </queries>
 
     <application
         android:allowBackup="true"

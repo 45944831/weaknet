@@ -99,23 +99,46 @@ public class Profile {
         return p;
     }
 
-    /** 从自定义参数 JSON 构建（字段缺失则保持默认） */
+    /** 从自定义参数 JSON 构建（字段缺失则保持默认，越界值夹到合理区间） */
     public static Profile custom(JSONObject o) {
         Profile p = new Profile();
         p.name = "自定义";
-        p.latencyUpMs = o.optInt("latency_up_ms", 0);
-        p.latencyDownMs = o.optInt("latency_down_ms", 0);
-        p.jitterMs = o.optInt("jitter_ms", 0);
-        p.downKbps = o.optInt("down_kbps", 0);
-        p.upKbps = o.optInt("up_kbps", 0);
-        p.stallMs = o.optInt("stall_ms", 600);
-        p.flapSec = o.optInt("flap_sec", 0);
-        p.flapBlackoutSec = o.optInt("flap_blackout_sec", 2);
-        p.lossPct = o.optDouble("loss_pct", 0);
-        p.disconnectPct = o.optDouble("disconnect_pct", 0);
-        p.timeoutPct = o.optDouble("timeout_pct", 0);
-        p.dnsFailPct = o.optDouble("dns_fail_pct", 0);
-        p.rejectPct = o.optDouble("reject_pct", 0);
+        p.latencyUpMs = num(o.optInt("latency_up_ms", 0), 10000);
+        p.latencyDownMs = num(o.optInt("latency_down_ms", 0), 10000);
+        p.jitterMs = num(o.optInt("jitter_ms", 0), 5000);
+        p.downKbps = num(o.optInt("down_kbps", 0), 1000000);
+        p.upKbps = num(o.optInt("up_kbps", 0), 1000000);
+        p.stallMs = num(o.optInt("stall_ms", 600), 60000);
+        p.flapSec = num(o.optInt("flap_sec", 0), 3600);
+        p.flapBlackoutSec = num(o.optInt("flap_blackout_sec", 2), 600);
+        p.lossPct = pct(o.optDouble("loss_pct", 0));
+        p.disconnectPct = pct(o.optDouble("disconnect_pct", 0));
+        p.timeoutPct = pct(o.optDouble("timeout_pct", 0));
+        p.dnsFailPct = pct(o.optDouble("dns_fail_pct", 0));
+        p.rejectPct = pct(o.optDouble("reject_pct", 0));
+        return p;
+    }
+
+    /**
+     * 百分比字段夹到 0~100。999% 丢包实际就是「全丢」，和直连故障看不出区别，
+     * 用户填的时候多半是想写 99% 或漏看了输入框上限。
+     */
+    private static double pct(double v) {
+        if (v != v) return 0;                 // NaN
+        return v < 0 ? 0 : (v > 100 ? 100 : v);
+    }
+
+    private static int num(int v, int max) {
+        return v < 0 ? 0 : (v > max ? max : v);
+    }
+
+    /**
+     * 深拷贝。自定义场景每次应用都要给出独立实例：
+     * 直接复用存下来的那份，后续任何原地修改都会连带改掉「已保存的参数」。
+     */
+    public Profile copy() {
+        Profile p = Profile.custom(this.toJson());
+        p.name = name;
         return p;
     }
 

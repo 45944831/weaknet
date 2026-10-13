@@ -130,6 +130,213 @@ DASH_FILE = resource_path("dashboard.html")
 # 网络参数模型
 # --------------------------------------------------------------------------
 
+# --------------------------------------------------------------------------
+# 进程识别：让「接管范围」精确到单个程序（仅 Windows）
+#
+# 背景：Windows 的系统代理是进程无关的 —— 一旦写入注册表，所有遵循代理的程序
+# 都会被接管，没有办法只对某个 exe 生效。因此「只接管指定程序」只能在代理层实现：
+#   accept 拿到对端端口 -> 查 TCP 连接表得 PID -> 查进程快照得 exe 名 -> 决定是否注入弱网。
+# 未命中的程序走「直通」（原样转发，不受任何弱网影响），效果等同没被接管。
+#
+# 只用 ctypes 调系统 API，不引入任何第三方依赖（PyInstaller 打包后同样可用）。
+# --------------------------------------------------------------------------
+
+IS_WIN = (os.name == "nt")
+
+_PROC_NAME_CACHE = {"at": 0.0, "map": {}}    # pid -> exe 名，带 TTL，避免每次新连接都做进程快照
+_PROC_CACHE_TTL = 5.0                        # 定期刷新间隔
+_PROC_MISS_GAP = 0.25                        # 因「查不到」触发的刷新最小间隔（防抖）
+_TCP_LOOKUP_RETRIES = 4                      # 连接表里查不到这行时最多重试几次
+_TCP_LOOKUP_GAP = 0.015                      # 每次重试的间隔（总计最多约 45ms）
+
+if IS_WIN:
+    import ctypes
+    import ctypes.wintypes as wt
+    import struct
+
+    _AF_INET = 2
+    _TCP_TABLE_OWNER_PID_ALL = 5
+    _ERR_INSUFFICIENT_BUFFER = 122
+    _TH32CS_SNAPPROCESS = 0x2
+    _MAX_PATH = 260
+
+    _iphlpapi = ctypes.WinDLL("iphlpapi", use_last_error=True)
+    _kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+
+    _PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+    # 句柄在 64 位上是 8 字节，不显式声明 restype 会被 ctypes 截成 32 位 int，
+    # 高 32 位丢失后 CloseHandle/QueryFullProcessImageName 会失败（表现为「查不到进程名」）。
+    _kernel32.OpenProcess.restype = wt.HANDLE
+    _kernel32.OpenProcess.argtypes = [wt.DWORD, wt.BOOL, wt.DWORD]
+    _kernel32.QueryFullProcessImageNameW.restype = wt.BOOL
+    _kernel32.QueryFullProcessImageNameW.argtypes = [
+        wt.HANDLE, wt.DWORD, wt.LPWSTR, ctypes.POINTER(wt.DWORD)]
+    _kernel32.CloseHandle.restype = wt.BOOL
+    _kernel32.CloseHandle.argtypes = [wt.HANDLE]
+
+    class _MIB_TCPROW_OWNER_PID(ctypes.Structure):
+        _fields_ = [("dwState", wt.DWORD), ("dwLocalAddr", wt.DWORD),
+                    ("dwLocalPort", wt.DWORD), ("dwRemoteAddr", wt.DWORD),
+                    ("dwRemotePort", wt.DWORD), ("dwOwningPid", wt.DWORD)]
+
+    class _PROCESSENTRY32W(ctypes.Structure):
+        _fields_ = [("dwSize", wt.DWORD), ("cntUsage", wt.DWORD),
+                    ("th32ProcessID", wt.DWORD),
+                    ("th32DefaultHeapID", ctypes.POINTER(ctypes.c_ulong)),
+                    ("th32ModuleID", wt.DWORD), ("cntThreads", wt.DWORD),
+                    ("th32ParentProcessID", wt.DWORD), ("pcPriClassBase", ctypes.c_long),
+                    ("dwFlags", wt.DWORD), ("szExeFile", wt.WCHAR * _MAX_PATH)]
+
+    def _tcp_rows():
+        """返回 [(local_ip, local_port, remote_ip, remote_port, pid), ...]"""
+        size = wt.DWORD(0)
+        # 注意：GetExtendedTcpTable 返回的是 DWORD 错误码而非 BOOL。
+        # 首次传空缓冲会得到 122(ERROR_INSUFFICIENT_BUFFER) 并把所需大小写进 size，属预期行为。
+        rc = _iphlpapi.GetExtendedTcpTable(None, ctypes.byref(size), True,
+                                           _AF_INET, _TCP_TABLE_OWNER_PID_ALL, 0)
+        if rc != 0 and rc != _ERR_INSUFFICIENT_BUFFER:
+            return []
+        buf = ctypes.create_string_buffer(size.value)
+        rc = _iphlpapi.GetExtendedTcpTable(buf, ctypes.byref(size), True,
+                                           _AF_INET, _TCP_TABLE_OWNER_PID_ALL, 0)
+        if rc != 0:
+            return []
+        n = struct.unpack_from("<I", buf, 0)[0]
+        rows = (_MIB_TCPROW_OWNER_PID * n).from_buffer_copy(buf, 4)
+        out = []
+        for r in rows:
+            # 端口在结构体里是网络字节序，必须 ntohs 转回主机序
+            out.append((socket.inet_ntoa(struct.pack("<I", r.dwLocalAddr)),
+                        socket.ntohs(r.dwLocalPort & 0xFFFF),
+                        socket.inet_ntoa(struct.pack("<I", r.dwRemoteAddr)),
+                        socket.ntohs(r.dwRemotePort & 0xFFFF),
+                        r.dwOwningPid))
+        return out
+
+    def _snapshot_proc_names():
+        """进程快照 {pid: exe 名}。约 10ms，因此带缓存，不要每条连接都调。"""
+        snap = _kernel32.CreateToolhelp32Snapshot(_TH32CS_SNAPPROCESS, 0)
+        if snap == -1:
+            return {}
+        try:
+            pe = _PROCESSENTRY32W()
+            pe.dwSize = ctypes.sizeof(pe)
+            m = {}
+            ok = _kernel32.Process32FirstW(snap, ctypes.byref(pe))
+            while ok:
+                m[pe.th32ProcessID] = pe.szExeFile
+                ok = _kernel32.Process32NextW(snap, ctypes.byref(pe))
+            return m
+        finally:
+            _kernel32.CloseHandle(snap)
+
+
+def _pid_exe_name(pid):
+    """只查一个 PID 的 exe 名（OpenProcess + QueryFullProcessImageNameW）。
+
+    比全量快照便宜得多（不需要遍历进程表），所以可以每次 miss 都调、不必限频。
+    这正是修下面那个 bug 的关键：两个新程序前后脚发起连接时，
+    第一个触发了全量快照刷新，第二个若只能等限频窗口过去才会被认出来，
+    于是它就被当成「未识别」放行了 —— 用户看到的现象就是
+    「明明加进了接管名单，偏偏这一次没生效」。
+    """
+    try:
+        h = _kernel32.OpenProcess(_PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+    except Exception:
+        return None
+    if not h:
+        return None
+    try:
+        buf = ctypes.create_unicode_buffer(_MAX_PATH)
+        size = wt.DWORD(_MAX_PATH)
+        if _kernel32.QueryFullProcessImageNameW(h, 0, buf, ctypes.byref(size)):
+            return (buf.value or "").rsplit("\\", 1)[-1]
+    except Exception:
+        return None
+    finally:
+        try:
+            _kernel32.CloseHandle(h)
+        except Exception:
+            pass
+    return None
+
+
+def _lookup_proc_name(pid):
+    """pid -> exe 名。缓存未命中时先单点查这个 PID，查不到再按限频刷全量快照。
+
+    为什么必须「miss 就查」：进程快照是定时缓存的，而用户往往是
+    「先开 WeakNet、再启动要测试的 App」—— 那个 App 是快照之后才出现的新 PID，
+    只靠 TTL 定期刷新的话，它在接下来几秒内都会被判成「未识别」，
+    表现就是名单外的程序照样被限速 / 名单内的却没被接管。
+    全量快照仍需限频（_PROC_MISS_GAP），它约 10ms，不能每条连接都做。
+    """
+    c = _PROC_NAME_CACHE
+    now = time.monotonic()
+    name = c["map"].get(pid)
+    if name is None:
+        name = _pid_exe_name(pid)        # 单点查：廉价，不限频
+        if name:
+            c["map"][pid] = name
+            return name
+    if name is None and (now - c["at"]) >= _PROC_MISS_GAP:
+        c["map"] = _snapshot_proc_names()
+        c["at"] = now
+        name = c["map"].get(pid)
+    elif (now - c["at"]) > _PROC_CACHE_TTL:
+        c["map"] = _snapshot_proc_names()
+        c["at"] = now
+        name = c["map"].get(pid) or name
+    return name
+
+
+def proc_name_of_peer(peer_port, local_port):
+    """反查：连到本代理 local_port 的、来自 peer_port 的连接属于哪个进程。
+    返回 exe 名（小写）；查不到或非 Windows 返回 None。
+
+    为什么要重试：连接刚被 accept 的瞬间，Windows 的 TCP 连接表偶尔还没登记这一行，
+    查不到就会把该连接当「未识别」放行（名单内的程序反而没被接管）。
+    只在「表里压根找不到这行」时重试，找到行就立即返回，正常路径不增加任何延迟。
+    """
+    if not IS_WIN:
+        return None
+    for attempt in range(_TCP_LOOKUP_RETRIES):
+        try:
+            for la, lp, _ra, rp, pid in _tcp_rows():
+                if lp == peer_port and rp == local_port:
+                    name = _lookup_proc_name(pid)
+                    return name.lower() if name else None
+        except Exception:
+            return None
+        if attempt + 1 < _TCP_LOOKUP_RETRIES:
+            time.sleep(_TCP_LOOKUP_GAP)
+    return None
+
+
+def list_procs():
+    """列出候选进程名（供界面勾选）：当前有 TCP 连接的进程 + 常见浏览器/应用。
+    非 Windows 返回空列表（此时只能「接管全部」）。"""
+    if not IS_WIN:
+        return []
+    try:
+        names = set(_snapshot_proc_names().values())
+        rows = _tcp_rows()
+        pid2n = {r[4]: _PROC_NAME_CACHE["map"].get(r[4]) for r in rows}
+        live = {n.lower() for n in pid2n.values() if n and n.lower() != "system"}
+        live.discard("")
+        common = ["chrome.exe", "msedge.exe", "firefox.exe", "wechat.exe",
+                  "weixin.exe", "qq.exe", "postman.exe", "fiddler.exe",
+                  "python.exe", "node.exe", "code.exe"]
+        out = sorted(live | set(common))
+        return out
+    except Exception:
+        return []
+
+
+# 未命中「接管范围」的程序走直通：原样转发，不注入任何弱网参数。
+# 用一个固定的全零 profile，且不随 G.profile 变化（否则切换场景会误伤不该接管的程序）。
+BYPASS_PROFILE = None   # 延迟到 default_profile 定义后初始化
+
+
 def default_profile(name="直连（不限制）"):
     return {
         "name": name,
@@ -198,10 +405,193 @@ PRESETS = {
 
 
 def build_preset_profile(key):
+    # "u:<id>" = 用户自定义场景（自定义栏），其余为内置预设
+    if isinstance(key, str) and key.startswith("u:"):
+        return build_user_profile(key)
     name, _cat, extra = PRESETS[key]
     prof = default_profile(name)
     prof.update(extra)
     return prof
+
+
+# --------------------------------------------------------------------------
+# 用户自定义场景（自定义栏）
+#
+# 用户把自己调好的一组参数命名保存后，会像内置预设一样出现在界面上，
+# 点一下即可切换；不需要了可以直接删除。参数存 JSON：
+#   源码运行 → 脚本目录；EXE 运行 → EXE 同目录（便于备份与随包携带）；
+#   目录不可写（例如装在 Program Files）→ 自动退回 ~/.weaknet/。
+# --------------------------------------------------------------------------
+
+_PRESET_FILES = None
+USER_PRESET_KEY_PREFIX = "u:"
+
+
+def _preset_files():
+    """候选存储位置，按优先级排列"""
+    global _PRESET_FILES
+    if _PRESET_FILES is None:
+        cands = []
+        try:
+            cands.append(_app_dir() / "weaknet_presets.json")
+        except Exception:
+            pass
+        try:
+            cands.append(Path(os.path.expanduser("~")) / ".weaknet" / "weaknet_presets.json")
+        except Exception:
+            pass
+        _PRESET_FILES = cands or [Path("weaknet_presets.json")]
+    return _PRESET_FILES
+
+
+def _new_pid(used):
+    """生成一个未占用的短 id"""
+    while True:
+        pid = "%08x" % random.getrandbits(32)
+        if pid not in used:
+            return pid
+
+
+# 自定义参数每个字段的上限。百分比类最多 100，时间/带宽类留足余量但别到荒谬的量级
+PROF_LIMITS = {
+    "latency_up_ms": 10000, "latency_down_ms": 10000, "jitter_ms": 5000,
+    "down_kbps": 1000000, "up_kbps": 1000000,
+    "loss_pct": 100, "disconnect_pct": 100, "timeout_pct": 100,
+    "dns_fail_pct": 100, "reject_pct": 100,
+    "stall_ms": 60000, "flap_sec": 3600, "flap_blackout_sec": 600,
+}
+
+
+def _norm_user_profile(name, prof):
+    """把外部传入的参数收敛成完整 profile：只接受已知数值字段，并夹到合理区间。
+
+    光做「负值归零」是不够的 —— 丢包率 999、下单比延迟 99999 这类值虽然「非负」，
+    落到引擎里会变成「每个包都丢 / 睡死几十秒」，看起来和真断网没区别，
+    用户却以为自己保存的是 30% 丢包。这里统一夹一次。
+    """
+    p = default_profile(name)
+    for k, v in (prof or {}).items():
+        if k in p and k != "name" and isinstance(v, (int, float)) and not isinstance(v, bool):
+            p[k] = min(max(0, v), PROF_LIMITS.get(k, v))
+    return p
+
+
+def load_user_presets():
+    """读取磁盘上的自定义场景 → [{"id","name","profile"}]。文件不存在/损坏返回 []"""
+    for f in _preset_files():
+        try:
+            if not f.exists():
+                continue
+            data = json.loads(f.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        raw = data.get("items") if isinstance(data, dict) else data
+        out = []
+        for it in (raw or []):
+            try:
+                name = str(it.get("name", "")).strip()
+                if not name:
+                    continue
+                out.append({"id": str(it.get("id") or ""),
+                            "name": name[:40],
+                            "profile": _norm_user_profile(name, it.get("profile"))})
+            except Exception:
+                continue
+        # 历史脏数据可能缺 id，补上再回写一次
+        ids = {x["id"] for x in out if x["id"]}
+        for x in out:
+            if not x["id"]:
+                x["id"] = _new_pid(ids)
+                ids.add(x["id"])
+        return out
+    return []
+
+
+def _items_payload(items):
+    return [{"id": it["id"], "name": it["name"], "profile": it["profile"]} for it in items]
+
+
+def _dump_user_presets(items):
+    """写回磁盘（挑第一个可写的位置）。失败返回 False"""
+    payload = json.dumps({"version": 1, "items": _items_payload(items)},
+                         ensure_ascii=False, indent=2).encode("utf-8")
+    for f in _preset_files():
+        try:
+            if f.parent and not f.parent.exists():
+                f.parent.mkdir(parents=True, exist_ok=True)
+            f.write_bytes(payload)
+            return True
+        except Exception:
+            continue
+    return False
+
+
+def get_user_presets():
+    """内存缓存的自定义场景列表（首次调用时从磁盘加载）"""
+    if G.user_presets is None:
+        G.user_presets = load_user_presets()
+    return G.user_presets
+
+
+def find_user_preset(pid):
+    pid = str(pid)
+    for it in get_user_presets():
+        if it["id"] == pid:
+            return it
+    return None
+
+
+def build_user_profile(key):
+    """key（'u:<id>' 或裸 id）→ 完整 profile"""
+    it = find_user_preset(key[2:] if str(key).startswith(USER_PRESET_KEY_PREFIX) else key)
+    if it is None:
+        raise KeyError(key)
+    prof = default_profile(it["name"])
+    prof.update(it["profile"])
+    prof["name"] = it["name"]
+    return prof
+
+
+def _unique_name(items, name, self_id=None):
+    """同名自动加序号，避免列表里出现两个一样名字分不清"""
+    others = {it["name"] for it in items if it["id"] != self_id}
+    if name not in others:
+        return name
+    for i in range(2, 100):
+        cand = f"{name} ({i})"
+        if cand not in others:
+            return cand
+    return f"{name} {int(time.time())}"
+
+
+def upsert_user_preset(name, prof, pid=None):
+    """新增或覆盖一条自定义场景，返回 (item, items)"""
+    items = get_user_presets()
+    name = str(name or "").strip()[:40] or "自定义"
+    item = find_user_preset(pid) if pid else None
+    if item is None:
+        item = {"id": _new_pid({it["id"] for it in items}), "name": "", "profile": None}
+        items.append(item)
+    item["name"] = _unique_name(items, name, item["id"])
+    item["profile"] = _norm_user_profile(item["name"], prof)
+    ok = _dump_user_presets(items)
+    if not ok:
+        log("保存自定义场景失败（存储位置均不可写）")
+    return item, items
+
+
+def delete_user_preset(pid):
+    """删除一条自定义场景，返回 (是否删掉, 剩余列表)"""
+    items = get_user_presets()
+    pid = str(pid)
+    left = [it for it in items if it["id"] != pid]
+    if len(left) == len(items):
+        return False, items
+    G.user_presets = left
+    ok = _dump_user_presets(left)
+    if not ok:
+        log("删除自定义场景后写盘失败（改动仅存在于本次运行）")
+    return True, left
 
 
 # --------------------------------------------------------------------------
@@ -226,6 +616,43 @@ class G:
     started_at = time.time()
     gen = 0                     # 参数代数：每次切换场景 +1，用于唤醒在途连接
     wake = None                 # asyncio.Event：参数切换时唤醒挂起（黑洞/卡顿）的连接
+    # 接管范围：all=全部程序 / only=仅下列程序 / exclude=排除下列程序
+    scope_mode = "all"
+    scope_list = []             # exe 名（小写）列表
+    scope_seen = {}             # 观测到的进程名 -> 次数（便于用户选择要接管谁）
+    bytes_bypass = 0            # 未接管程序的直通流量（不计入弱网统计）
+    user_presets = None         # 自定义栏（用户保存的场景），None = 尚未从磁盘加载
+
+
+BYPASS_PROFILE = default_profile("（未接管 · 直通）")
+
+
+def scope_hit(pname):
+    """判断某个进程是否在接管范围内。
+    pname 为 None（反查不到进程名）时的策略：
+      - only 模式：不接管（用户明确指定了名单，查不到就不该算进去）
+      - exclude 模式：接管（只排除明确列出的，查不到的一律照常接管）"""
+    mode = G.scope_mode
+    if mode == "all":
+        return True
+    if pname is None:
+        return mode == "exclude"
+    in_list = pname in G.scope_list
+    return in_list if mode == "only" else (not in_list)
+
+
+def set_scope(mode, names):
+    """更新接管范围。返回规范化后的 (mode, list)。"""
+    if mode not in ("all", "only", "exclude"):
+        mode = "all"
+    lst = []
+    for n in (names or []):
+        n = str(n).strip().lower()
+        if n and n not in lst:
+            lst.append(n)
+    G.scope_mode = mode
+    G.scope_list = lst
+    return G.scope_mode, G.scope_list
 
 
 def log_event(etype, msg):
@@ -422,6 +849,8 @@ class ConnCtx:
     def __init__(self, label="?"):
         self.label = label
         self.writers = []
+        self.fixed = False     # True = 直通连接：参数固定，不随场景切换变化
+        self.prof = None       # fixed 时使用的固定 profile（BYPASS_PROFILE）
 
     def register(self, w):
         self.writers.append(w)
@@ -465,11 +894,15 @@ async def pipe(reader, writer, bucket, prof, direction, ctx):
         if not data:
             return
         n = len(data)
-        if direction == "up":
+        if ctx.fixed:                          # 直通流量不计入弱网统计
+            G.bytes_bypass += n
+        elif direction == "up":
             G.bytes_up += n
         else:
             G.bytes_down += n
-        prof = G.profile                       # 实时参数（切场景后立即生效）
+        # 直通连接用固定 profile，其余实时跟随 G.profile（切场景后立即生效）。
+        # 必须用 ctx 而非全局：pipe 是并发的，多条连接同时跑，全局会互相串味。
+        prof = ctx.prof if ctx.fixed else G.profile
         rate_key = "up_kbps" if direction == "up" else "down_kbps"
         bucket.sync(prof.get(rate_key, 0))     # 停止/放宽限速后立即恢复全速
         # 丢包 -> 表现为一段时间的传输停顿（TCP 重传效果）
@@ -517,8 +950,26 @@ async def handle_proxy(reader, writer):
     G.conns_active += 1
     ctx = ConnCtx("?")
     try:
-        # 周期断网黑窗期：直接掐断新连接
-        if not G.gate_open:
+        # ---- 识别来源进程，决定这条连接是否被接管 ----
+        pname = None
+        try:
+            peer = writer.get_extra_info("peername")
+            if peer and len(peer) >= 2:
+                pname = proc_name_of_peer(peer[1], G.proxy_port)
+        except Exception:
+            pname = None
+        if pname:
+            G.scope_seen[pname] = G.scope_seen.get(pname, 0) + 1
+        else:
+            # 反查失败也要记账：否则用户看到「仅接管 A」却仍有流量被放行时无从判断原因
+            G.scope_seen["<未识别>"] = G.scope_seen.get("<未识别>", 0) + 1
+        bypass = not scope_hit(pname)
+        if bypass:
+            ctx.fixed = True
+            ctx.prof = BYPASS_PROFILE
+
+        # 周期断网黑窗期：只掐断被接管的连接（未接管的程序不受影响）
+        if (not G.gate_open) and not bypass:
             log_event("flap", "黑窗期：拒绝新连接")
             abort_writer(writer)
             return
@@ -543,7 +994,10 @@ async def handle_proxy(reader, writer):
                 break
             headers.append(h)
 
-        prof = G.profile
+        # 直通连接用固定全零参数：不注入任何弱网效果，也不随场景切换而变化
+        prof = ctx.prof if ctx.fixed else G.profile
+        if ctx.fixed:
+            ctx.label = "直通·" + (pname or "未知进程")
 
         # ---- 故障模拟（每连接判定）----
         if prof["reject_pct"] and random.random() * 100 < prof["reject_pct"]:
@@ -588,7 +1042,8 @@ async def handle_proxy(reader, writer):
                 return
             ctx.register(writer)
             ctx.register(s_writer)
-            log_event("connect", "建立隧道 " + label)
+            log_event("connect", (label + " 直通（未接管）") if ctx.fixed
+                      else ("建立隧道 " + label))
             writer.write(b"HTTP/1.1 200 Connection Established\r\n\r\n")
             await writer.drain()
             await run_tunnel(ctx, reader, s_writer, s_reader, writer, prof)
@@ -718,9 +1173,17 @@ def status_payload():
             "active": G.conns_active,
             "up": G.bytes_up,
             "down": G.bytes_down,
+            "bypass": G.bytes_bypass,
             "uptime": int(time.time() - G.started_at),
         },
         "events": ev,
+        "scope": {
+            "mode": G.scope_mode,
+            "list": G.scope_list,
+            "supported": IS_WIN,          # 非 Windows 无法按进程识别，只能接管全部
+            "seen": sorted(G.scope_seen.keys(),
+                           key=lambda k: -G.scope_seen[k])[:20],
+        },
     }
 
 
@@ -767,6 +1230,40 @@ async def handle_ctrl(reader, writer):
             data = [{"key": k, "name": v[0], "cat": v[1]} for k, v in PRESETS.items()]
             send_response(writer, 200, JSON_CT,
                           json.dumps(data, ensure_ascii=False).encode())
+        elif path == "/api/upresets":
+            # 自定义栏：用户命名保存的参数。老版本客户端没有这个接口也照常工作
+            send_response(writer, 200, JSON_CT, json.dumps(
+                {"items": _items_payload(get_user_presets())},
+                ensure_ascii=False).encode())
+        elif method == "POST" and path == "/api/upreset":
+            # 保存（带 id 则覆盖更新那一条，否则新建）
+            try:
+                data = json.loads(body)
+                prof = data.get("profile")
+            except Exception:
+                data, prof = None, None
+            if not isinstance(data, dict) or not isinstance(prof, dict):
+                send_response(writer, 400, JSON_CT, b'{"error":"bad request"}')
+                return
+            item, _items = upsert_user_preset(data.get("name"), prof, data.get("id"))
+            log_event("config", "保存自定义场景：" + item["name"])
+            send_response(writer, 200, JSON_CT, json.dumps(
+                {"ok": True, "id": item["id"], "name": item["name"],
+                 "items": _items_payload(get_user_presets())},
+                ensure_ascii=False).encode())
+        elif method == "POST" and path == "/api/upreset/del":
+            try:
+                pid = json.loads(body).get("id")
+            except Exception:
+                pid = None
+            if not pid:
+                send_response(writer, 400, JSON_CT, b'{"error":"bad request"}')
+                return
+            ok, left = delete_user_preset(pid)
+            if ok:
+                log_event("config", "删除自定义场景")
+            send_response(writer, 200, JSON_CT, json.dumps(
+                {"ok": ok, "items": _items_payload(left)}, ensure_ascii=False).encode())
         elif method == "POST" and path == "/api/preset":
             key = None
             try:
@@ -778,7 +1275,7 @@ async def handle_ctrl(reader, writer):
                 send_response(writer, 400, JSON_CT, b'{"error":"bad request"}')
             else:
                 await set_profile(prof, key)
-                log_event("config", "切换场景：" + PRESETS[key][0])
+                log_event("config", "切换场景：" + prof["name"])
                 send_response(writer, 200, JSON_CT, b'{"ok":true}')
         elif method == "POST" and path == "/api/profile":
             try:
@@ -812,6 +1309,35 @@ async def handle_ctrl(reader, writer):
                 log_event("config", "一键" + ("接管本机流量（系统代理已开启）" if enable else "解除接管（系统代理已关闭）"))
                 send_response(writer, 200, JSON_CT,
                               ('{"ok":%s}' % ("true" if ok else "false")).encode())
+        elif path == "/api/scope":
+            # 不限方法：GET 取当前设置，POST 更新
+            if method == "POST" and body:
+                try:
+                    data = json.loads(body)
+                    mode, lst = set_scope(data.get("mode"), data.get("list"))
+                    if mode == "all":
+                        log_event("config", "接管范围：全部程序")
+                    elif mode == "only":
+                        log_event("config", "接管范围：仅 " + (", ".join(lst) or "（空名单=不接管任何程序）"))
+                    else:
+                        log_event("config", "接管范围：排除 " + (", ".join(lst) or "（空名单=全部接管）"))
+                except Exception:
+                    send_response(writer, 400, JSON_CT, b'{"error":"bad request"}')
+                    return
+            send_response(writer, 200, JSON_CT, json.dumps({
+                "mode": G.scope_mode, "list": G.scope_list,
+                "supported": IS_WIN,
+            }, ensure_ascii=False).encode())
+        elif path == "/api/targets":
+            # 可接管的目标。Windows 是进程名，Android 是包名 —— 用同一结构便于两端共用控制台。
+            names = set(list_procs()) | set(G.scope_seen.keys()) | set(G.scope_list)
+            names = {n for n in names if n and n.lower() != "system"
+                     and n != "<未识别>"}
+            send_response(writer, 200, JSON_CT, json.dumps({
+                "type": "process",
+                "unit": "程序（exe）",
+                "items": [{"id": n, "name": n, "desc": ""} for n in sorted(names)],
+            }, ensure_ascii=False).encode())
         elif method == "POST" and path == "/api/listen":
             try:
                 host = json.loads(body).get("host")

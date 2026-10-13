@@ -142,11 +142,43 @@ public class VpnNetService extends VpnService {
                 .addDnsServer("114.114.114.114")
                 .setMtu(1500)
                 .setBlocking(true);
-        try {
+        // ---- 按接管范围决定哪些 App 的流量进 tun ----
+        // 注意：addAllowedApplication 与 addDisallowedApplication 互斥，二者只能取其一，
+        // 同一个 Builder 上同时调用会抛异常，所以这里必须走 if/else 而不是都调用。
+        String mode = WeakNet.I.scopeMode;
+        java.util.List<String> pkgs = new java.util.ArrayList<String>(WeakNet.I.scopePkgs);
+        if ("only".equals(mode)) {
+            if (pkgs.isEmpty()) {
+                // 「仅接管」却没选任何 App：不建立 tun，让全部流量走真实网络。
+                // 若照样建 tun，allowed 集合为空等于没有任何 App 能出网，表现是全网断网，
+                // 与用户「没选 = 还没开始接管」的预期相反。
+                WeakNet.I.log("error", "接管范围=仅选定，但未选择任何 App，暂不接管");
+                return;
+            }
+            for (String p : pkgs) {
+                try {
+                    b.addAllowedApplication(p);
+                } catch (Exception e) {
+                    WeakNet.I.log("error", "无法接管 " + p + "：" + e.getMessage());
+                }
+            }
+        } else {
             // 排除自身，保证控制台页面（127.0.0.1:8899）与代理通道不被自己捕获
-            b.addDisallowedApplication(getPackageName());
-        } catch (Exception e) {
-            // ignore
+            try {
+                b.addDisallowedApplication(getPackageName());
+            } catch (Exception e) {
+                // ignore
+            }
+            if ("exclude".equals(mode)) {
+                for (String p : pkgs) {
+                    if (getPackageName().equals(p)) continue;
+                    try {
+                        b.addDisallowedApplication(p);
+                    } catch (Exception e) {
+                        WeakNet.I.log("error", "无法排除 " + p + "：" + e.getMessage());
+                    }
+                }
+            }
         }
         try {
             tun = b.establish();
