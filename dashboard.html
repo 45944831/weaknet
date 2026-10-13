@@ -19,6 +19,9 @@ header{background:#fff;border-bottom:1px solid var(--line);padding:14px 28px;dis
 main{max-width:1080px;margin:20px auto;padding:0 16px 40px;display:grid;gap:16px}
 .card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:18px 20px;box-shadow:0 1px 3px rgba(15,23,42,.04)}
 .card h2{margin:0 0 14px;font-size:15px;display:flex;align-items:center;gap:8px}
+.fold-toggle{cursor:pointer;user-select:none;transition:color .12s}
+.fold-toggle:hover{color:var(--accent)}
+.fold-arrow{display:inline-block;width:12px;color:var(--muted);font-weight:400}
 .stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(128px,1fr));gap:10px}
 .stat{background:#f8fafd;border:1px solid var(--line);border-radius:10px;padding:10px 12px}
 .stat .k{font-size:12px;color:var(--muted)}
@@ -75,10 +78,21 @@ canvas{width:100%;height:130px;display:block}
   </div>
 
   <div class="card">
-    <h2>🎛 自定义参数 <span style="font-size:12px;color:var(--muted);font-weight:400">（带宽 0 = 不限）</span></h2>
-    <div class="sliders" id="sliders"></div>
+    <h2 class="fold-toggle" id="customToggle" title="点击展开 / 收起自定义参数">
+      <span class="fold-arrow" id="foldArrow">▸</span> 🎛 自定义参数
+      <span style="font-size:12px;color:var(--muted);font-weight:400">
+        <span id="foldHint">点击展开</span> · 带宽 0 = 不限
+      </span>
+    </h2>
+    <!-- 默认折叠：预设场景已覆盖绝大多数用例，需要时才展开细调 -->
+    <div id="customBody" style="display:none">
+      <div class="sliders" id="sliders"></div>
+      <div class="btns">
+        <button class="primary" id="applyBtn">应用自定义参数</button>
+        <button class="ghost" id="resetBtn">恢复默认值</button>
+      </div>
+    </div>
     <div class="btns">
-      <button class="primary" id="applyBtn">应用自定义参数</button>
       <button class="ghost" id="stopBtn">停止模拟（恢复直连）</button>
     </div>
   </div>
@@ -267,12 +281,30 @@ async function refresh(){
   } catch (e) {}
 }
 
+/** 自定义参数默认折叠：点标题栏展开/收起 */
+function initFold(){
+  const t = $("customToggle"), b = $("customBody");
+  t.onclick = () => {
+    const open = b.style.display !== "none";
+    b.style.display = open ? "none" : "";
+    $("foldArrow").textContent = open ? "▸" : "▾";
+    $("foldHint").textContent = open ? "点击展开" : "点击收起";
+    if (!open) drawChart();      // 展开后卡片高度变化，顺带重绘图表避免画布拉伸
+  };
+}
+
 $("applyBtn").onclick = async () => {
   const body = {};
   SLIDERS.forEach(([f]) => body[f] = +$("sl_"+f).value);
   await api("/api/profile", body);
   sliderDirty = false;
   refresh();
+};
+// 放弃尚未应用的滑块改动，回到当前生效场景的参数
+$("resetBtn").onclick = async () => {
+  sliderDirty = false;
+  const s = await api("/api/status");
+  syncSliders(s.profile);
 };
 // 注意：必须显式带 body 走 POST —— 不带 body 会以 GET 发出，服务端只认 POST，会返回 404
 $("stopBtn").onclick = async () => {
@@ -302,6 +334,7 @@ $("lanBtn").onclick = async () => {
 
 (async function init(){
   buildSliders();
+  initFold();                     // 自定义参数默认折叠，点标题展开
   buildPresets(await api("/api/presets"));
   refresh();
   setInterval(refresh, 1000);

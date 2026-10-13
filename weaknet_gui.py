@@ -124,6 +124,57 @@ class App:
         inner.pack(fill="both", expand=True, padx=12, pady=10)
         return inner
 
+    def _card_fold(self, parent, title, collapsed=True):
+        """可折叠卡片：点标题栏展开 / 收起，默认收起。返回内容容器（与 _card 一致）。
+
+        注意：tkinter 的事件不会自动冒泡到父控件（bindtags 里没有父 widget），
+        所以 head 和它每个子控件都要各自绑定一次；但也绝不能重复绑定同一控件，
+        否则点一下会触发两次 toggle —— 展开后立刻收起，表现为「点了没反应」。
+        """
+        outer = tk.Frame(parent, bg=BG)
+        outer.pack(fill="x", padx=14, pady=(0, 10))
+
+        head = tk.Frame(outer, bg=BG)
+        head.pack(fill="x")
+        arrow = tk.Label(head, text="▸", font=FONT_B, bg=BG, fg=MUTED)
+        arrow.pack(side="left")
+        tk.Label(head, text=title, font=FONT_B, bg=BG, fg=TEXT).pack(side="left", padx=(4, 0))
+        hint = tk.Label(head, text="（点击展开）", font=FONT, bg=BG, fg=MUTED)
+        hint.pack(side="left", padx=(6, 0))
+
+        card = tk.Frame(outer, bg=CARD, highlightbackground=LINE, highlightthickness=1, bd=0)
+        inner = tk.Frame(card, bg=CARD)
+        inner.pack(fill="both", expand=True, padx=12, pady=10)
+
+        def toggle(_event=None):
+            # 用 winfo_manager() 而不是 winfo_ismapped()：前者只反映「有没有被 pack」，
+            # 不受窗口当前是否可见影响，判断更准确（自检时窗口可能尚未显示）
+            if card.winfo_manager():
+                card.pack_forget()
+                arrow.config(text="▸")
+                hint.config(text="（点击展开）")
+            else:
+                card.pack(fill="x")
+                arrow.config(text="▾")
+                hint.config(text="（点击收起）")
+
+        for w in [head] + list(head.winfo_children()):
+            w.bind("<Button-1>", toggle)
+            try:
+                w.configure(cursor="hand2")
+            except Exception:
+                pass
+        self._last_fold_toggle = toggle
+
+        if collapsed:
+            arrow.config(text="▸")
+            hint.config(text="（点击展开）")
+        else:
+            card.pack(fill="x")
+            arrow.config(text="▾")
+            hint.config(text="（点击收起）")
+        return inner
+
     def _build_header(self):
         top = tk.Frame(self.root, bg=CARD, highlightbackground=LINE, highlightthickness=1)
         top.pack(fill="x", padx=14, pady=(12, 10))
@@ -202,7 +253,14 @@ class App:
             row += 1
 
     def _build_custom(self):
-        box = self._card(self.root, "自定义参数（点「应用」生效，0 表示不限制/关闭）")
+        # 预设场景已覆盖绝大多数用例，自定义参数默认收起，需要细调时点标题展开
+        box = self._card_fold(self.root,
+                              "自定义参数（默认收起 · 点「应用」生效 · 0 表示不限制/关闭）",
+                              collapsed=True)
+        # 记下卡片本体，便于自检与外部展开/收起
+        self.custom_card = self.root.nametowidget(box.winfo_parent())
+        self.custom_toggle = self._last_fold_toggle
+
         grid = tk.Frame(box, bg=CARD)
         grid.pack(fill="x")
         for i, (key, label, unit, top) in enumerate(FIELDS):
