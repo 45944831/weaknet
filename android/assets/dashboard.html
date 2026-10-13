@@ -1,0 +1,312 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>WeakNet · App 弱网测试台</title>
+<style>
+:root{
+  --bg:#f4f6fa; --card:#fff; --line:#e6eaf2; --text:#1f2733; --muted:#7a8699;
+  --accent:#2f6fed; --green:#16a34a; --red:#e5484d; --orange:#f59e0b; --teal:#0d9488;
+}
+*{box-sizing:border-box}
+body{margin:0;font-family:-apple-system,"Segoe UI","Microsoft YaHei",sans-serif;background:var(--bg);color:var(--text)}
+header{background:#fff;border-bottom:1px solid var(--line);padding:14px 28px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px}
+.logo{font-size:20px;font-weight:700}
+.logo span{font-size:13px;color:var(--muted);font-weight:400;margin-left:8px}
+.proxy{display:flex;align-items:center;gap:10px;font-size:13px;color:var(--muted)}
+.proxy code{background:#eef3ff;color:var(--accent);padding:2px 8px;border-radius:6px;font-weight:600}
+main{max-width:1080px;margin:20px auto;padding:0 16px 40px;display:grid;gap:16px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:18px 20px;box-shadow:0 1px 3px rgba(15,23,42,.04)}
+.card h2{margin:0 0 14px;font-size:15px;display:flex;align-items:center;gap:8px}
+.stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(128px,1fr));gap:10px}
+.stat{background:#f8fafd;border:1px solid var(--line);border-radius:10px;padding:10px 12px}
+.stat .k{font-size:12px;color:var(--muted)}
+.stat .v{font-size:17px;font-weight:700;margin-top:3px}
+.group{margin:12px 0 6px;font-size:13px;font-weight:600;color:var(--muted)}
+.group:first-child{margin-top:0}
+.cat-dot{width:8px;height:8px;border-radius:50%;display:inline-block;margin-right:6px}
+.chips{display:flex;flex-wrap:wrap;gap:8px}
+.chip{border:1px solid var(--line);background:#fff;border-radius:999px;padding:7px 14px;font-size:13px;cursor:pointer;transition:.15s;color:var(--text)}
+.chip:hover{border-color:var(--accent);color:var(--accent)}
+.chip.active{background:var(--accent);border-color:var(--accent);color:#fff}
+.sliders{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:14px 22px}
+.sl{display:grid;grid-template-columns:1fr auto;gap:2px 8px;font-size:13px}
+.sl .val{color:var(--accent);font-weight:600}
+.sl input[type=range]{grid-column:1/3;width:100%;accent-color:var(--accent)}
+.btns{margin-top:16px;display:flex;gap:10px;flex-wrap:wrap}
+button.primary{background:var(--accent);color:#fff;border:0;border-radius:8px;padding:9px 22px;font-size:14px;cursor:pointer}
+button.primary:hover{filter:brightness(1.08)}
+button.ghost{background:#fff;border:1px solid var(--line);border-radius:8px;padding:9px 18px;font-size:14px;cursor:pointer;color:var(--text)}
+button.ghost:hover{border-color:var(--accent);color:var(--accent)}
+canvas{width:100%;height:130px;display:block}
+.legend{display:flex;gap:18px;font-size:12px;color:var(--muted);margin-top:6px}
+.legend i{display:inline-block;width:10px;height:3px;border-radius:2px;margin-right:5px;vertical-align:middle}
+#log{max-height:260px;overflow:auto;font-size:13px;display:grid;gap:4px}
+.ev{display:flex;gap:10px;padding:5px 8px;background:#f8fafd;border-radius:6px;align-items:baseline}
+.ev .t{color:var(--muted);min-width:58px;font-variant-numeric:tabular-nums}
+.ev .tag{min-width:44px;font-weight:600}
+.tg-connect{color:var(--green)} .tg-close{color:var(--muted)} .tg-disconnect{color:var(--red)}
+.tg-flap{color:var(--orange)} .tg-dns{color:var(--red)} .tg-timeout{color:#7c3aed}
+.tg-reject{color:var(--red)} .tg-config{color:var(--accent)} .tg-error{color:var(--red)}
+.help ol{margin:6px 0;padding-left:20px;font-size:13px;line-height:2;color:#3b4557}
+.help code{background:#eef3ff;padding:1px 6px;border-radius:4px}
+.badge{padding:2px 10px;border-radius:999px;font-size:12px;font-weight:600;display:inline-block}
+.badge.ok{background:#e8f7ee;color:var(--green)}
+.badge.down{background:#fdecec;color:var(--red)}
+</style>
+</head>
+<body>
+<header>
+  <div class="logo">⚡ WeakNet <span>App 弱网测试工具</span></div>
+  <div class="proxy">
+    代理地址 <code id="proxyAddr">--</code>
+    <button class="ghost" id="lanBtn" style="padding:5px 12px;font-size:12px">开启局域网访问</button>
+    <button class="primary" id="sysBtn" style="padding:5px 14px;font-size:12px;display:none">一键接管本机流量</button>
+    <button class="ghost" id="vpnBtn" style="padding:5px 14px;font-size:12px;display:none">一键接管全部 App 流量</button>
+  </div>
+</header>
+<main>
+  <div class="card"><div class="stats" id="stats"></div></div>
+
+  <div class="card">
+    <h2>🎯 网络场景预设</h2>
+    <div id="presets">加载中…</div>
+  </div>
+
+  <div class="card">
+    <h2>🎛 自定义参数 <span style="font-size:12px;color:var(--muted);font-weight:400">（带宽 0 = 不限）</span></h2>
+    <div class="sliders" id="sliders"></div>
+    <div class="btns">
+      <button class="primary" id="applyBtn">应用自定义参数</button>
+      <button class="ghost" id="stopBtn">停止模拟（恢复直连）</button>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>📈 实时吞吐</h2>
+    <canvas id="chart"></canvas>
+    <div class="legend">
+      <span><i style="background:#2f6fed"></i>下行</span>
+      <span><i style="background:#0d9488"></i>上行</span>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>📝 事件日志</h2>
+    <div id="log"></div>
+  </div>
+
+  <div class="card help">
+    <h2>❓ 使用说明</h2>
+    <ol>
+    <!--HELP_START-->
+      <li><b>电脑端测试：</b>系统设置 → 网络 → 代理，手动配置 <code>127.0.0.1 : 8888</code>；或使用浏览器插件（如 SwitchyOmega）指向该代理。</li>
+      <li><b>手机 App 测试：</b>手机与电脑连同一 Wi-Fi → 点击右上角「开启局域网访问」→ 手机 Wi-Fi 代理设为「手动」，服务器填页面顶部显示的本机局域网 IP，端口 <code>8888</code>（首次开启时 Windows 防火墙弹窗请点允许）。</li>
+      <li><b>HTTPS：</b>通过 CONNECT 隧道自动支持，无需安装证书；工具只模拟网络状况，不解密、不篡改内容。</li>
+      <li><b>生效范围：</b>仅对走 HTTP(S) 代理的流量生效；App 若用 TCP 直连 / 私有协议则不经过代理，需在 App 内配置代理，或配合 VPN 类全局转发工具把流量导进来。</li>
+      <li><b>测完恢复：</b>点击「直连（不限制）」或「停止模拟」即可恢复，或直接关闭本工具。</li>
+    <!--HELP_END-->
+    </ol>
+  </div>
+</main>
+
+<script>
+const $ = id => document.getElementById(id);
+let sliderDirty = false, lastBytes = null;
+const hist = { down: [], up: [] };
+
+const SLIDERS = [
+  ["latency_up_ms",       "上行延迟",       "ms",  0, 2000,  10],
+  ["latency_down_ms",     "下行延迟",       "ms",  0, 2000,  10],
+  ["jitter_ms",           "随机抖动(±)",    "ms",  0,  500,  10],
+  ["down_kbps",           "下行带宽",       "kbps",0, 50000, 100],
+  ["up_kbps",             "上行带宽",       "kbps",0, 50000, 100],
+  ["loss_pct",            "丢包率(卡顿)",   "%",   0,  100,   1],
+  ["stall_ms",            "单次卡顿时长",   "ms",  100,5000, 100],
+  ["disconnect_pct",      "随机断连率",     "%",   0,   50,   1],
+  ["timeout_pct",         "黑洞超时率",     "%",   0,  100,   1],
+  ["dns_fail_pct",        "DNS 失败率",     "%",   0,  100,   1],
+  ["flap_sec",            "周期断网间隔",   "s",   0,  120,   1],
+  ["flap_blackout_sec",   "每次断网时长",   "s",   1,   30,   1],
+];
+
+const CAT_COLOR = { "常规网络": "#2f6fed", "弱网环境": "#f59e0b", "极端环境": "#e5484d" };
+
+function fmtBytes(n){ if(n<1024)return n+" B"; if(n<1048576)return (n/1024).toFixed(1)+" KB"; return (n/1048576).toFixed(2)+" MB"; }
+function fmtBps(n){ if(n<1024)return Math.round(n)+" B/s"; if(n<1048576)return (n/1024).toFixed(1)+" KB/s"; return (n/1048576).toFixed(2)+" MB/s"; }
+function fmtUptime(s){ const h=~~(s/3600),m=~~(s%3600/60),ss=s%60; return (h?h+"h ":"")+(m?m+"m ":"")+ss+"s"; }
+function sliderValText(f,v){
+  if(f.endsWith("_kbps") && +v===0) return "不限";
+  const s = SLIDERS.find(x=>x[0]===f);
+  return v + " " + (s?s[2]:"");
+}
+function escapeHtml(s){ return String(s).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c])); }
+
+async function api(path, body){
+  const opt = body ? {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(body)} : {};
+  const r = await fetch(path, opt);
+  return r.json();
+}
+
+function buildSliders(){
+  $("sliders").innerHTML = SLIDERS.map(([f,label,u,mn,mx,st]) => `
+    <div class="sl">
+      <span>${label}</span><span class="val" id="v_${f}"></span>
+      <input type="range" id="sl_${f}" min="${mn}" max="${mx}" step="${st}">
+    </div>`).join("");
+  SLIDERS.forEach(([f]) => {
+    const el = $("sl_"+f);
+    el.addEventListener("input", () => { sliderDirty = true; $("v_"+f).textContent = sliderValText(f, el.value); });
+  });
+}
+function syncSliders(p){
+  if (sliderDirty) return;
+  SLIDERS.forEach(([f]) => {
+    const el = $("sl_"+f), v = p[f] ?? 0;
+    el.value = Math.min(+el.max, Math.max(+el.min, v));
+    $("v_"+f).textContent = sliderValText(f, el.value);
+  });
+}
+
+function buildPresets(list){
+  const cats = {};
+  list.forEach(p => { (cats[p.cat] = cats[p.cat] || []).push(p); });
+  $("presets").innerHTML = Object.entries(cats).map(([cat, items]) => `
+    <div class="group"><span class="cat-dot" style="background:${CAT_COLOR[cat]||'#999'}"></span>${cat}</div>
+    <div class="chips">${items.map(p =>
+      `<button class="chip" data-key="${p.key}">${escapeHtml(p.name)}</button>`).join("")}</div>`).join("");
+  document.querySelectorAll(".chip").forEach(b => b.onclick = async () => {
+    await api("/api/preset", {key: b.dataset.key});
+    sliderDirty = false;
+    refresh();
+  });
+}
+
+function renderStats(s, p){
+  const gate = s.gate_open
+    ? '<span class="badge ok">正常</span>'
+    : '<span class="badge down">断网中</span>';
+  const items = [
+    ["当前场景", `<span style="font-size:14px">${escapeHtml(p.name)}</span>`],
+    ["网络状态", gate],
+    ["总连接数", s.stats.total],
+    ["活跃连接", s.stats.active],
+    ["下行流量", fmtBytes(s.stats.down)],
+    ["上行流量", fmtBytes(s.stats.up)],
+    ["运行时长", fmtUptime(s.stats.uptime)],
+  ];
+  $("stats").innerHTML = items.map(([k,v]) =>
+    `<div class="stat"><div class="k">${k}</div><div class="v">${v}</div></div>`).join("");
+  const lan = s.listen.host === "0.0.0.0";
+  $("proxyAddr").textContent = lan ? `${s.lan_ip}:${s.listen.port}` : `127.0.0.1:${s.listen.port}`;
+  $("lanBtn").textContent = lan ? "关闭局域网访问" : "开启局域网访问";
+  if (typeof s.sysproxy === "boolean") {
+    $("sysBtn").style.display = "";
+    $("sysBtn").textContent = s.sysproxy ? "✔ 已接管本机流量（点击解除）" : "一键接管本机流量";
+    $("sysBtn").className = s.sysproxy ? "ghost" : "primary";
+  }
+  if (typeof s.vpn_active === "boolean") {
+    $("vpnBtn").style.display = "";
+    $("vpnBtn").textContent = s.vpn_active ? "停止接管（恢复 App 直连）" : "一键接管全部 App 流量";
+    $("vpnBtn").className = s.vpn_active ? "primary" : "ghost";
+  }
+  document.querySelectorAll(".chip").forEach(b =>
+    b.classList.toggle("active", b.dataset.key === s.preset_key));
+}
+
+const TAG_TEXT = {connect:"连接", close:"关闭", disconnect:"断连", flap:"切换",
+                  dns:"DNS", timeout:"黑洞", reject:"拒连", config:"配置", error:"错误"};
+function renderLog(events){
+  $("log").innerHTML = events.map(e =>
+    `<div class="ev"><span class="t">${e.t}</span><span class="tag tg-${e.type}">${TAG_TEXT[e.type]||e.type}</span><span>${escapeHtml(e.msg)}</span></div>`
+  ).join("") || '<div style="color:#99a">暂无事件，把设备代理指过来试试</div>';
+}
+
+function drawChart(){
+  const c = $("chart"), ctx = c.getContext("2d");
+  const dpr = window.devicePixelRatio || 1;
+  const w = c.clientWidth, h = c.clientHeight;
+  if (c.width !== ~~(w*dpr)) { c.width = ~~(w*dpr); c.height = ~~(h*dpr); }
+  ctx.setTransform(dpr,0,0,dpr,0,0);
+  ctx.clearRect(0,0,w,h);
+  const n = Math.max(hist.down.length, hist.up.length);
+  if (!n) return;
+  const max = Math.max(1024, ...hist.down, ...hist.up) * 1.15;
+  ctx.strokeStyle = "#eef1f6"; ctx.lineWidth = 1;
+  for (let i=1;i<4;i++){ const y=h*i/4; ctx.beginPath(); ctx.moveTo(0,y); ctx.lineTo(w,y); ctx.stroke(); }
+  const line = (arr, color) => {
+    if (arr.length < 2) return;
+    ctx.strokeStyle = color; ctx.lineWidth = 2; ctx.beginPath();
+    arr.forEach((v,i) => {
+      const x = w - (arr.length-1-i) * (w/89);
+      const y = h - 4 - (v/max)*(h-8);
+      i ? ctx.lineTo(x,y) : ctx.moveTo(x,y);
+    });
+    ctx.stroke();
+  };
+  line(hist.down, "#2f6fed");
+  line(hist.up, "#0d9488");
+  ctx.fillStyle = "#7a8699"; ctx.font = "10px sans-serif";
+  ctx.fillText(fmtBps(max), 4, 12);
+}
+
+async function refresh(){
+  try {
+    const s = await api("/api/status");
+    renderStats(s, s.profile);
+    syncSliders(s.profile);
+    renderLog(s.events);
+    if (lastBytes) {
+      hist.down.push(Math.max(0, s.stats.down - lastBytes.down));
+      hist.up.push(Math.max(0, s.stats.up - lastBytes.up));
+      if (hist.down.length > 90) { hist.down.shift(); hist.up.shift(); }
+    }
+    lastBytes = { down: s.stats.down, up: s.stats.up };
+    drawChart();
+  } catch (e) {}
+}
+
+$("applyBtn").onclick = async () => {
+  const body = {};
+  SLIDERS.forEach(([f]) => body[f] = +$("sl_"+f).value);
+  await api("/api/profile", body);
+  sliderDirty = false;
+  refresh();
+};
+// 注意：必须显式带 body 走 POST —— 不带 body 会以 GET 发出，服务端只认 POST，会返回 404
+$("stopBtn").onclick = async () => {
+  const b = $("stopBtn"), old = b.textContent;
+  b.disabled = true; b.textContent = "正在停止…";
+  try { await api("/api/stop", {}); } catch (e) { }
+  b.disabled = false; b.textContent = old;
+  sliderDirty = false;
+  refresh();
+};
+$("vpnBtn").onclick = async () => {
+  const st = await api("/api/status");
+  await api("/api/vpn", { enable: !st.vpn_active });
+  refresh();
+};
+$("sysBtn").onclick = async () => {
+  const s = await api("/api/status");
+  await api("/api/sysproxy", { enable: !s.sysproxy });
+  refresh();
+};
+$("lanBtn").onclick = async () => {
+  const s = await api("/api/status");
+  const host = s.listen.host === "0.0.0.0" ? "127.0.0.1" : "0.0.0.0";
+  await api("/api/listen", {host});
+  refresh();
+};
+
+(async function init(){
+  buildSliders();
+  buildPresets(await api("/api/presets"));
+  refresh();
+  setInterval(refresh, 1000);
+  window.addEventListener("resize", drawChart);
+})();
+</script>
+</body>
+</html>

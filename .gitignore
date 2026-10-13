@@ -1,0 +1,27 @@
+# ===== 构建中间产物 =====
+android/build/
+android/_cm/
+android/_tmpcls/
+android/_tmpdex/
+_build_gui/
+_build_cli/
+_build/
+*.spec
+
+# ===== 自备的 Android SDK（269MB，需自行下载，见 README）=====
+android/sdk/
+android/cmdline.zip
+
+# ===== 签名文件（构建时自动生成，不入仓库）=====
+*.keystore
+*.jks
+
+# ===== 运行时产物 =====
+weaknet.log
+serve.bin
+__pycache__/
+*.pyc
+
+# ===== 系统 / 编辑器 =====
+.DS_Store
+Thumbs.db
