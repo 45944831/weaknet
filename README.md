@@ -145,6 +145,7 @@ weaknet/
 | 黑洞场景点停止 | 挂起的请求立即放行（修复前会挂死 10 分钟） |
 | 令牌桶切场景 | 取消限速 507ms 内放行（原需等待 25s） |
 | Android 真机 | 安装启动无崩溃，VPN 接管 `vpn_active=true` |
+| APK 停止接管 → 再次启动 | 真机三轮 `False/True` 交替正常，停止后 tun0 释放、ServiceRecord 归零 |
 
 ---
 

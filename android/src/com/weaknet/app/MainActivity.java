@@ -216,12 +216,8 @@ public class MainActivity extends Activity {
      * 重新拉起实例，而它 5 秒内没调用 startForeground，Android 8+ 会报错。
      */
     private void stopVpn() {
-        VpnNetService.userStopped = true;
-        try {
-            stopService(new Intent(this, VpnNetService.class));
-        } catch (Exception e) {
-            // ignore
-        }
+        // 统一走服务内部入口：stopService 停不掉被系统 bind 的 VpnService
+        VpnNetService.stop(this);
         updateStatus();
         handler.postDelayed(new Runnable() {
             public void run() {

@@ -34,6 +34,11 @@ public class VpnNetService extends VpnService {
      *  否则停止一次后就再也启不来了。 */
     public static volatile boolean userStopped = false;
 
+    /** 当前存活的服务实例。App 与 Service 同进程，停止时可直接拿到实例调用 stopSelf()，
+     *  不必绕道 startService —— 后者在服务已停止时会重新拉起一个前台实例，
+     *  而它 5 秒内没调用 startForeground，Android 8+ 会直接报错。 */
+    private static volatile VpnNetService instance = null;
+
     private ParcelFileDescriptor tun;
     private FileInputStream tunIn;
     private FileOutputStream tunOut;
@@ -47,10 +52,55 @@ public class VpnNetService extends VpnService {
     private ExecutorService exec;
     private Thread cleanThread;
 
+    public void onCreate() {
+        super.onCreate();
+        instance = this;
+    }
+
+    /**
+     * 停止接管的唯一入口。Activity、控制台、服务自身都调这里，避免各写一套导致行为不一致。
+     *
+     * 注意不能只靠 ctx.stopService()：VpnService 会被系统 bind，处于 bound 状态的服务
+     * stopService 无效（实测 ServiceRecord 与 tun0 都还在，流量仍被接管）。
+     * 必须拿到实例自己 stopSelf()，同时先 stopForeground 撤掉前台通知。
+     */
+    public static void stop(Context ctx) {
+        userStopped = true;
+        VpnNetService s = instance;
+        if (s != null) {
+            try {
+                s.stopForeground(true);
+            } catch (Exception e) {
+                // ignore
+            }
+            try {
+                s.stopVpn();
+            } catch (Exception e) {
+                // ignore
+            }
+            try {
+                s.stopSelf();
+            } catch (Exception e) {
+                // ignore
+            }
+        }
+        // 兜底：若实例为空（服务已不在），仍能清掉可能残留的记录
+        try {
+            ctx.stopService(new Intent(ctx, VpnNetService.class));
+        } catch (Exception e) {
+            // ignore
+        }
+    }
+
     public int onStartCommand(Intent intent, int flags, int startId) {
         String act = (intent == null) ? null : intent.getAction();
         if (ACTION_STOP.equals(act)) {
             userStopped = true;
+            try {
+                stopForeground(true);
+            } catch (Exception e) {
+                // ignore
+            }
             stopVpn();
             stopSelf();
             return START_NOT_STICKY;
@@ -72,6 +122,7 @@ public class VpnNetService extends VpnService {
     }
 
     public void onDestroy() {
+        instance = null;
         stopVpn();
         super.onDestroy();
     }
