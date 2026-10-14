@@ -1035,14 +1035,21 @@ class App:
         box = self._card(self.col_right, "事件日志", expand=True)
         wrap = tk.Frame(box, bg=CARD)
         wrap.pack(fill="both", expand=True)
-        # 右栏一整列都给它，所以不写死行数，跟着窗口高度长
-        self.logbox = tk.Listbox(wrap, font=("Consolas", 9), bg="#fbfcfe",
-                                 fg=TEXT, relief="flat", highlightthickness=1,
-                                 highlightbackground=LINE, bd=0)
+        # 右栏一整列都给它，所以不写死行数，跟着窗口高度长。
+        # 用 Text 而不是 Listbox：Listbox 不能换行，长日志只能被截掉右半截，
+        # 也没有横向滚动可拖，等于永远看不全。
+        self.logbox = tk.Text(wrap, font=("Consolas", 9), bg="#fbfcfe",
+                              fg=TEXT, relief="flat", highlightthickness=1,
+                              highlightbackground=LINE, bd=0,
+                              wrap="char",          # 中文没有空格，按字符换行才不会溢出
+                              spacing1=1, spacing3=2, padx=6, pady=4,
+                              takefocus=0, cursor="arrow")
         sb = tk.Scrollbar(wrap, command=self.logbox.yview)
         self.logbox.configure(yscrollcommand=sb.set)
         self.logbox.pack(side="left", fill="both", expand=True)
         sb.pack(side="right", fill="y")
+        # 只读：不许编辑，但允许选中复制
+        self.logbox.configure(state="disabled")
 
     # ---------------- 交互 ----------------
 
@@ -1247,9 +1254,11 @@ class App:
         ev = list(g.events)
         if len(ev) != self._ev_shown:
             self._ev_shown = len(ev)
-            self.logbox.delete(0, "end")
+            self.logbox.configure(state="normal")
+            self.logbox.delete("1.0", "end")
             for e in list(ev)[-60:][::-1]:
-                self.logbox.insert("end", f"[{e['t']}] {e['msg']}")
+                self.logbox.insert("end", f"[{e['t']}] {e['msg']}\n")
+            self.logbox.configure(state="disabled")
 
         self.root.after(500, self.refresh)
 

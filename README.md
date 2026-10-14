@@ -9,13 +9,13 @@
 
 ---
 
-## 下载（Release v1.0.1）
+## 下载（Release v1.0.2）
 
 > Windows 端 `WeakNet.exe` 以 GUI 子系统打包，双击直接出界面，**不会弹出 DOS 黑框**；Android 端安装 `WeakNet.apk` 即可。
 
 | 文件 | 平台 | 大小 | SHA-256 |
 | --- | --- | --- | --- |
-| [`WeakNet.exe`](https://github.com/45944831/weaknet/releases/latest/download/WeakNet.exe) | Windows（GUI 版，免装 Python） | 10.1 MB | `dd3a31a7…02f36fa` |
+| [`WeakNet.exe`](https://github.com/45944831/weaknet/releases/latest/download/WeakNet.exe) | Windows（GUI 版，免装 Python） | 10.1 MB | `8d9d3856…73f083d` |
 | [`WeakNet.apk`](https://github.com/45944831/weaknet/releases/latest/download/WeakNet.apk) | Android 7.0+ | 95 KB | `063a684e…dd25bf` |
 
 发布页：https://github.com/45944831/weaknet/releases/latest
@@ -23,7 +23,7 @@
 完整校验值：
 
 ```
-dd3a31a74f3c24236cb3eef0c7cf06d41be970fa9ea2807c5c0a135ba02f36fa  WeakNet.exe
+8d9d3856244ecdcf4b90aee79438abfffd0cc906651e9be95f986f2dc73f083d  WeakNet.exe
 063a684e44f29a678edf2d0c21fa1f7da92e7962f560738cb3dc68bb6cdd25bf  WeakNet.apk
 ```
 
