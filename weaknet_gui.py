@@ -12,11 +12,19 @@ WeakNet —— App 弱网测试工具（桌面 GUI 版）
 
 import argparse
 import asyncio
+import os
 import sys
 import threading
 import time
 import tkinter as tk
 from tkinter import messagebox, simpledialog, ttk
+
+# 以 --windowed 打包时没有控制台，sys.stdout / sys.stderr 为 None。
+# 必须给它们一个去处，否则任何 print / traceback 输出都会异常导致闪退。
+if sys.stdout is None:
+    sys.stdout = open(os.devnull, "w", encoding="utf-8")
+if sys.stderr is None:
+    sys.stderr = open(os.devnull, "w", encoding="utf-8")
 
 import weaknet as W
 
@@ -1304,5 +1312,14 @@ if __name__ == "__main__":
         main()
     except Exception:
         import traceback
-        W.log(traceback.format_exc())
-        raise
+        err = traceback.format_exc()
+        W.log(err)
+        # 无控制台时 raise 只是静默闪退，改用弹窗把错误报出来
+        try:
+            root = tk.Tk()
+            root.withdraw()
+            messagebox.showerror("WeakNet 启动失败", err[-2000:])
+            root.destroy()
+        except Exception:
+            pass
+        sys.exit(1)

@@ -755,7 +755,7 @@ def _auto_release_sysproxy():
     if _sysproxy_on:
         try:
             set_sysproxy(False)
-            print("[WeakNet] 已自动解除系统代理接管")
+            log("[WeakNet] 已自动解除系统代理接管")
         except Exception:
             pass
 
