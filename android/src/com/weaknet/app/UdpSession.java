@@ -17,6 +17,8 @@ public class UdpSession {
     private volatile DatagramSocket ds;
     private final AtomicBoolean closed = new AtomicBoolean(false);
     private volatile long lastActive = System.currentTimeMillis();
+    /** UDP 也要吃链路延迟，否则 DNS 查询、QUIC 这类流量完全测不到延迟 */
+    private final DelayLine delay;
 
     UdpSession(VpnNetService vpn, String clientIp, int clientPort,
                String remoteIp, int remotePort, String key) {
@@ -26,6 +28,7 @@ public class UdpSession {
         this.remoteIp = remoteIp;
         this.remotePort = remotePort;
         this.key = key;
+        this.delay = new DelayLine("udp-delay", 256 << 10);
     }
 
     boolean isClosed() {
@@ -62,8 +65,18 @@ public class UdpSession {
             }
             WeakNet.I.upBucket.consume(payloadLen);
             WeakNet.I.bytesUp.addAndGet(payloadLen);
-            ds.send(new DatagramPacket(payload, payloadLen,
-                    InetAddress.getByName(remoteIp), remotePort));
+            final byte[] data = payload;
+            final int len = payloadLen;
+            delay.tryPost(DelayLine.delayMs(true), new Runnable() {
+                public void run() {
+                    try {
+                        ds.send(new DatagramPacket(data, len,
+                                InetAddress.getByName(remoteIp), remotePort));
+                    } catch (Exception e) {
+                        // ignore
+                    }
+                }
+            }, len);
         } catch (Exception e) {
             // ignore
         }
@@ -80,8 +93,12 @@ public class UdpSession {
                         lastActive = System.currentTimeMillis();
                         byte[] data = new byte[dp.getLength()];
                         System.arraycopy(dp.getData(), dp.getOffset(), data, 0, dp.getLength());
-                        vpn.write(IpUtil.buildUdp(remoteIp, remotePort,
-                                clientIp, clientPort, data, data.length));
+                        delay.tryPost(DelayLine.delayMs(false), new Runnable() {
+                            public void run() {
+                                vpn.write(IpUtil.buildUdp(remoteIp, remotePort,
+                                        clientIp, clientPort, data, data.length));
+                            }
+                        }, data.length);
                     } catch (Exception e) {
                         if (System.currentTimeMillis() - lastActive > 60000) break;
                     }
@@ -95,6 +112,11 @@ public class UdpSession {
 
     void close() {
         if (closed.compareAndSet(false, true)) {
+            try {
+                delay.close();
+            } catch (Exception e) {
+                // ignore
+            }
             try {
                 if (ds != null) ds.close();
             } catch (Exception e) {

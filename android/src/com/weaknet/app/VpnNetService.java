@@ -179,7 +179,17 @@ public class VpnNetService extends VpnService {
                 WeakNet.I.log("error", "接管范围=仅选定，但未选择任何 App，暂不接管");
                 return;
             }
+            // 把自己排除掉：一旦 WeakNet 自己的流量也进 tun，控制台 8899 就跟着被接管，
+            // 界面会整个失联，只能杀进程恢复
+            java.util.List<String> allow = new java.util.ArrayList<String>();
             for (String p : pkgs) {
+                if (!getPackageName().equals(p)) allow.add(p);
+            }
+            if (allow.isEmpty()) {
+                WeakNet.I.log("error", "接管范围只剩 WeakNet 自身，已忽略，暂不接管");
+                return;
+            }
+            for (String p : allow) {
                 try {
                     b.addAllowedApplication(p);
                 } catch (Exception e) {

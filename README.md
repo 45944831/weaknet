@@ -9,14 +9,14 @@
 
 ---
 
-## 下载（Release v1.1.1）
+## 下载（Release v1.1.2）
 
 > Windows 端 `WeakNet.exe` 以 GUI 子系统打包，双击直接出界面，**不会弹出 DOS 黑框**；Android 端安装 `WeakNet.apk` 即可。
 
 | 文件 | 平台 | 大小 | SHA-256 |
 | --- | --- | --- | --- |
 | [`WeakNet.exe`](https://github.com/45944831/weaknet/releases/latest/download/WeakNet.exe) | Windows（GUI 版，免装 Python） | 10.1 MB | `6e5ffffd…8e568f9` |
-| [`WeakNet.apk`](https://github.com/45944831/weaknet/releases/latest/download/WeakNet.apk) | Android 7.0+ | 93 KB | `e5d92e15…892797` |
+| [`WeakNet.apk`](https://github.com/45944831/weaknet/releases/latest/download/WeakNet.apk) | Android 7.0+ | 97 KB | `5166547e…de3229` |
 
 发布页：https://github.com/45944831/weaknet/releases/latest
 
@@ -24,7 +24,7 @@
 
 ```
 6e5ffffdbef5505c7d0450b315228e6fbc2a8c199caa382c194d3b9ea8e568f9  WeakNet.exe
-e5d92e151a79d83808b31c22a0d6fba164dceb0cb023c8e6db20acd6f1892797  WeakNet.apk
+5166547e3dd121d2f2ffac641988368b45ff3c70765ae918e655631f24de3229  WeakNet.apk
 ```
 
 > 若 GitHub 下载慢或打不开，可在链接前加 `https://ghproxy.net/` 走镜像加速，例如
@@ -310,6 +310,9 @@ weaknet/
 | EXE 冒烟（v1.1.0） | 7/7：GUI 子系统无 DOS 窗口、无 conhost、主窗口标题、`/api/status` 响应、`/api/run` 开关正常 |
 | **Android 上行吞吐（v1.1.1 修复）** | VPN 接管后上行 **0.03 Mbps → 206 Mbps**（物理基准 515 Mbps、下行同期 180 Mbps）。修复前只有 3~5 KB/s 且与限速档位无关 |
 | **APK 场景矩阵回归（v1.1.1）** | 11 个场景全通过：延迟注入实测 RTT 仍压在「基线 37ms + 单向延迟×2」上（卫星 700 → 1452ms、高延迟 400 → 837ms）；4G LTE 下行设定 20000 kbps 实测 20534（-2.7% 误差，修复前为 19160） |
+| **长连接延迟（v1.1.2 修复）** | 修复前延迟只在 TCP 建连时注入一次，长连接内的数据包零延迟（卫星档实测 5 个请求全部在 1443ms 同时到达，间隔 0ms）。修复后每个数据包都吃延迟：短连接总耗时 高延迟 837 → 1698ms、卫星 1452 → 2927ms，各多出一个完整 RTT |
+| **UDP 延迟（v1.1.2 新增）** | UDP/DNS 此前完全没有延迟注入。修复后上行延迟实测 +364ms（高延迟档设定 +400）、+692ms（卫星档设定 +700） |
+| **v1.1.2 全量回归** | 11 场景吞吐/延迟矩阵 + 6 个极端场景全通过：完全断网 0/5、黑洞 0/5、DNS 故障下随机新域名 rc=1 而 IP 直连 5/5；4G LTE 设定 20000 实测 20501（+2.5%）；直连档吞吐 123 Mbps |
 
 ---
 
@@ -321,4 +324,9 @@ weaknet/
   （报 `WRITE_SECURE_SETTINGS`），此时请用界面提示里的替代途径（开发者选项中的
   「USB 调试（安全设置）」/「禁止权限监控」、root、Wi-Fi 手动代理，或改用 APK）
 - USB 手机弱网走的是系统 HTTP 代理，只影响按系统代理走的 App；要整机接管请用 APK
+- **Android 端只接管 IPv4**：`VpnService` 建的是 `0.0.0.0/0` 路由，IPv6 流量不进弱网通道，
+  会走真实网络。若你的网络提供 IPv6，App 里走 IPv6 的部分测不到弱网
+- Android 端会丢弃**分片的 IP 包**，因此超过 MTU 的大 UDP 包（如部分 QUIC 流量）无法通过
+- 低带宽 + 高延迟档位（如卫星链路）的实测吞吐可能明显高于设定带宽，这是 TCP 慢启动与
+  测量窗口共同作用的结果；判读弱网效果请比较「开场景前后的变化」，而不是「实测 vs 设定带宽」
 - 桌面 EXE 是 PyInstaller 单文件打包，首次启动需解压临时文件，稍慢属正常

@@ -46,6 +46,12 @@ public class TcpSession {
      */
     private final ThreadPoolExecutor serial;
 
+    /** 链路延迟队列：数据包按延迟到期后再投递，延迟与带宽解耦 */
+    private final DelayLine delay;
+    /** 同一方向的到期时间单调不减，保证抖动不会把包打乱 */
+    private long nextUpDue = 0;
+    private long nextDownDue = 0;
+
     TcpSession(VpnNetService vpn, String clientIp, int clientPort,
                String remoteIp, int remotePort, String key, long clientIsn, int mss) {
         this.vpn = vpn;
@@ -60,6 +66,26 @@ public class TcpSession {
                 1, 1, 30L, TimeUnit.SECONDS, new LinkedBlockingQueue<Runnable>());
         e.allowCoreThreadTimeOut(true);
         this.serial = e;
+        this.delay = new DelayLine("tcp-delay", 1 << 20);   // 积压超过 1MB 就回压
+    }
+
+    /**
+     * 计算这个包应该在多少毫秒后投递。
+     * 同一方向的到期时间强制单调不减：抖动是 ±jitter 的，放任的话后发的包可能
+     * 先到期，投递顺序就乱了 —— 对 TCP 来说乱序等于重传，会被状态机直接丢掉。
+     */
+    private long dueDelay(boolean up) {
+        long now = System.currentTimeMillis();
+        long want = now + DelayLine.delayMs(up);
+        if (up) {
+            if (want < nextUpDue) want = nextUpDue;
+            nextUpDue = want;
+        } else {
+            if (want < nextDownDue) want = nextDownDue;
+            nextDownDue = want;
+        }
+        long d = want - now;
+        return d < 0 ? 0 : d;
     }
 
     /** 提交一个需要按序执行的任务（建连、上行数据包、关闭）。已关闭时静默丢弃。 */
@@ -141,7 +167,7 @@ public class TcpSession {
         }
         if (payloadLen > 0) {
             if (seq != clientSeq) {
-                sendAck();          // 乱序/重传：回 ACK，等待重传补齐
+                sendAck(clientSeq); // 乱序/重传：回 ACK，等待重传补齐
                 return;
             }
             if (!ready || sout == null) {
@@ -160,23 +186,42 @@ public class TcpSession {
                 }
                 WeakNet.I.upBucket.consume(payloadLen);
                 WeakNet.I.bytesUp.addAndGet(payloadLen);
-                sout.write(payload, 0, payloadLen);
-                sout.flush();
+                final byte[] data = payload;
+                final int len = payloadLen;
+                delay.post(dueDelay(true), new Runnable() {
+                    public void run() {
+                        try {
+                            sout.write(data, 0, len);
+                            sout.flush();
+                        } catch (Exception e) {
+                            close();
+                        }
+                    }
+                }, len);
             } catch (Exception e) {
                 close();
                 return;
             }
             clientSeq = (clientSeq + payloadLen) & 0xFFFFFFFFL;
-            sendAck();
+            // ACK 要走完整的一来一回：上行延迟 + 下行延迟，客户端的 RTT 才对得上
+            sendAck(clientSeq);
         }
         if ((flags & IpUtil.FIN) != 0) {
             clientSeq = (clientSeq + 1) & 0xFFFFFFFFL;
-            sendAck();
-            try {
-                if (socket != null) socket.shutdownOutput();
-            } catch (Exception e) {
-                // ignore
-            }
+            sendAck(clientSeq);
+            // FIN 必须排进延迟队列、等前面的数据都投递完再关写端：
+            // 否则「发完数据立刻 FIN」的短连接（curl / nc / HTTP 短连接都这样）
+            // 会在数据还在队列里躺着的时候就被 shutdownOutput，对端一个字节都收不到。
+            final Socket s = socket;
+            delay.post(dueDelay(true), new Runnable() {
+                public void run() {
+                    try {
+                        if (s != null) s.shutdownOutput();
+                    } catch (Exception e) {
+                        // ignore
+                    }
+                }
+            }, 0);
         }
     }
 
@@ -200,36 +245,66 @@ public class TcpSession {
                             close();
                             return;
                         }
+                        final byte[] data = new byte[n];
+                        System.arraycopy(buf, 0, data, 0, n);
+                        final long d = dueDelay(false);
+                        final long seqAt;
                         synchronized (TcpSession.this) {
                             if (closed) break;
-                            vpn.write(IpUtil.buildTcp(remoteIp, remotePort, clientIp, clientPort,
-                                    mySeq, clientSeq, IpUtil.PSH | IpUtil.ACK, buf, n, 65535, null));
+                            seqAt = mySeq;
                             mySeq = (mySeq + n) & 0xFFFFFFFFL;
                         }
+                        // 延迟到期后再写回 tun；队列积压时 post 会阻塞，
+                        // 于是这里停止读上游，背压自然传导到服务器，不会把内存撑爆
+                        delay.post(d, new Runnable() {
+                            public void run() {
+                                synchronized (TcpSession.this) {
+                                    if (closed) return;
+                                    vpn.write(IpUtil.buildTcp(remoteIp, remotePort, clientIp, clientPort,
+                                            seqAt, clientSeq, IpUtil.PSH | IpUtil.ACK,
+                                            data, data.length, 65535, null));
+                                }
+                            }
+                        }, n);
                     }
                 } catch (Exception e) {
                     // ignore
                 }
-                synchronized (TcpSession.this) {
-                    if (!closed) {
-                        vpn.write(IpUtil.buildTcp(remoteIp, remotePort, clientIp, clientPort,
-                                mySeq, clientSeq, IpUtil.FIN | IpUtil.ACK, null, 0, 65535, null));
-                        mySeq = (mySeq + 1) & 0xFFFFFFFFL;
+                // FIN 同样要排在下行数据之后：上游关了之后，队列里可能还有数据没送达。
+                // 直接发 FIN 再 close() 会把这些数据连同队列一起清掉，客户端收不全。
+                delay.post(dueDelay(false), new Runnable() {
+                    public void run() {
+                        synchronized (TcpSession.this) {
+                            if (!closed) {
+                                vpn.write(IpUtil.buildTcp(remoteIp, remotePort, clientIp, clientPort,
+                                        mySeq, clientSeq, IpUtil.FIN | IpUtil.ACK, null, 0, 65535, null));
+                                mySeq = (mySeq + 1) & 0xFFFFFFFFL;
+                            }
+                        }
+                        close();
                     }
-                }
-                close();
+                }, 0);
             }
         }, "tcp-down");
         t.setDaemon(true);
         t.start();
     }
 
-    private void sendAck() {
-        synchronized (this) {
-            if (closed) return;
-            vpn.write(IpUtil.buildTcp(remoteIp, remotePort, clientIp, clientPort,
-                    mySeq, clientSeq, IpUtil.ACK, null, 0, 65535, null));
-        }
+    /**
+     * 回 ACK。必须把 ack 号以参数传进来：ACK 是延迟投递的，等真正发出去的时候
+     * clientSeq 早就被后面的包推进过了，那时再读就会确认还没收到的数据。
+     */
+    private void sendAck(final long ackSeq) {
+        long d = DelayLine.delayMs(true) + DelayLine.delayMs(false);
+        delay.post(d, new Runnable() {
+            public void run() {
+                synchronized (TcpSession.this) {
+                    if (closed) return;
+                    vpn.write(IpUtil.buildTcp(remoteIp, remotePort, clientIp, clientPort,
+                            mySeq, ackSeq, IpUtil.ACK, null, 0, 65535, null));
+                }
+            }
+        }, 0);
     }
 
     private void sendRst() {
@@ -252,6 +327,11 @@ public class TcpSession {
         // 停掉串行队列：丢弃排队的上行包，并唤醒正在等令牌/延迟的线程
         try {
             serial.shutdownNow();
+        } catch (Exception e) {
+            // ignore
+        }
+        try {
+            delay.close();
         } catch (Exception e) {
             // ignore
         }

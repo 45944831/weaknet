@@ -75,6 +75,13 @@ public class WeakNet {
             events.add(new String[]{t, type, msg});
             while (events.size() > 300) events.remove(0);
         }
+        // 同时输出到 logcat：事件日志在 App 里能看，但排查「连接建上了数据却没过去」
+        // 这类问题时，adb logcat 是唯一能实时观察的窗口
+        try {
+            android.util.Log.d("WeakNet", type + " | " + msg);
+        } catch (Exception e) {
+            // ignore
+        }
     }
 
     public synchronized void setProfile(Profile p, String key) {
