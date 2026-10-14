@@ -9,6 +9,27 @@
 
 ---
 
+## 下载（Release v1.0）
+
+| 文件 | 平台 | 大小 | SHA-256 |
+| --- | --- | --- | --- |
+| [`WeakNet.exe`](https://github.com/45944831/weaknet/releases/latest/download/WeakNet.exe) | Windows（GUI 版，免装 Python） | 10.1 MB | `c1515c6c…d26cca` |
+| [`WeakNet.apk`](https://github.com/45944831/weaknet/releases/latest/download/WeakNet.apk) | Android 7.0+ | 95 KB | `063a684e…dd25bf` |
+
+发布页：https://github.com/45944831/weaknet/releases/latest
+
+完整校验值：
+
+```
+c1515c6cb6eb4f5c4ae334a39a1481c155bb78a25ece257b1f2db539cdd26cca  WeakNet.exe
+063a684e44f29a678edf2d0c21fa1f7da92e7962f560738cb3dc68bb6cdd25bf  WeakNet.apk
+```
+
+> 若 GitHub 下载慢或打不开，可在链接前加 `https://ghproxy.net/` 走镜像加速，例如
+> `https://ghproxy.net/https://github.com/45944831/weaknet/releases/latest/download/WeakNet.exe`
+
+---
+
 ## 快速开始
 
 ### Windows
