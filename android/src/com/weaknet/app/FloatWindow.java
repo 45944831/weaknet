@@ -2,7 +2,6 @@ package com.weaknet.app;
 
 import android.content.Context;
 import android.content.Intent;
-import android.graphics.Color;
 import android.graphics.PixelFormat;
 import android.graphics.drawable.GradientDrawable;
 import android.os.Build;
@@ -17,10 +16,16 @@ import android.view.WindowManager;
 import android.widget.LinearLayout;
 import android.widget.TextView;
 
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+
 /**
  * 限速飘窗（悬浮窗）
  *
- * 接管流量后悬浮显示：当前场景 / 上行下行限速 / 实时速率 / 断网状态。
+ * 接管流量后悬浮显示实时网络状况；显示哪些行、顺序、字号、透明度都在
+ * 控制台的「⚙ 悬浮窗设置」里配（见 {@link FloatSettings}）。
  *  - 可拖动到屏幕任意位置
  *  - 点主体打开控制台（MainActivity），点 ✕ 收起
  *  - 数据 500ms 刷新一次（取 WeakNet 的累计字节做差分）
@@ -35,7 +40,9 @@ public class FloatWindow {
     private final Handler h = new Handler(Looper.getMainLooper());
 
     private LinearLayout root;
-    private TextView tTitle, tLimit, tRate;
+    private TextView tTitle;
+    /** 已显示的每一行：id -> TextView，顺序与设置里的 lines 一致 */
+    private final Map<String, TextView> rows = new LinkedHashMap<String, TextView>();
     private WindowManager.LayoutParams lp;
     private volatile boolean shown = false;
 
@@ -96,11 +103,26 @@ public class FloatWindow {
         });
     }
 
+    /**
+     * 设置变更后立刻重建（保存后马上看到效果，不用收起再显示）。
+     * 没在显示就什么都不做。
+     */
+    public static void reload() {
+        final FloatWindow f = inst;
+        if (f == null || !f.shown) return;
+        f.h.post(new Runnable() {
+            public void run() {
+                if (f.shown) f.build();
+            }
+        });
+    }
+
     // ---------------------------------------------------------------- 布局
 
     private void build() {
         try {
             removeView();
+            FloatSettings.S st = FloatSettings.get();
 
             root = new LinearLayout(app);
             root.setOrientation(LinearLayout.VERTICAL);
@@ -112,12 +134,12 @@ public class FloatWindow {
             int pad = dp(10);
             root.setPadding(pad + 2, pad, pad + 2, pad);
 
-            // 标题行：场景名 + 关闭
+            // 标题行：场景名（未勾选「场景名」时只显示产品标识）+ 关闭
             LinearLayout top = new LinearLayout(app);
             top.setOrientation(LinearLayout.HORIZONTAL);
             tTitle = new TextView(app);
             tTitle.setTextColor(0xFFFFFFFF);
-            tTitle.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
+            tTitle.setTextSize(TypedValue.COMPLEX_UNIT_SP, st.textSp + 2);
             tTitle.setSingleLine(true);
             tTitle.setText("⚡ WeakNet");
             LinearLayout.LayoutParams tl = new LinearLayout.LayoutParams(0,
@@ -127,7 +149,7 @@ public class FloatWindow {
             TextView close = new TextView(app);
             close.setText("✕");
             close.setTextColor(0xFF9AA4B2);
-            close.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
+            close.setTextSize(TypedValue.COMPLEX_UNIT_SP, st.textSp + 3);
             close.setPadding(dp(6), 0, dp(2), 0);
             close.setOnClickListener(new View.OnClickListener() {
                 public void onClick(View v) {
@@ -137,17 +159,17 @@ public class FloatWindow {
             top.addView(close);
             root.addView(top);
 
-            tLimit = new TextView(app);
-            tLimit.setTextColor(0xFF9EC5FF);
-            tLimit.setTextSize(TypedValue.COMPLEX_UNIT_SP, 10);
-            tLimit.setSingleLine(true);
-            root.addView(tLimit);
-
-            tRate = new TextView(app);
-            tRate.setTextColor(0xFF7BE3A6);
-            tRate.setTextSize(TypedValue.COMPLEX_UNIT_SP, 10);
-            tRate.setSingleLine(true);
-            root.addView(tRate);
+            // 内容行：顺序完全由设置决定
+            rows.clear();
+            for (String id : new ArrayList<String>(st.lines)) {
+                if ("scene".equals(id)) continue;         // 场景名显示在标题行
+                TextView t = new TextView(app);
+                t.setTextColor("limit".equals(id) ? 0xFF9EC5FF : 0xFF7BE3A6);
+                t.setTextSize(TypedValue.COMPLEX_UNIT_SP, st.textSp);
+                t.setSingleLine(true);
+                rows.put(id, t);
+                root.addView(t);
+            }
 
             // 点主体 → 打开控制台；长按/移动 → 拖动
             root.setOnClickListener(new View.OnClickListener() {
@@ -205,7 +227,7 @@ public class FloatWindow {
             lp.gravity = Gravity.TOP | Gravity.LEFT;
             lp.x = dp(12);
             lp.y = dp(90);
-            lp.alpha = 0.92f;
+            lp.alpha = st.alpha;
 
             wm.addView(root, lp);
             shown = true;
@@ -238,6 +260,8 @@ public class FloatWindow {
             }
             root = null;
         }
+        rows.clear();
+        tTitle = null;
         shown = false;
     }
 
@@ -262,12 +286,82 @@ public class FloatWindow {
             lastT = now;
 
             String state = WeakNet.I.gateOpen ? "" : " · 断网中";
-            tTitle.setText("⚡ " + p.name + state);
-            tLimit.setText("限速 ↓" + kbps(p.downKbps) + "   ↑" + kbps(p.upKbps));
-            tRate.setText("实时 ↓" + bps(rd) + "   ↑" + bps(ru));
-        } catch (Exception e) {
+            // 标题恒显示产品标识；勾选「场景名」时才把当前场景拼上去
+            // （scene 不进 rows，它占的是标题行这一格）
+            tTitle.setText(hasLine("scene") ? "⚡ " + p.name + state : "⚡ WeakNet");
+
+            java.util.Map<String, String> v = new java.util.HashMap<String, String>();
+            v.put("scene", p.name + state);
+            v.put("down", kbps(p.downKbps));
+            v.put("up", kbps(p.upKbps));
+            v.put("rate_down", bps(rd));
+            v.put("rate_up", bps(ru));
+            v.put("delay", p.latencyDownMs + "ms");
+            v.put("jitter", p.jitterMs + "ms");
+            v.put("loss", trimNum(p.lossPct));
+            v.put("conn", String.valueOf(WeakNet.I.connActive.get()));
+            v.put("total_down", bytes(dn));
+            v.put("total_up", bytes(up));
+            v.put("uptime", dur((now - WeakNet.I.startedAt) / 1000));
+
+            for (java.util.Map.Entry<String, TextView> e : rows.entrySet()) {
+                e.getValue().setText(lineText(e.getKey(), p, rd, ru, dn, up, now, v));
+            }
+        } catch (Exception ex) {
             // ignore
         }
+    }
+
+    private boolean hasLine(String id) {
+        return FloatSettings.get().lines.contains(id);
+    }
+
+    private String lineText(String id, Profile p, double rd, double ru,
+                            long dn, long up, long now, java.util.Map<String, String> v) {
+        if ("limit".equals(id)) return "限速 ↓" + kbps(p.downKbps) + "   ↑" + kbps(p.upKbps);
+        if ("rate".equals(id)) return "实时 ↓" + bps(rd) + "   ↑" + bps(ru);
+        if ("conns".equals(id))
+            return "连接 " + WeakNet.I.connActive.get() + " / " + WeakNet.I.connTotal.get();
+        if ("total".equals(id)) return "累计 ↓" + bytes(dn) + " ↑" + bytes(up);
+        if ("uptime".equals(id)) return "已运行 " + dur((now - WeakNet.I.startedAt) / 1000);
+        if ("loss".equals(id)) {
+            StringBuilder sb = new StringBuilder();
+            if (p.latencyDownMs > 0) {
+                sb.append("延迟 ").append(p.latencyDownMs);
+                if (p.jitterMs > 0) sb.append("±").append(p.jitterMs);
+                sb.append("ms");
+            }
+            if (p.lossPct > 0) {
+                if (sb.length() > 0) sb.append(" · ");
+                sb.append("丢包 ").append(trimNum(p.lossPct)).append("%");
+            }
+            if (p.disconnectPct > 0) {
+                if (sb.length() > 0) sb.append(" · ");
+                sb.append("断连 ").append(trimNum(p.disconnectPct)).append("%");
+            }
+            return sb.length() > 0 ? sb.toString() : "无额外损耗";
+        }
+        if ("custom".equals(id)) return expand(FloatSettings.get().custom, v);
+        return "";
+    }
+
+    /** 把自定义文本里的 {变量} 换成实时值；未知变量原样保留，方便用户发现自己写错了 */
+    private String expand(String tpl, java.util.Map<String, String> v) {
+        if (tpl == null || tpl.length() == 0) return "";
+        StringBuilder out = new StringBuilder();
+        int i = 0;
+        while (i < tpl.length()) {
+            int a = tpl.indexOf('{', i);
+            if (a < 0) { out.append(tpl.substring(i)); break; }
+            out.append(tpl, i, a);
+            int b = tpl.indexOf('}', a + 1);
+            if (b < 0) { out.append(tpl.substring(a)); break; }
+            String key = tpl.substring(a, b + 1);
+            String val = v.get(key);
+            out.append(val == null ? key : val);
+            i = b + 1;
+        }
+        return out.toString();
     }
 
     private static String kbps(int v) {
@@ -280,6 +374,26 @@ public class FloatWindow {
         if (v >= 1024 * 1024) return String.format("%.2fMB/s", v / 1024 / 1024);
         if (v >= 1024) return String.format("%.0fKB/s", v / 1024);
         return String.format("%.0fB/s", v);
+    }
+
+    private static String bytes(long v) {
+        if (v >= 1024 * 1024 * 1024) return String.format("%.2fGB", v / 1073741824.0);
+        if (v >= 1024 * 1024) return String.format("%.1fMB", v / 1048576.0);
+        if (v >= 1024) return String.format("%.0fKB", v / 1024.0);
+        return v + "B";
+    }
+
+    private static String dur(long sec) {
+        if (sec < 60) return sec + "s";
+        long h = sec / 3600, m = sec % 3600 / 60, s = sec % 60;
+        if (h > 0) return h + "h " + m + "m";
+        return m + "m " + s + "s";
+    }
+
+    /** 3.0 → "3"，3.5 → "3.5"：百分比不想让用户看见一堆 .0 */
+    private static String trimNum(double v) {
+        if (Math.abs(v - Math.rint(v)) < 1e-6) return String.valueOf((long) Math.rint(v));
+        return String.format("%.1f", v);
     }
 
     private int dp(int v) {

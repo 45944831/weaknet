@@ -72,6 +72,38 @@ canvas{width:100%;height:130px;display:block}
 .scope-row .nm{font-weight:600}
 .scope-row .id{color:var(--muted);font-size:12px;font-variant-numeric:tabular-nums}
 .scope-empty{padding:14px;text-align:center;color:var(--muted);font-size:13px}
+/* ---- 环境共享：局域网设备 / 推送 / 收件箱 ---- */
+.shr-row{display:flex;align-items:center;gap:9px;padding:8px 12px;font-size:13px;border-bottom:1px solid #eef1f6;cursor:pointer}
+.shr-row:last-child{border-bottom:0}
+.shr-row:hover{background:#eef3ff}
+.shr-row.active{background:#eef3ff;box-shadow:inset 3px 0 0 var(--accent)}
+.shr-row .nm{font-weight:600}
+.shr-row .id{color:var(--muted);font-size:12px}
+.shr-row .shr-push{margin-left:auto;padding:5px 12px;font-size:12px;flex:none}
+.shr-in{padding:10px 12px;border-bottom:1px solid #eef1f6;font-size:13px}
+.shr-in:last-child{border-bottom:0}
+.shr-in .who{font-weight:600}
+.shr-in .acts{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:8px}
+.shr-in .acts button{padding:6px 12px;font-size:12px}
+.shr-in .acts input{flex:1 1 130px;min-width:110px;border:1px solid var(--line);border-radius:8px;
+                    padding:6px 10px;font-size:12px;color:var(--text);background:#fff}
+.shr-tip{font-size:12px;color:var(--muted);margin-top:8px}
+/* ---- 二级界面：接管范围（全屏覆盖，手机上也好用）---- */
+.subpage{position:fixed;inset:0;z-index:60;background:var(--bg);display:flex;flex-direction:column;
+         animation:subin .16s ease-out}
+@keyframes subin{from{opacity:.4;transform:translateY(8px)}to{opacity:1;transform:none}}
+.sub-head{display:flex;align-items:center;gap:12px;padding:12px 16px;background:#fff;
+          border-bottom:1px solid var(--line);flex:none}
+.sub-head h3{margin:0;font-size:16px;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.sub-back{padding:8px 14px;font-size:13px;flex:none}
+.sub-count{font-size:12px;color:var(--muted);flex:none}
+.sub-body{flex:1;overflow:auto;padding:14px 16px 8px;-webkit-overflow-scrolling:touch}
+.sub-bar{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:10px;font-size:13px;color:var(--muted)}
+.sub-bar .grow{flex:1}
+.sub-bar button{padding:6px 12px;font-size:13px}
+.sub-foot{display:flex;gap:10px;padding:12px 16px;background:#fff;border-top:1px solid var(--line);flex:none}
+.sub-foot button{flex:1;padding:11px 16px;font-size:14px}
+.subpage .scope-list{max-height:none}
 /* ---- 自定义栏：用户命名保存的参数 ---- */
 .mychip{display:inline-flex;align-items:center;border:1px solid var(--line);background:#fff;border-radius:999px;overflow:hidden}
 .mychip .chip{border:0;border-radius:0;padding:7px 2px 7px 14px}
@@ -83,6 +115,37 @@ canvas{width:100%;height:130px;display:block}
 .my-save{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:14px}
 .my-save .scope-search{flex:1 1 180px;width:auto}
 .my-save button{padding:8px 16px;font-size:13px}
+/* ---- 悬浮窗设置：挑显示行 / 调顺序 / 字号透明度 ---- */
+.fl-line{display:flex;align-items:center;gap:8px;padding:7px 10px;border:1px solid var(--line);
+  border-radius:8px;margin-bottom:6px;background:#fbfcfe;font-size:13px}
+.fl-line .nm{font-weight:600;flex:none}
+.fl-line .ds{color:var(--muted);font-size:12px;flex:1;min-width:0}
+.fl-line .mv{display:flex;gap:3px;flex:none}
+.fl-mini{border:1px solid var(--line);background:#fff;color:var(--muted);border-radius:6px;
+  cursor:pointer;font-size:12px;padding:2px 7px;font-family:inherit}
+.fl-mini:hover{background:#eef3ff;color:var(--accent);border-color:var(--accent)}
+.fl-mini.del:hover{background:#fdecec;color:var(--red);border-color:var(--red)}
+.fl-add{display:flex;gap:8px;align-items:center;margin:10px 0;flex-wrap:wrap}
+.fl-add select{border:1px solid var(--line);border-radius:8px;padding:7px 10px;font-size:13px;
+  background:#fff;color:var(--text);flex:1 1 160px}
+.fl-add button{padding:8px 14px;font-size:13px}
+.fl-field{display:flex;align-items:center;gap:10px;font-size:13px;margin:9px 0}
+.fl-field .k{width:64px;color:var(--muted);flex:none}
+.fl-field input[type=range]{flex:1;accent-color:var(--accent);min-width:80px}
+.fl-field b{width:52px;text-align:right;font-variant-numeric:tabular-nums;font-weight:400;color:var(--muted)}
+.fl-prev{margin:12px 0 2px;background:#1f2430;border-radius:12px;padding:11px 14px;color:#fff;
+  font-size:12px;line-height:1.8;display:inline-block;min-width:170px}
+.fl-prev .t{font-weight:700}
+.fl-prev .r{color:#9ec5ff}
+.fl-prev .g{color:#7be3a6}
+.fl-prev .mu{color:#9aa4b2}
+.fl-vars{font-size:12px;color:var(--muted);margin:6px 0 0;line-height:1.9}
+.fl-var{display:inline-block;border:1px solid var(--line);border-radius:6px;padding:1px 7px;
+  margin:0 5px 4px 0;cursor:pointer;background:#fff;font-family:Consolas,monospace;font-size:11px}
+.fl-var:hover{border-color:var(--accent);color:var(--accent)}
+textarea.fl-tpl{width:100%;border:1px solid var(--line);border-radius:8px;padding:8px 11px;
+  font-size:13px;color:var(--text);background:#fff;font-family:Consolas,monospace;resize:vertical}
+textarea.fl-tpl:focus{outline:none;border-color:var(--accent)}
 </style>
 </head>
 <body>
@@ -136,29 +199,81 @@ canvas{width:100%;height:130px;display:block}
     </div>
   </div>
 
-  <div class="card">
-    <h2 class="fold-toggle" id="scopeToggle" title="点击展开 / 收起接管范围">
-      <span class="fold-arrow" id="scopeArrow">▸</span> 🎯 接管范围
+  <div class="card" id="scopeCard">
+    <h2>🎯 接管范围</h2>
+    <!-- 只留一个入口按钮：候选列表可能很长（Android 上是全部已装 App），
+         放进主页面会把下面的卡片挤到很远，所以挪到二级界面里勾选 -->
+    <p class="scope-tip" style="margin-bottom:10px">当前：<b id="scopeBrief">全部程序</b></p>
+    <div class="btns" style="margin-top:0">
+      <button class="primary" id="scopeOpenBtn">选择接管的应用</button>
+    </div>
+    <p class="scope-tip" id="scopeTip" style="margin:10px 0 0"></p>
+  </div>
+
+  <div class="card" id="fsetCard">
+    <h2 class="fold-toggle" id="floatToggle" title="点击展开 / 收起悬浮窗设置">
+      <span class="fold-arrow" id="floatArrow">▸</span> ⚙ 悬浮窗设置
       <span style="font-size:12px;color:var(--muted);font-weight:400">
-        <span id="scopeHint">点击展开</span> · 当前：<span id="scopeBrief">全部程序</span>
+        <span id="floatHint">点击展开</span> · 当前：<span id="floatBrief">—</span>
       </span>
     </h2>
-    <!-- 默认折叠：多数场景接管全部即可，需要隔离某个程序时才展开勾选 -->
-    <div id="scopeBody" style="display:none">
-      <div class="scope-modes">
-        <label><input type="radio" name="scopeMode" value="all" checked> 全部接管</label>
-        <label><input type="radio" name="scopeMode" value="only"> 仅接管选定项</label>
-        <label><input type="radio" name="scopeMode" value="exclude"> 排除选定项</label>
+    <!-- 默认折叠：多数人用默认三行就够了，需要增删内容时才展开 -->
+    <div id="floatBody" style="display:none">
+      <p class="scope-tip">勾选要在飘窗上显示的内容，用 ↑ ↓ 调整顺序。设置立即生效，正在显示的飘窗会马上重排。</p>
+      <div id="floatLines"></div>
+      <div class="fl-add">
+        <select id="floatAddSel"></select>
+        <button class="ghost" id="floatAddBtn">+ 添加</button>
       </div>
-      <p class="scope-tip" id="scopeTip"></p>
-      <input class="scope-search" id="scopeSearch" placeholder="搜索…">
-      <div class="scope-list" id="scopeList"></div>
+      <div id="floatCustomWrap" style="display:none">
+        <textarea class="fl-tpl" id="floatCustom" rows="2"
+                  placeholder="自定义一行内容，如：↓{rate_down} · 丢包 {loss}% · {scene}"></textarea>
+        <p class="fl-vars">点变量可插入：<span id="floatVars"></span></p>
+      </div>
+      <div class="fl-field">
+        <span class="k">字号</span>
+        <input type="range" id="floatSp" min="8" max="18" step="1">
+        <b id="floatSpV">—</b>
+      </div>
+      <div class="fl-field">
+        <span class="k">不透明度</span>
+        <input type="range" id="floatAlpha" min="30" max="100" step="5">
+        <b id="floatAlphaV">—</b>
+      </div>
+      <div class="fl-prev" id="floatPreview"></div>
       <div class="btns">
-        <button class="primary" id="scopeApplyBtn">应用接管范围</button>
-        <button class="ghost" id="scopeReloadBtn">刷新列表</button>
-        <button class="ghost" id="scopeClearBtn">清空选择</button>
+        <button class="primary" id="floatApplyBtn">应用设置</button>
+        <button class="ghost" id="floatShowBtn">显示飘窗</button>
+        <button class="ghost" id="floatResetBtn">恢复默认</button>
       </div>
+      <p class="my-empty" id="floatTip" style="margin-top:8px"></p>
     </div>
+  </div>
+
+  <!-- 环境共享：只有 Windows 端有（Android 端没有 /api/me，init 里探测失败会隐藏本卡片） -->
+  <div class="card" id="shareCard" style="display:none">
+    <h2>🔗 环境共享</h2>
+    <p class="scope-tip">同一局域网里开着 WeakNet 的机器会自动互相发现。可以把调好的环境推给对方，
+      也可以接收对方推来的环境。</p>
+    <div class="my-save" style="margin-top:0">
+      <input class="scope-search" id="shareName" maxlength="20"
+             placeholder="我在局域网里显示的名字">
+      <button class="ghost" id="shareNameBtn">保存名字</button>
+    </div>
+    <p class="shr-tip" id="shareSelf"></p>
+
+    <div class="group">局域网里的设备<span id="shareTarget"></span></div>
+    <div class="scope-list" id="sharePeers"></div>
+    <div class="btns" style="margin-top:8px">
+      <button class="ghost" id="shareReloadBtn">刷新</button>
+    </div>
+
+    <div class="group">我的自定义环境</div>
+    <div class="scope-list" id="shareMine"></div>
+
+    <div class="group">收到的环境</div>
+    <div class="scope-list" id="shareInbox"></div>
+    <p class="shr-tip" id="shareTipText"></p>
   </div>
 
   <div class="card">
@@ -188,6 +303,34 @@ canvas{width:100%;height:130px;display:block}
     </ol>
   </div>
 </main>
+
+<!-- 二级界面：接管范围。默认隐藏，点主页面的「选择接管的应用」打开 -->
+<div class="subpage" id="scopePage" style="display:none" role="dialog" aria-modal="true">
+  <div class="sub-head">
+    <button class="ghost sub-back" id="scopeBackBtn">← 返回</button>
+    <h3>接管范围</h3>
+    <span class="sub-count" id="scopeCount">已选 0 项</span>
+  </div>
+  <div class="sub-body">
+    <div class="scope-modes">
+      <label><input type="radio" name="scopeMode" value="all" checked> 全部接管</label>
+      <label><input type="radio" name="scopeMode" value="only"> 仅接管选定项</label>
+      <label><input type="radio" name="scopeMode" value="exclude"> 排除选定项</label>
+    </div>
+    <input class="scope-search" id="scopeSearch" placeholder="搜索应用名…">
+    <div class="sub-bar">
+      <span class="grow" id="scopeListHint">共 0 项</span>
+      <button class="ghost" id="scopeAllBtn">全选</button>
+      <button class="ghost" id="scopeNoneBtn">清空</button>
+      <button class="ghost" id="scopeReloadBtn">刷新</button>
+    </div>
+    <div class="scope-list" id="scopeList"></div>
+  </div>
+  <div class="sub-foot">
+    <button class="primary" id="scopeApplyBtn">保存</button>
+    <button class="ghost" id="scopeBackBtn2">返回</button>
+  </div>
+</div>
 
 <script>
 const $ = id => document.getElementById(id);
@@ -353,6 +496,14 @@ async function refresh(){
     }
     // 自定义栏：另一端（桌面 GUI）增删的场景隔几秒同步一次
     if (MY.ok && (++pollTick % 5 === 0)) await syncMy();
+    // 设备会上下线、别人随时可能推环境过来，跟着同一节拍刷新即可
+    if (SH.ok && pollTick % 5 === 0) { loadPeers(); loadInbox(); }
+    // 飘窗可能在 App 里被「显示/收起」按钮改过，权限也可能在系统设置里被撤掉
+    if (FL.ok && s.float) {
+      FL.shown = !!s.float.shown;
+      FL.canOverlay = s.float.can_overlay !== false;
+      syncFloatBtn();
+    }
   } catch (e) {}
 }
 
@@ -372,25 +523,42 @@ function initFold(){
 // 接管范围：Windows 按进程名 / Android 按包名，可多选
 // 两端接口同构：GET /api/targets 取候选，GET·POST /api/scope 读写设置
 // --------------------------------------------------------------------------
-let SCOPE = { mode: "all", list: [], items: [], unit: "目标", dirty: false };
+let SCOPE = { mode: "all", list: [], items: [], unit: "目标", dirty: false,
+              loaded: false, saved: null };
+
+/** 当前可见（未被搜索过滤掉）的候选项 */
+function visibleScopeItems(){
+  const q = ($("scopeSearch").value || "").trim().toLowerCase();
+  // 名字 / 标识 / 备注都参与匹配：包名一长串，用户多半只记得 App 名
+  return SCOPE.items.filter(it => !q ||
+      String(it.name).toLowerCase().includes(q) ||
+      String(it.id).toLowerCase().includes(q) ||
+      String(it.desc || "").toLowerCase().includes(q));
+}
 
 function scopeBrief(){
   if (SCOPE.mode === "all") return "全部" + SCOPE.unit;
-  return (SCOPE.mode === "only" ? "仅 " : "排除 ") + SCOPE.list.length + " 项";
+  return (SCOPE.mode === "only" ? "仅接管 " : "排除 ") + SCOPE.list.length + " 项";
 }
 function syncScopeBrief(){
-  $("scopeBrief").textContent = scopeBrief() + (SCOPE.dirty ? "（未应用）" : "");
+  $("scopeBrief").textContent = scopeBrief();
+  $("scopeCount").textContent = "已选 " + SCOPE.list.length + " 项"
+      + (SCOPE.dirty ? " · 未保存" : "");
+  // 「全部接管」时选谁都不影响结果：把列表置灰，免得用户以为勾了没生效
+  const off = SCOPE.mode === "all";
+  $("scopeList").style.opacity = off ? ".5" : "";
+  $("scopeList").style.pointerEvents = off ? "none" : "";
 }
 
 function renderScopeList(){
-  const q = ($("scopeSearch").value || "").trim().toLowerCase();
+  const items = visibleScopeItems();
   const box = $("scopeList");
-  const items = SCOPE.items.filter(it => !q ||
-      String(it.name).toLowerCase().includes(q) ||
-      String(it.id).toLowerCase().includes(q));
+  $("scopeListHint").textContent = items.length === SCOPE.items.length
+      ? "共 " + SCOPE.items.length + " 项"
+      : "筛出 " + items.length + " / 共 " + SCOPE.items.length + " 项";
   if (!items.length){
     box.innerHTML = '<div class="scope-empty">无匹配项。列表只收录已发起过网络连接的' +
-      SCOPE.unit + '；可先让目标访问一次网络，再点「刷新列表」。</div>';
+      SCOPE.unit + '；可先让目标访问一次网络，再点「刷新」。</div>';
     return;
   }
   box.innerHTML = items.map(it =>
@@ -428,25 +596,61 @@ async function loadScope(){
   $("scopeTip").textContent = (s.supported === false)
     ? "当前平台无法按" + SCOPE.unit + "区分来源，接管范围设置不会生效。"
     : (t.type === "package"
-       ? "仅选定的 App 会进入弱网模拟，其余 App 走真实网络（切换后会自动重建 VPN 通道）。"
+       ? "勾选要接管哪些 App：名单内的走弱网，其余走真实网络（切换后自动重建 VPN 通道）。"
        : "Windows 的系统代理是进程无关的：范围外的程序同样会经过代理，但会被原样转发、不受任何弱网影响。" +
          SCOPE.unit + "需先发起过网络连接才会出现在列表中。");
   renderScopeList();
   syncScopeBrief();
+  SCOPE.loaded = true;
 }
 
-/** 接管范围默认折叠；首次展开时才拉取候选列表，避免无谓请求 */
-function initScopeFold(){
-  const t = $("scopeToggle"), b = $("scopeBody");
-  let loaded = false;
-  t.onclick = () => {
-    const open = b.style.display !== "none";
-    b.style.display = open ? "none" : "";
-    $("scopeArrow").textContent = open ? "▸" : "▾";
-    $("scopeHint").textContent = open ? "点击展开" : "点击收起";
-    if (!open && !loaded) { loaded = true; loadScope().catch(() => {}); }
-    if (!open) drawChart();
-  };
+/** 记住「已保存」的快照：放弃改动时回滚到这里，而不是留着半改不生效的状态 */
+function scopeSnapshot(){ SCOPE.saved = { mode: SCOPE.mode, list: SCOPE.list.slice() }; }
+
+async function openScopePage(){
+  $("scopePage").style.display = "";
+  $("scopeSearch").value = "";
+  if (!SCOPE.loaded){
+    $("scopeList").innerHTML = '<div class="scope-empty">正在读取应用列表…</div>';
+    try {
+      await loadScope();                 // 第一次打开才拉候选，省掉无谓请求
+      scopeSnapshot();
+    } catch (e) {
+      $("scopeList").innerHTML = '<div class="scope-empty">读取失败：'
+          + escapeHtml(String((e && e.message) || e)) + '</div>';
+      return;
+    }
+  } else {
+    renderScopeList();
+    syncScopeBrief();
+    scopeSnapshot();
+  }
+  try { $("scopeSearch").focus(); } catch (e) {}
+}
+
+/** 返回：有未保存改动先问一句（勾了半天点错返回很恼人），确认后回滚到已保存值 */
+function closeScopePage(force){
+  if (SCOPE.dirty && !force &&
+      !confirm("勾选还没保存，返回将丢弃这些改动。确定返回吗？")) return false;
+  if (SCOPE.dirty && SCOPE.saved){
+    SCOPE.mode = SCOPE.saved.mode;
+    SCOPE.list = SCOPE.saved.list.slice();
+    const radio = document.querySelector('input[name=scopeMode][value="' + SCOPE.mode + '"]');
+    if (radio) radio.checked = true;
+  }
+  SCOPE.dirty = false;
+  $("scopePage").style.display = "none";
+  syncScopeBrief();
+  return true;
+}
+
+function initScopePage(){
+  $("scopeOpenBtn").onclick = () => openScopePage();
+  $("scopeBackBtn").onclick = () => closeScopePage();
+  $("scopeBackBtn2").onclick = () => closeScopePage();
+  $("scopePage").addEventListener("keydown", e => {
+    if (e.key === "Escape") closeScopePage();
+  });
 }
 
 // --------------------------------------------------------------------------
@@ -518,6 +722,7 @@ async function loadMy(){
   MY.items = Array.isArray(r.items) ? r.items : [];
   $("myBar").style.display = "";
   renderMy();
+  if (SH.ok) renderShareMine();     // 共享卡片里也列了一份，跟着一起更新
   return true;
 }
 
@@ -525,7 +730,10 @@ async function loadMy(){
 async function syncMy(){
   const r = await api("/api/upresets").catch(() => null);
   if (!r || !Array.isArray(r.items)) return;
-  if (mySig(r.items) !== mySig(MY.items)) { MY.items = r.items; renderMy(); }
+  if (mySig(r.items) !== mySig(MY.items)) {
+    MY.items = r.items; renderMy();
+    if (SH.ok) renderShareMine();
+  }
 }
 
 async function saveMy(){
@@ -576,20 +784,49 @@ $("stopBtn").onclick = async () => {
   refresh();
 };
 $("scopeApplyBtn").onclick = async () => {
-  const mode = document.querySelector("input[name=scopeMode]:checked").value;
-  const r = await api("/api/scope", { mode, list: SCOPE.list });
-  SCOPE.mode = r.mode; SCOPE.list = Array.isArray(r.list) ? r.list.slice() : [];
-  SCOPE.dirty = false;
-  syncScopeBrief();
-  refresh();
+  const b = $("scopeApplyBtn"), old = b.textContent;
+  b.disabled = true; b.textContent = "保存中…";
+  try {
+    const mode = document.querySelector("input[name=scopeMode]:checked").value;
+    const r = await api("/api/scope", { mode, list: SCOPE.list });
+    SCOPE.mode = r.mode; SCOPE.list = Array.isArray(r.list) ? r.list.slice() : [];
+    SCOPE.dirty = false;
+    scopeSnapshot();
+    syncScopeBrief();
+    refresh();
+    closeScopePage(true);        // 保存即返回，主页面摘要会显示新的接管范围
+  } catch (e) {
+    alert("保存失败：" + ((e && e.message) || e));
+  }
+  b.disabled = false; b.textContent = old;
 };
-$("scopeReloadBtn").onclick = async () => { await loadScope(); refresh(); };
+$("scopeReloadBtn").onclick = async () => {
+  const b = $("scopeReloadBtn"), old = b.textContent;
+  b.disabled = true; b.textContent = "刷新中…";
+  try {
+    await loadScope(); scopeSnapshot(); refresh();
+  } catch (e) {
+    $("scopeList").innerHTML = '<div class="scope-empty">刷新失败：'
+        + escapeHtml(String((e && e.message) || e)) + '</div>';
+  }
+  b.disabled = false; b.textContent = old;
+};
+$("scopeAllBtn").onclick = () => {
+  // 只全选当前筛出来的项：搜索「chrome」后点全选，不该把整个列表都勾上
+  visibleScopeItems().forEach(it => {
+    if (SCOPE.list.indexOf(it.id) < 0) SCOPE.list.push(it.id);
+  });
+  SCOPE.dirty = true; renderScopeList(); syncScopeBrief();
+};
+$("scopeNoneBtn").onclick = () => {
+  visibleScopeItems().forEach(it => {
+    const i = SCOPE.list.indexOf(it.id);
+    if (i >= 0) SCOPE.list.splice(i, 1);
+  });
+  SCOPE.dirty = true; renderScopeList(); syncScopeBrief();
+};
 $("saveMyBtn").onclick = saveMy;
 $("myName").onkeydown = e => { if (e.key === "Enter") saveMy(); };
-$("scopeClearBtn").onclick = () => {
-  SCOPE.list = []; SCOPE.dirty = true;
-  renderScopeList(); syncScopeBrief();
-};
 $("scopeSearch").oninput = renderScopeList;
 document.querySelectorAll("input[name=scopeMode]").forEach(r => {
   r.onchange = () => { SCOPE.mode = r.value; SCOPE.dirty = true; syncScopeBrief(); };
@@ -611,19 +848,360 @@ $("lanBtn").onclick = async () => {
   refresh();
 };
 
+// --------------------------------------------------------------------------
+// 环境共享：给自己起个名字 → 发现局域网里其他 WeakNet → 推环境 / 收环境
+//   GET·POST /api/me            名字与本机地址
+//   GET      /api/peers         发现到的设备（靠 UDP 广播，有 TTL）
+//   POST     /api/push          推送 {peer, ids}
+//   GET      /api/inbox         与本地同名的推送，等你决定
+//   POST     /api/inbox/resolve 处理 {id, action:overwrite|keep|rename, name?}
+// --------------------------------------------------------------------------
+let SH = { ok: false, name: "", id: "", share: 0, lan_ip: "", discover: false,
+           peers: [], target: null, inbox: [] };
+
+function shareTip(msg){ $("shareTipText").textContent = msg || ""; }
+
+async function loadShare(){
+  const me = await api("/api/me");
+  SH.ok = true;
+  SH.name = me.name || ""; SH.id = me.id || "";
+  SH.share = me.share || 0; SH.lan_ip = me.lan_ip || "";
+  SH.discover = !!me.discover;
+  // 正在输入时别把人家打了一半的名字冲掉
+  if (document.activeElement !== $("shareName")) $("shareName").value = SH.name;
+  $("shareSelf").textContent = "本机：" + (SH.lan_ip || "—") + ":" + (SH.share || "—")
+      + (SH.discover ? "" : "　⚠ 局域网发现未开启，别人可能看不到你这台机器");
+  await loadPeers();
+  await loadInbox();
+}
+
+async function loadPeers(){
+  const r = await api("/api/peers");
+  SH.peers = r.items || [];
+  // 目标设备下线后别还挂着它，否则之后的推送会一直失败
+  if (SH.target && !SH.peers.some(p => p.id === SH.target.id)) SH.target = null;
+  renderPeers();
+}
+
+function renderPeers(){
+  const box = $("sharePeers");
+  if (!SH.peers.length){
+    box.innerHTML = '<div class="scope-empty">还没发现其他设备。确认对方也开着 WeakNet、'
+        + '和你在同一个局域网，然后点「刷新设备列表」。</div>';
+  } else {
+    box.innerHTML = SH.peers.map(p =>
+        '<div class="shr-row' + (SH.target && SH.target.id === p.id ? " active" : "")
+        + '" data-id="' + escapeHtml(p.id) + '">'
+        + '<span class="nm">' + escapeHtml(p.name) + '</span>'
+        + '<span class="id">' + escapeHtml(p.ip) + ':' + p.share
+        + ' · ' + p.ago + 's 前</span></div>').join("");
+    box.querySelectorAll(".shr-row").forEach(el => {
+      el.onclick = () => {
+        SH.target = SH.peers.find(p => p.id === el.dataset.id) || null;
+        renderPeers();
+      };
+    });
+  }
+  $("shareTarget").textContent = SH.target
+      ? "　→ 推送给 " + SH.target.name : "　（先点选一台设备）";
+  renderShareMine();
+}
+
+function renderShareMine(){
+  const box = $("shareMine");
+  if (!MY.items.length){
+    box.innerHTML = '<div class="scope-empty">还没有自定义环境：在「🎛 自定义参数」里'
+        + '调好参数、起个名字保存后，就能推给别人。</div>';
+    return;
+  }
+  box.innerHTML = MY.items.map(it =>
+      '<div class="shr-row" data-pid="' + escapeHtml(it.id) + '">'
+      + '<span class="nm">' + escapeHtml(it.name) + '</span>'
+      + '<span class="id">' + escapeHtml(profBrief(it.profile)) + '</span>'
+      + '<button class="ghost shr-push">推送</button></div>').join("");
+  box.querySelectorAll(".shr-row").forEach(el => {
+    el.querySelector("button").onclick = () => sharePush(el.dataset.pid);
+  });
+}
+
+async function sharePush(pid){
+  if (!SH.target){ shareTip("先在「局域网里的设备」里点选一台，再推送"); return; }
+  const btn = document.querySelector('.shr-row[data-pid="' + pid + '"] button');
+  if (btn){ btn.disabled = true; btn.textContent = "推送中…"; }
+  try {
+    const r = await api("/api/push", { peer: SH.target, ids: [pid] });
+    if (!r.ok){ shareTip("推送失败：" + (r.error || "对方没有应答")); return; }
+    let msg = "";
+    if (r.accepted && r.accepted.length) msg = "已推送给 " + r.to + "：" + r.accepted.join("、");
+    if (r.pending && r.pending.length)
+      msg += (msg ? "；" : "") + r.to + " 那边已有同名环境，正等对方决定保留还是覆盖";
+    shareTip(msg || "推送完成");
+  } catch (e) {
+    shareTip("推送失败：" + ((e && e.message) || e));
+  } finally {
+    if (btn){ btn.disabled = false; btn.textContent = "推送"; }
+  }
+}
+
+async function loadInbox(){
+  const r = await api("/api/inbox");
+  SH.inbox = r.items || [];
+  renderInbox();
+}
+
+function renderInbox(){
+  const box = $("shareInbox");
+  if (!SH.inbox.length){
+    box.innerHTML = '<div class="scope-empty">暂无需处理的推送。</div>';
+    return;
+  }
+  box.innerHTML = SH.inbox.map(it =>
+      '<div class="shr-in" data-iid="' + escapeHtml(it.id) + '">'
+      + '<div><span class="who">' + escapeHtml(it.from) + '</span> 推来了「'
+      + escapeHtml(it.name) + '」<span class="id"> · '
+      + escapeHtml(profBrief(it.profile)) + '</span></div>'
+      + '<div class="acts">'
+      + '<button class="primary" data-act="overwrite">覆盖我的</button>'
+      + '<button class="ghost" data-act="keep">保留我的</button>'
+      + '<input value="' + escapeHtml(it.name + "（来自 " + it.from + "）") + '" maxlength="40">'
+      + '<button class="ghost" data-act="rename">另存为</button>'
+      + '</div></div>').join("");
+  box.querySelectorAll(".shr-in").forEach(el => {
+    const iid = el.dataset.iid;
+    el.querySelectorAll("button").forEach(b => {
+      b.onclick = () => inboxResolve(iid, b.dataset.act,
+                                     el.querySelector("input").value);
+    });
+  });
+}
+
+async function inboxResolve(iid, act, name){
+  const r = await api("/api/inbox/resolve", { id: iid, action: act, name });
+  if (!r.ok){ shareTip("处理失败：" + (r.error || "")); return; }
+  shareTip({ overwrite: "已用对方的版本覆盖本地同名环境",
+             keep: "已保留你本地的版本，丢弃对方推送的",
+             rename: "已另存为「" + (r.name || name) + "」" }[r.action] || "已处理");
+  await loadMy();          // 覆盖 / 另存都会改变自定义栏
+  await loadInbox();
+}
+
+$("shareNameBtn").onclick = async () => {
+  const nm = ($("shareName").value || "").trim();
+  if (!nm){ shareTip("请先填个名字（对方看到的就是它）"); return; }
+  await api("/api/me", { name: nm });
+  await loadShare();
+  shareTip("名字已保存，局域网里显示为「" + SH.name + "」");
+};
+$("shareName").onkeydown = e => { if (e.key === "Enter") $("shareNameBtn").click(); };
+$("shareReloadBtn").onclick = async () => {
+  // 设备和收件箱一起刷：点了刷新却只刷新一半，用户会以为没收到
+  await loadPeers();
+  await loadInbox();
+  shareTip(SH.peers.length ? "已发现 " + SH.peers.length + " 台设备" : "还没发现其他设备");
+};
+
+// --------------------------------------------------------------------------
+// 悬浮窗设置：显示哪些行 / 顺序 / 自定义文本 / 字号 / 透明度（只有 Android 端有飘窗）
+//   GET  /api/float           当前设置 + 可显示的字段定义 + 变量说明
+//   POST /api/float           保存 {lines, custom, alpha, text_sp}
+//   POST /api/float/show      显示 / 收起 {show:bool}
+// --------------------------------------------------------------------------
+let FL = { ok: false, fields: [], vars: [], lines: [], custom: "",
+           alpha: 0.92, text_sp: 10, shown: false, canOverlay: true, dirty: false };
+
+function flField(id){ return FL.fields.find(x => x.id === id) || {}; }
+function flTouch(){
+  FL.dirty = true;
+  $("floatBrief").textContent =
+    (FL.lines.length ? FL.lines.length + " 行" : "仅标题") + "（未应用）";
+}
+function renderFloatVars(){
+  $("floatVars").innerHTML = FL.vars.map(v =>
+    '<span class="fl-var" data-v="' + escapeHtml(v.var) + '" title="' +
+      escapeHtml(v.desc + "（示例：" + v.sample + "）") + '">' + escapeHtml(v.var) + '</span>').join("");
+  $("floatVars").querySelectorAll(".fl-var").forEach(el => el.onclick = () => {
+    const t = $("floatCustom");
+    const a = t.selectionStart == null ? t.value.length : t.selectionStart;
+    const b = t.selectionEnd == null ? a : t.selectionEnd;
+    t.value = t.value.slice(0, a) + el.dataset.v + t.value.slice(b);
+    t.focus();
+    FL.custom = t.value;
+    flTouch();
+    renderFloatPreview();
+  });
+}
+/** 迷你预览：把配置画成一个小飘窗，不用真机也能先看效果 */
+function renderFloatPreview(){
+  const p = $("floatPreview");
+  const head = FL.lines.indexOf("scene") >= 0
+    ? '<div class="t">⚡ ' + escapeHtml(flField("scene").sample || "场景名") + '</div>'
+    : '<div class="t">⚡ WeakNet</div>';
+  const rows = FL.lines.filter(id => id !== "scene").map(id => {
+    let s = id === "custom" ? (FL.custom || flField(id).sample || "") : (flField(id).sample || "");
+    if (id === "custom") FL.vars.forEach(v => { s = s.split(v.var).join(v.sample); });
+    return '<div class="' + (id === "limit" ? "r" : "g") + '">' + escapeHtml(s || "（空）") + '</div>';
+  });
+  p.innerHTML = head + rows.join("")
+    + (FL.lines.length ? "" : '<div class="mu">（勾选内容后显示在这里）</div>');
+  p.style.opacity = FL.alpha;
+  p.style.fontSize = Math.max(11, Math.min(15, FL.text_sp + 1)) + "px";
+}
+function renderFloatLines(){
+  const box = $("floatLines");
+  box.innerHTML = FL.lines.length ? FL.lines.map((id, i) =>
+      '<div class="fl-line">' +
+        '<span class="nm">' + escapeHtml(flField(id).name || id) + '</span>' +
+        '<span class="ds">' + escapeHtml(flField(id).desc || "") + '</span>' +
+        '<span class="mv">' +
+          '<button class="fl-mini up" data-i="' + i + '" title="上移">↑</button>' +
+          '<button class="fl-mini dn" data-i="' + i + '" title="下移">↓</button>' +
+          '<button class="fl-mini del" data-i="' + i + '" title="移除">✕</button>' +
+        '</span></div>').join("")
+    : '<div class="scope-empty">还没选内容：飘窗只显示标题行。</div>';
+  const move = (i, d) => {
+    const j = i + d;
+    if (j < 0 || j >= FL.lines.length) return;
+    const t = FL.lines[i]; FL.lines[i] = FL.lines[j]; FL.lines[j] = t;
+    flTouch(); renderFloatLines();
+  };
+  box.querySelectorAll("button.up").forEach(b => b.onclick = () => move(+b.dataset.i, -1));
+  box.querySelectorAll("button.dn").forEach(b => b.onclick = () => move(+b.dataset.i, 1));
+  box.querySelectorAll("button.del").forEach(b => b.onclick = () => {
+    FL.lines.splice(+b.dataset.i, 1); flTouch(); renderFloatLines();
+  });
+  // 下拉里只放还没显示的内容
+  const rest = FL.fields.filter(f => FL.lines.indexOf(f.id) < 0);
+  $("floatAddSel").innerHTML = rest.map(f =>
+      '<option value="' + escapeHtml(f.id) + '">' + escapeHtml(f.name) +
+      ' — ' + escapeHtml(f.desc) + '</option>').join("")
+    || '<option value="">（可选内容都已显示）</option>';
+  $("floatAddBtn").disabled = !rest.length;
+  $("floatCustomWrap").style.display = FL.lines.indexOf("custom") >= 0 ? "" : "none";
+  if (!FL.dirty) $("floatBrief").textContent = FL.lines.length ? FL.lines.length + " 行" : "仅标题";
+  renderFloatPreview();
+}
+function applyFloatSettings(s){
+  FL.lines = Array.isArray(s.lines) ? s.lines.slice() : [];
+  FL.custom = s.custom || "";
+  FL.alpha = typeof s.alpha === "number" ? s.alpha : 0.92;
+  FL.text_sp = typeof s.text_sp === "number" ? s.text_sp : 10;
+  $("floatCustom").value = FL.custom;
+  $("floatSp").value = FL.text_sp;
+  $("floatSpV").textContent = FL.text_sp + "sp";
+  $("floatAlpha").value = Math.round(FL.alpha * 100);
+  $("floatAlphaV").textContent = Math.round(FL.alpha * 100) + "%";
+}
+function syncFloatBtn(){
+  const b = $("floatShowBtn");
+  b.textContent = FL.shown ? "收起飘窗" : "显示飘窗";
+  b.disabled = !FL.canOverlay && !FL.shown;
+  b.title = FL.canOverlay ? "" : "未授予悬浮窗权限：请先在 App 里开启「显示在其他应用上层」";
+}
+async function loadFloat(){
+  let r;
+  try { r = await api("/api/float"); }
+  catch (e) { FL.ok = false; $("fsetCard").style.display = "none"; return false; }
+  if (!r || r.supported !== true) { FL.ok = false; $("fsetCard").style.display = "none"; return false; }
+  FL.ok = true;
+  FL.fields = Array.isArray(r.fields) ? r.fields : [];
+  FL.vars = Array.isArray(r.vars) ? r.vars : [];
+  FL.shown = !!r.shown;
+  FL.canOverlay = r.can_overlay !== false;
+  applyFloatSettings(r.settings || {});
+  FL.dirty = false;
+  renderFloatVars();
+  renderFloatLines();
+  syncFloatBtn();
+  return true;
+}
+async function saveFloat(msg){
+  FL.custom = $("floatCustom").value;
+  const r = await api("/api/float",
+      {lines: FL.lines, custom: FL.custom, alpha: FL.alpha, text_sp: FL.text_sp});
+  if (r && r.settings) applyFloatSettings(r.settings);
+  FL.dirty = false;
+  renderFloatLines();
+  $("floatTip").textContent = msg || ("已应用 · 飘窗显示 " +
+      (FL.lines.length ? FL.lines.length + " 行" : "仅标题") + (FL.shown ? "" : "（点「显示飘窗」查看）"));
+}
+/** 悬浮窗默认折叠；首次展开才拉设置（Windows 端不支持时整张卡片已隐藏） */
+function initFloatFold(){
+  const t = $("floatToggle"), b = $("floatBody");
+  let loaded = false;
+  t.onclick = () => {
+    const open = b.style.display !== "none";
+    b.style.display = open ? "none" : "";
+    $("floatArrow").textContent = open ? "▸" : "▾";
+    $("floatHint").textContent = open ? "点击展开" : "点击收起";
+    if (!open && !loaded) { loaded = true; loadFloat(); }
+    if (!open) drawChart();
+  };
+}
+$("floatAddBtn").onclick = () => {
+  const v = $("floatAddSel").value;
+  if (!v) return;
+  FL.lines.push(v); flTouch(); renderFloatLines();
+};
+$("floatSp").oninput = e => {
+  FL.text_sp = +e.target.value;
+  $("floatSpV").textContent = FL.text_sp + "sp";
+  flTouch(); renderFloatPreview();
+};
+$("floatAlpha").oninput = e => {
+  FL.alpha = +e.target.value / 100;
+  $("floatAlphaV").textContent = e.target.value + "%";
+  flTouch(); renderFloatPreview();
+};
+$("floatCustom").oninput = e => { FL.custom = e.target.value; flTouch(); renderFloatPreview(); };
+$("floatApplyBtn").onclick = () => saveFloat();
+$("floatResetBtn").onclick = async () => {
+  // 必须先把界面状态改回默认再保存：否则 saveFloat 会用旧状态再 POST 一次，
+  // 把刚提交的默认值覆盖回去（表现就是「点了恢复默认却没变」）
+  applyFloatSettings({lines: ["scene", "limit", "rate"], custom: "", alpha: 0.92, text_sp: 10});
+  FL.dirty = false;
+  renderFloatLines();
+  await saveFloat("已恢复默认：场景名 / 限速 / 实时速率");
+};
+$("floatShowBtn").onclick = async () => {
+  const b = $("floatShowBtn"), old = b.textContent;
+  b.disabled = true; b.textContent = "…";
+  const r = await api("/api/float/show", {show: !FL.shown}).catch(() => null);
+  if (r) {
+    FL.shown = !!r.shown;
+    FL.canOverlay = r.can_overlay !== false;
+    $("floatTip").textContent = r.msg || "";
+  }
+  b.disabled = false; b.textContent = old;
+  syncFloatBtn();
+};
+
 (async function init(){
   buildSliders();
   initFold();                     // 自定义参数默认折叠，点标题展开
-  initScopeFold();                // 接管范围同样默认折叠
+  initScopePage();                // 接管范围：主页面只留按钮，勾选在二级界面里做
   buildPresets(await api("/api/presets"));
   // 自定义栏：保存过的场景。老引擎没有 /api/upresets 时 loadMy 会自行隐藏该栏
   await loadMy();
   // 老版本引擎没有 /api/targets（尚未支持接管范围）：直接隐藏该卡片，避免留一张空卡误导
-  try { await api("/api/targets"); }
-  catch (e) {
-    const card = $("scopeToggle") && $("scopeToggle").closest(".card");
-    if (card) card.style.display = "none";
+  // 顺便取回「程序 / App」这个称谓，好让主页面摘要在打开二级界面前就写对
+  try {
+    const t0 = await api("/api/targets");
+    if (t0 && t0.unit) { SCOPE.unit = t0.unit; syncScopeBrief(); }
+  } catch (e) {
+    if ($("scopeCard")) $("scopeCard").style.display = "none";
   }
+  // 环境共享只有 Windows 端有：Android 端没有 /api/me，探测失败就整卡隐藏
+  try {
+    await api("/api/me");
+    $("shareCard").style.display = "";
+    await loadShare();
+  } catch (e) {
+    if ($("shareCard")) $("shareCard").style.display = "none";
+  }
+  // 悬浮窗只有 Android 端有：Windows 引擎不带 float 字段，整张卡片隐藏，不留空壳
+  const st0 = await api("/api/status").catch(() => null);
+  if (st0 && st0.float && st0.float.supported) initFloatFold();
+  else $("fsetCard").style.display = "none";
   refresh();
   setInterval(refresh, 1000);
   window.addEventListener("resize", drawChart);

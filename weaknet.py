@@ -22,6 +22,7 @@ WeakNet —— App 弱网测试工具（本地代理式弱网模拟器）
 import argparse
 import asyncio
 import atexit
+import functools
 import json
 import os
 import random
@@ -31,6 +32,8 @@ import sys
 import time
 import traceback
 import urllib.parse
+import urllib.request
+import uuid
 import webbrowser
 from collections import deque
 from pathlib import Path
@@ -622,6 +625,14 @@ class G:
     scope_seen = {}             # 观测到的进程名 -> 次数（便于用户选择要接管谁）
     bytes_bypass = 0            # 未接管程序的直通流量（不计入弱网统计）
     user_presets = None         # 自定义栏（用户保存的场景），None = 尚未从磁盘加载
+    # ---- 环境共享 ----
+    self_id = ""                # 本机标识（区分广播是不是自己发的）
+    user_name = ""              # 局域网上显示的名字
+    peers = {}                  # peer id -> {id,name,ip,platform,share,at}
+    inbox = {}                  # 收到的同名环境，等本地决定保留 / 覆盖
+    share_port = 0              # 共享服务端口（0 = 未开启）
+    share_server = None
+    discover_listen = False     # 是否成功监听了 UDP 广播
 
 
 BYPASS_PROFILE = default_profile("（未接管 · 直通）")
@@ -1158,6 +1169,394 @@ async def restart_proxy(host):
 # Web 控制台 / API
 # --------------------------------------------------------------------------
 
+# ==========================================================================
+# 环境共享：发现同一个局域网里的其他 WeakNet 用户，互相推送自定义测试环境
+#
+# 发现走 UDP 广播：每 3 秒喊一句「我是谁、我的共享端口是多少」，同时听别人的。
+# 推送则是本机主动 HTTP POST 到对方的共享端口 —— 这样对方不必把整个控制台
+# 暴露到局域网上，只开一个只认 /api/share 和 /api/hello 的小服务。
+# ==========================================================================
+DISCOVER_PORT = 18899          # UDP 广播起始端口（发现用）
+DISCOVER_SPAN = 8              # 同机多实例时各占其后的一个端口，广播时逐个都发一份
+SHARE_PORT = 8900              # TCP 共享端口（接收别人推送用）
+DISCOVER_TAG = "weaknet-discover-v1"
+PEER_TTL = 12.0                # 超过这么久没再收到广播，就当对方下线了
+
+
+def _settings_file():
+    """用户名的落盘位置（与自定义场景同一套候选目录）"""
+    try:
+        return _preset_files()[0].with_name("weaknet_settings.json")
+    except Exception:
+        return Path("weaknet_settings.json")
+
+
+def _default_user_name():
+    """默认名：优先取系统用户名，取不到退回主机名"""
+    for key in ("USERNAME", "USER"):
+        v = os.environ.get(key)
+        if v and v.strip():
+            return v.strip()[:24]
+    try:
+        return (socket.gethostname() or "WeakNet")[:24]
+    except Exception:
+        return "WeakNet"
+
+
+def load_settings():
+    """纯读，不做补全。
+
+    补全不能放在这里：读一次就现编一个 id 的话，同一次运行里前后两次读会拿到
+    两个不同的 id —— 表现就是「改个名字，局域网里就多出一个同名的幽灵设备」
+    （对方按 id 区分 peer，旧 id 要过 TTL 才消失）。补全统一交给 ensure_identity。
+    """
+    try:
+        f = _settings_file()
+        if f.exists():
+            d = json.loads(f.read_text(encoding="utf-8"))
+            if isinstance(d, dict):
+                return d
+    except Exception:
+        pass
+    return {}
+
+
+def save_settings(d):
+    try:
+        f = _settings_file()
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text(json.dumps(d, ensure_ascii=False, indent=2), encoding="utf-8")
+        return True
+    except Exception:
+        return False
+
+
+def clean_name(name, fallback="WeakNet"):
+    """用户名/场景名清洗：压掉多余空白，限长"""
+    s = " ".join(str(name or "").split())[:24]
+    return s or fallback
+
+
+def ensure_identity():
+    """保证「我是谁」有值且已落盘：缺 id / 名字时才生成并保存一次。
+
+    id 用来区分局域网广播是不是自己发的，必须稳定 —— 否则改名或重启都会
+    换一个身份，对方会看到多个同名设备。
+    """
+    d = load_settings()
+    changed = False
+    if not d.get("id"):
+        d["id"] = uuid.uuid4().hex[:12]
+        changed = True
+    if not d.get("name"):
+        d["name"] = _default_user_name()
+        changed = True
+    if changed:
+        save_settings(d)
+    G.self_id = d["id"]
+    G.user_name = d["name"]
+    return d
+
+
+def set_user_name(name):
+    d = ensure_identity()          # 先补齐 id 再改名，避免改完名字 id 还是空的
+    d["name"] = clean_name(name)
+    save_settings(d)
+    G.user_name = d["name"]
+    return G.user_name
+
+
+def init_identity():
+    """启动时装载「我是谁」；没设置过就用系统用户名"""
+    ensure_identity()
+
+
+class _DiscoverProtocol(asyncio.DatagramProtocol):
+    """收到别人的广播就登记一下；自己的广播不算（靠 id 区分）"""
+
+    def datagram_received(self, data, addr):
+        try:
+            msg = json.loads(data.decode("utf-8"))
+        except Exception:
+            return
+        if not isinstance(msg, dict) or msg.get("tag") != DISCOVER_TAG:
+            return
+        pid = str(msg.get("id") or "")
+        if not pid or pid == G.self_id:
+            return
+        G.peers[pid] = {
+            "id": pid,
+            "name": clean_name(msg.get("name"), "匿名"),
+            "ip": addr[0],
+            "platform": str(msg.get("platform") or "")[:16],
+            "share": int(msg.get("share") or SHARE_PORT),
+            "at": time.time(),
+        }
+
+    def error_received(self, exc):
+        pass
+
+
+def _bind_discover():
+    """在 DISCOVER_PORT 起的一段端口里挑一个能 bind 的，返回 (socket, port)。
+
+    为什么不是一个固定端口：UDP 端口只能被一个进程占用，同机跑多个实例
+    （调试时常见，用户也可能开着两个窗口）时只有第一个绑得上，其余实例
+    收不到任何广播 —— 表现为「单向发现」：A 看得到 B，B 看不到 A。
+    各占一个端口 + 广播时整段都发一份，两边就都能收到。
+    """
+    for i in range(DISCOVER_SPAN):
+        p = DISCOVER_PORT + i
+        s = None
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+            s.bind(("0.0.0.0", p))
+            return s, p
+        except OSError:
+            try:
+                s.close()
+            except Exception:
+                pass
+    return None, 0
+
+
+def _broadcast_presence():
+    """向本网段喊一声：255.255.255.255 与子网广播地址都发，
+    后者能绕开部分路由器/虚拟网卡对全广播地址的过滤；端口整段逐个发。"""
+    payload = json.dumps({
+        "tag": DISCOVER_TAG, "id": G.self_id, "name": G.user_name,
+        "platform": "windows" if IS_WIN else os.name,
+        "share": G.share_port or SHARE_PORT, "ver": 1,
+    }, ensure_ascii=False).encode("utf-8")
+    addrs = ["255.255.255.255"]
+    try:
+        ip = G.lan_ip
+        if ip and ip != "127.0.0.1":
+            addrs.append(ip.rsplit(".", 1)[0] + ".255")
+    except Exception:
+        pass
+    for a in addrs:
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+            s.settimeout(0.5)
+            for i in range(DISCOVER_SPAN):
+                s.sendto(payload, (a, DISCOVER_PORT + i))
+            s.close()
+        except Exception:
+            pass
+
+
+async def discovery_loop():
+    """广播 + 收听，并剔除已下线的 peer"""
+    sock, port = _bind_discover()
+    if sock is None:
+        # 整段都被占了：不收听，但仍能向外广播让别人发现自己
+        G.discover_listen = False
+        log_event("share", "局域网发现未能监听（UDP %d-%d 均被占用）"
+                  % (DISCOVER_PORT, DISCOVER_PORT + DISCOVER_SPAN - 1))
+    else:
+        try:
+            # 传 sock= 时不能再带 allow_broadcast 之类的 socket 修饰参数
+            #（Python 3.13 起会直接抛 "socket modifier keyword arguments..."），
+            # 广播开关在 _bind_discover 里已经用 setsockopt 设好了
+            await asyncio.get_running_loop().create_datagram_endpoint(
+                _DiscoverProtocol, sock=sock)
+            G.discover_listen = True
+            log_event("share", "局域网发现已开启（UDP %d）" % port)
+        except Exception as e:
+            try:
+                sock.close()
+            except Exception:
+                pass
+            G.discover_listen = False
+            log_event("share", "局域网发现未能监听（%s）" % str(e)[:40])
+    bc = 0
+    while True:
+        try:
+            _broadcast_presence()
+            bc += 1
+            if bc == 1:
+                log_event("share", "已向局域网广播本机名称：" + G.user_name)
+        except Exception as e:
+            log_event("share", "广播失败：" + str(e)[:60])
+        now = time.time()
+        for pid in [k for k, v in list(G.peers.items()) if now - v["at"] > PEER_TTL]:
+            G.peers.pop(pid, None)
+        await asyncio.sleep(3)
+
+
+def _find_preset_by_name(name):
+    for it in get_user_presets():
+        if it["name"].strip().lower() == str(name or "").strip().lower():
+            return it
+    return None
+
+
+def receive_share(payload):
+    """别人推给我的环境：不同名直接入库；同名先进收件箱，等本地用户决定
+    保留还是覆盖（同名静默覆盖会把人家调好的参数冲掉，不能替用户做主）。"""
+    items = payload.get("items")
+    if not isinstance(items, list) or not items:
+        return {"ok": False, "error": "没有内容"}
+    from_name = clean_name(payload.get("from"), "某人")
+    from_id = str(payload.get("from_id") or "")
+    accepted, pending = [], []
+    for it in items[:20]:
+        if not isinstance(it, dict):
+            continue
+        name = clean_name(it.get("name"), "")
+        if not name:
+            continue
+        prof = _norm_user_profile(name, it.get("profile") or {})
+        if _find_preset_by_name(name) is None:
+            newit, _all = upsert_user_preset(name, prof)   # 返回 (item, items)
+            accepted.append(newit["name"])
+            log_event("share", "收到 %s 推送的环境：%s" % (from_name, newit["name"]))
+        else:
+            iid = _new_pid(set(G.inbox))
+            G.inbox[iid] = {"id": iid, "from": from_name, "from_id": from_id,
+                            "name": name, "profile": prof, "at": time.time()}
+            pending.append({"id": iid, "name": name})
+            log_event("share", "%s 推送的「%s」与本地同名，等你决定" % (from_name, name))
+    return {"ok": True, "accepted": accepted, "pending": pending, "name": G.user_name}
+
+
+def resolve_inbox(iid, action, new_name=None):
+    """处理收件箱里的一条：overwrite=覆盖本地 / keep=保留本地 / rename=另存为新名字"""
+    item = G.inbox.pop(iid, None)
+    if item is None:
+        return {"ok": False, "error": "该请求已处理或不存在"}
+    name = item["name"]
+    if action == "keep":
+        log_event("share", "保留本地的「%s」，丢弃 %s 推送的版本" % (name, item["from"]))
+        return {"ok": True, "action": "keep", "name": name}
+    if action == "rename":
+        nm = clean_name(new_name, "")
+        if not nm:
+            nm = clean_name("%s（来自 %s）" % (name, item["from"]), "")
+        it, _all = upsert_user_preset(nm, item["profile"])
+        log_event("share", "已把 %s 推送的环境另存为「%s」" % (item["from"], it["name"]))
+        return {"ok": True, "action": "rename", "name": it["name"]}
+    exists = _find_preset_by_name(name)
+    it, _all = upsert_user_preset(name, item["profile"], pid=(exists or {}).get("id"))
+    log_event("share", "已用 %s 推送的版本覆盖「%s」" % (item["from"], it["name"]))
+    return {"ok": True, "action": "overwrite", "name": it["name"]}
+
+
+def _post_share(ip, port, payload, timeout=6):
+    req = urllib.request.Request(
+        "http://%s:%d/api/share" % (ip, port),
+        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+        headers={"Content-Type": "application/json"}, method="POST")
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return json.loads(r.read().decode("utf-8"))
+
+
+async def push_to_peer(peer, item_ids):
+    """把本地的自定义环境推给一个 peer。同步 HTTP 放线程池，别卡住事件循环。"""
+    by_id = {p["id"]: p for p in get_user_presets()}
+    items = []
+    for iid in (item_ids or []):
+        p = by_id.get(iid)
+        if p:
+            items.append({"id": p["id"], "name": p["name"], "profile": p["profile"]})
+    if not items:
+        return {"ok": False, "error": "没找到要推送的环境"}
+    payload = {"from": G.user_name, "from_id": G.self_id,
+               "platform": "windows" if IS_WIN else os.name, "items": items}
+    ip = str(peer.get("ip") or "")
+    port = int(peer.get("share") or SHARE_PORT)
+    who = peer.get("name") or ip
+    if not ip:
+        return {"ok": False, "error": "对方地址为空"}
+    try:
+        res = await asyncio.get_running_loop().run_in_executor(
+            None, functools.partial(_post_share, ip, port, payload))
+    except Exception as e:
+        log_event("share", "推送给 %s 失败：%s" % (who, str(e)[:60]))
+        return {"ok": False, "error": str(e)[:160]}
+    accepted = [str(x) for x in (res.get("accepted") or [])]
+    pending = res.get("pending") or []
+    if accepted:
+        log_event("share", "已推送给 %s：%s" % (res.get("name") or who, "、".join(accepted)))
+    if pending:
+        log_event("share", "%s 那边已有同名环境，等对方确认：%s"
+                  % (res.get("name") or who,
+                     "、".join(str(p.get("name")) for p in pending)))
+    return {"ok": True, "to": res.get("name") or who,
+            "accepted": accepted, "pending": pending}
+
+
+async def handle_share(reader, writer):
+    """共享端口上的小 HTTP 服务：只认 /api/hello 与 /api/share。
+    刻意不复用控制台那一套 —— 这个端口是对局域网开放的，暴露面越小越好。"""
+    try:
+        line = await asyncio.wait_for(reader.readline(), 5)
+        parts = line.decode("latin1").split()
+        if len(parts) < 2:
+            return
+        method, path = parts[0].upper(), parts[1].split("?")[0]
+        headers = []
+        while True:
+            h = await reader.readline()
+            if not h or h in (b"\r\n", b"\n"):
+                break
+            headers.append(h)
+        cl = 0
+        for h in headers:
+            if h.lower().startswith(b"content-length:"):
+                try:
+                    cl = int(h.split(b":", 1)[1])
+                except Exception:
+                    cl = 0
+        body = await reader.readexactly(cl) if cl else b""
+
+        if path == "/api/hello":
+            send_response(writer, 200, JSON_CT, json.dumps({
+                "app": "weaknet", "name": G.user_name, "id": G.self_id,
+                "platform": "windows" if IS_WIN else os.name,
+            }, ensure_ascii=False).encode())
+        elif method == "POST" and path == "/api/share":
+            try:
+                d = json.loads(body.decode("utf-8"))
+            except Exception:
+                d = {}
+            res = receive_share(d if isinstance(d, dict) else {})
+            send_response(writer, 200, JSON_CT,
+                          json.dumps(res, ensure_ascii=False).encode())
+        else:
+            send_response(writer, 404, JSON_CT, b'{"error":"not found"}')
+    except Exception as e:
+        # 不静默吞掉：这里一旦出错，推送方只会看到「连接被关闭」，
+        # 而接收方其实已经把环境收下了，两边对不上最难排查
+        log_event("share", "共享服务处理出错：%s" % str(e)[:100])
+    finally:
+        try:
+            writer.close()
+        except Exception:
+            pass
+
+
+async def start_sharing():
+    """开启共享服务与局域网发现。任何一步失败都不影响弱网功能本身。"""
+    port = SHARE_PORT
+    try:
+        if not can_bind(port, "0.0.0.0"):
+            port = find_free_port(port, "0.0.0.0")
+        G.share_server = await asyncio.start_server(handle_share, "0.0.0.0", port)
+        G.share_port = port
+        log_event("share", "环境共享已开启（端口 %d）" % port)
+    except Exception as e:
+        G.share_port = 0
+        log_event("share", "环境共享未能开启：%s" % str(e)[:60])
+    try:
+        asyncio.get_running_loop().create_task(discovery_loop())
+    except Exception:
+        pass
+
+
 def status_payload():
     ev = list(G.events)[-60:]
     ev.reverse()
@@ -1184,6 +1583,13 @@ def status_payload():
             "seen": sorted(G.scope_seen.keys(),
                            key=lambda k: -G.scope_seen[k])[:20],
         },
+        "me": {
+            "name": G.user_name,
+            "id": G.self_id,
+            "share": G.share_port,
+            "discover": G.discover_listen,
+        },
+        "inbox_count": len(G.inbox),
     }
 
 
@@ -1349,6 +1755,70 @@ async def handle_ctrl(reader, writer):
                 await restart_proxy(host)
                 log_event("config", f"代理监听切换为 {host}:{G.proxy_port}")
                 send_response(writer, 200, JSON_CT, b'{"ok":true}')
+        # ---- 环境共享：用户名 / 局域网 peer / 推送 / 收件箱 ----
+        elif path == "/api/me":
+            if method == "POST":
+                try:
+                    nm = json.loads(body).get("name")
+                except Exception:
+                    nm = None
+                if nm is not None:
+                    set_user_name(nm)
+                    log_event("share", "本机名称改为：" + G.user_name)
+            send_response(writer, 200, JSON_CT, json.dumps({
+                "name": G.user_name, "id": G.self_id, "share": G.share_port,
+                "discover": G.discover_listen, "lan_ip": G.lan_ip,
+                "platform": "windows" if IS_WIN else os.name,
+            }, ensure_ascii=False).encode())
+        elif path == "/api/peers":
+            now = time.time()
+            items = []
+            for p in sorted(G.peers.values(), key=lambda x: x["name"].lower()):
+                items.append({"id": p["id"], "name": p["name"], "ip": p["ip"],
+                              "platform": p["platform"], "share": p["share"],
+                              "ago": int(now - p["at"])})
+            send_response(writer, 200, JSON_CT, json.dumps({
+                "items": items,
+                "self": {"name": G.user_name, "id": G.self_id,
+                         "share": G.share_port, "lan_ip": G.lan_ip},
+                "discover": G.discover_listen,
+            }, ensure_ascii=False).encode())
+        elif method == "POST" and path == "/api/push":
+            try:
+                d = json.loads(body)
+            except Exception:
+                d = {}
+            ids = d.get("ids")
+            if isinstance(ids, str):
+                ids = [ids]
+            if not isinstance(ids, list):
+                ids = []
+            peer = d.get("peer")
+            if isinstance(peer, str) and ":" in peer:      # 兼容 "ip:port" 写法
+                ip, _, pstr = peer.partition(":")
+                peer = {"ip": ip, "share": int(pstr or SHARE_PORT), "name": ip}
+            if not isinstance(peer, dict) or not peer.get("ip"):
+                send_response(writer, 400, JSON_CT, b'{"error":"bad peer"}')
+            else:
+                res = await push_to_peer(peer, ids)
+                send_response(writer, 200, JSON_CT,
+                              json.dumps(res, ensure_ascii=False).encode())
+        elif path == "/api/inbox":
+            items = []
+            for it in sorted(G.inbox.values(), key=lambda x: x["at"]):
+                items.append({"id": it["id"], "from": it["from"], "name": it["name"],
+                              "profile": it["profile"], "ago": int(time.time() - it["at"])})
+            send_response(writer, 200, JSON_CT,
+                          json.dumps({"items": items}, ensure_ascii=False).encode())
+        elif method == "POST" and path == "/api/inbox/resolve":
+            try:
+                d = json.loads(body)
+            except Exception:
+                d = {}
+            res = resolve_inbox(str(d.get("id") or ""), str(d.get("action") or ""),
+                                d.get("name"))
+            send_response(writer, 200, JSON_CT,
+                          json.dumps(res, ensure_ascii=False).encode())
         else:
             send_response(writer, 404, "text/plain; charset=utf-8", b"not found")
         await writer.drain()
@@ -1368,11 +1838,16 @@ async def handle_ctrl(reader, writer):
 async def serve(host, proxy_port, ctrl_port):
     """启动代理 + 控制台服务（CLI 与 GUI 共用），返回 (proxy_server, ctrl_server)"""
     G.wake = asyncio.Event()          # 供 nap() 打断挂起连接使用
+    init_identity()                   # 「我是谁」——局域网共享要用
     proxy = await asyncio.start_server(handle_proxy, host, proxy_port, limit=1 << 20)
     ctrl = await asyncio.start_server(handle_ctrl, "127.0.0.1", ctrl_port)
     G.proxy_host = host
     G.proxy_port = proxy_port
     G.proxy_server = proxy
+    try:
+        await start_sharing()         # 共享端口 + 局域网发现（失败不影响弱网本身）
+    except Exception as e:
+        log_event("share", "环境共享启动异常：" + str(e)[:80])
     return proxy, ctrl
 
 

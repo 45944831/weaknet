@@ -1,6 +1,7 @@
 # ===== 构建中间产物 =====
 android/build/
 android/_cm/
+android/_cm_check/
 android/_jw/
 android/_tmpcls/
 android/_tmpdex/
@@ -22,6 +23,8 @@ android/cmdline.zip
 weaknet.log
 # 用户保存的自定义场景（运行时生成，随环境而异，不入仓库）
 weaknet_presets.json
+# 局域网用户名与本机标识（同上，随机器而异）
+weaknet_settings.json
 serve.bin
 __pycache__/
 *.pyc

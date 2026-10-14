@@ -449,106 +449,243 @@ class App:
         Windows 的系统代理是进程无关的，无法只对某个 exe 生效，因此这里改在
         代理层按来源进程过滤 —— 范围外的程序照样经过代理，但会被原样转发、
         不受任何弱网影响，效果等同没被接管。
-        """
-        box = self._card_fold(self.root,
-                              "接管范围（默认收起 · 指定哪些程序进入弱网 · 可多选）",
-                              collapsed=True)
-        self.scope_card = self.root.nametowidget(box.winfo_parent())
-        self.scope_toggle = self._last_fold_toggle
 
-        self.scope_mode = tk.StringVar(value="all")
-        modes = tk.Frame(box, bg=CARD)
-        modes.pack(fill="x")
+        候选程序动辄几十上百个，直接摊在主窗口会把下面的面板挤没，
+        所以主界面只放一个入口按钮，勾选放进二级窗口（open_scope）。
+        """
+        box = self._card(self.root, "接管范围")
+        self.scope_card = box
+        self.scope_win = None                 # 二级窗口，None = 当前未打开
+        self.scope_items = []                 # 全部候选程序名
+        self.scope_view = []                  # 当前筛选后显示的那部分
+        self.scope_sel = set()                # 二级窗口里的勾选（未保存前不进引擎）
+        self.scope_mode = tk.StringVar(value=W.G.scope_mode)
+
+        row = tk.Frame(box, bg=CARD)
+        row.pack(fill="x")
+        tk.Label(row, text="当前：", font=FONT, bg=CARD, fg=MUTED).pack(side="left")
+        self.lab_scope = tk.Label(row, text="全部程序", font=FONT_B, bg=CARD,
+                                  fg=TEXT, anchor="w")
+        self.lab_scope.pack(side="left")
+        self.scope_open_btn = tk.Button(
+            row, text="选择接管的程序…", font=FONT_B, bg=ACCENT, fg="white",
+            relief="flat", padx=14, pady=5, cursor="hand2", command=self.open_scope)
+        self.scope_open_btn.pack(side="right")
+        tk.Label(box, text="范围外的程序仍会经过代理，但会被原样转发、不受弱网影响；"
+                           "程序需先发起过网络连接才会出现在列表里。",
+                 font=FONT, bg=CARD, fg=MUTED, anchor="w", justify="left",
+                 wraplength=780).pack(fill="x", pady=(6, 0))
+        self._scope_tip()
+
+    # ---------------- 接管范围：二级窗口 ----------------
+
+    def open_scope(self):
+        """打开二级窗口：罗列所有候选程序，勾选后保存 / 返回"""
+        if self.scope_win is not None:
+            try:                              # 已经开着就提到前台，不重复建
+                self.scope_win.deiconify()
+                self.scope_win.lift()
+                return
+            except Exception:
+                self.scope_win = None
+
+        win = tk.Toplevel(self.root)
+        win.title("接管范围")
+        win.geometry("520x560")
+        win.configure(bg=BG)
+        try:
+            win.transient(self.root)
+        except Exception:
+            pass
+        self.scope_win = win
+        self.scope_mode.set(W.G.scope_mode)
+        self.scope_sel = set(W.G.scope_list)      # 以引擎当前值为起点
+
+        head = tk.Frame(win, bg=CARD, highlightbackground=LINE, highlightthickness=1)
+        head.pack(fill="x", padx=12, pady=12)
+        tk.Button(head, text="← 返回", font=FONT, bg="#eef2f7", fg=TEXT,
+                  relief="flat", padx=12, pady=5, cursor="hand2",
+                  command=lambda: self.close_scope()).pack(side="left")
+        tk.Label(head, text="接管范围", font=FONT_T, bg=CARD, fg=TEXT).pack(
+            side="left", padx=(12, 0))
+        self.lab_scope_count = tk.Label(head, text="", font=FONT, bg=CARD, fg=MUTED)
+        self.lab_scope_count.pack(side="right")
+
+        modes = tk.Frame(win, bg=BG)
+        modes.pack(fill="x", padx=12)
         for val, text in [("all", "全部接管"),
                           ("only", "仅接管选定程序"),
                           ("exclude", "排除选定程序")]:
             tk.Radiobutton(modes, text=text, variable=self.scope_mode, value=val,
-                           bg=CARD, fg=TEXT, font=FONT, selectcolor="#eef3ff",
-                           activebackground=CARD, highlightthickness=0,
-                           command=self._scope_tip).pack(side="left", padx=(0, 14))
+                           bg=BG, fg=TEXT, font=FONT, selectcolor="#eef3ff",
+                           activebackground=BG, highlightthickness=0,
+                           command=self._scope_sync_count).pack(side="left", padx=(0, 14))
 
-        self.lab_scope = tk.Label(box, text="", font=FONT, bg=CARD, fg=MUTED,
-                                  justify="left", anchor="w", wraplength=780)
-        self.lab_scope.pack(fill="x", pady=(6, 4))
+        self.scope_search = tk.StringVar()
+        ent = tk.Entry(win, textvariable=self.scope_search, font=FONT,
+                       relief="flat", highlightthickness=1, highlightbackground=LINE,
+                       highlightcolor=ACCENT, bg=CARD, fg=TEXT)
+        ent.pack(fill="x", padx=12, pady=(8, 0))
+        ent.bind("<KeyRelease>", lambda _e: self._scope_fill())
 
-        wrap = tk.Frame(box, bg=CARD)
-        wrap.pack(fill="x")
+        bar = tk.Frame(win, bg=BG)
+        bar.pack(fill="x", padx=12, pady=(8, 0))
+        tk.Button(bar, text="全选", font=FONT, bg="#eef2f7", fg=TEXT, relief="flat",
+                  padx=12, pady=4, cursor="hand2",
+                  command=lambda: self._scope_all(True)).pack(side="left")
+        tk.Button(bar, text="清空", font=FONT, bg="#eef2f7", fg=TEXT, relief="flat",
+                  padx=12, pady=4, cursor="hand2",
+                  command=lambda: self._scope_all(False)).pack(side="left", padx=(8, 0))
+        tk.Button(bar, text="刷新列表", font=FONT, bg="#eef2f7", fg=TEXT, relief="flat",
+                  padx=12, pady=4, cursor="hand2",
+                  command=self.reload_scope).pack(side="left", padx=(8, 0))
+        self.lab_scope_list = tk.Label(bar, text="", font=FONT, bg=BG, fg=MUTED)
+        self.lab_scope_list.pack(side="right")
+
+        wrap = tk.Frame(win, bg=BG)
+        wrap.pack(fill="both", expand=True, padx=12, pady=(8, 0))
         # EXTENDED 支持 Ctrl/Shift 多选；exportselection=False 避免焦点切换时丢选择
-        self.scope_box = tk.Listbox(wrap, height=7, selectmode=tk.EXTENDED,
-                                    font=("Consolas", 9), bg="#fbfcfe", fg=TEXT,
-                                    relief="flat", highlightthickness=1,
-                                    highlightbackground=LINE, bd=0,
-                                    exportselection=False)
+        self.scope_box = tk.Listbox(wrap, selectmode=tk.EXTENDED, font=("Consolas", 9),
+                                    bg=CARD, fg=TEXT, relief="flat",
+                                    highlightthickness=1, highlightbackground=LINE,
+                                    bd=0, exportselection=False)
         sb = tk.Scrollbar(wrap, command=self.scope_box.yview)
         self.scope_box.configure(yscrollcommand=sb.set)
-        self.scope_box.pack(side="left", fill="x", expand=True)
+        self.scope_box.pack(side="left", fill="both", expand=True)
         sb.pack(side="right", fill="y")
+        self.scope_box.bind("<<ListboxSelect>>", self._scope_on_select)
 
-        bar = tk.Frame(box, bg=CARD)
-        bar.pack(fill="x", pady=(8, 0))
-        tk.Button(bar, text="应用接管范围", font=FONT_B, bg=ACCENT, fg="white",
-                  relief="flat", padx=14, pady=5, cursor="hand2",
-                  command=self.apply_scope).pack(side="left")
-        tk.Button(bar, text="刷新程序列表", font=FONT, bg="#eef2f7", fg=TEXT,
-                  relief="flat", padx=12, pady=5, cursor="hand2",
-                  command=self.reload_scope).pack(side="left", padx=(8, 0))
-        tk.Button(bar, text="清空选择", font=FONT, bg="#eef2f7", fg=TEXT,
-                  relief="flat", padx=12, pady=5, cursor="hand2",
-                  command=self.clear_scope).pack(side="left", padx=(8, 0))
+        foot = tk.Frame(win, bg=BG)
+        foot.pack(fill="x", padx=12, pady=10)
+        tk.Button(foot, text="保存", font=FONT_B, bg=ACCENT, fg="white", relief="flat",
+                  padx=20, pady=7, cursor="hand2",
+                  command=self.apply_scope).pack(side="left", expand=True, fill="x")
+        tk.Button(foot, text="返回", font=FONT, bg="#eef2f7", fg=TEXT, relief="flat",
+                  padx=20, pady=7, cursor="hand2",
+                  command=lambda: self.close_scope()).pack(side="left", expand=True,
+                                                           fill="x", padx=(10, 0))
+        win.protocol("WM_DELETE_WINDOW", lambda: self.close_scope())
+        win.bind("<Escape>", lambda _e: self.close_scope())
+
         self.reload_scope()
+        try:
+            ent.focus_set()
+        except Exception:
+            pass
 
     def reload_scope(self):
-        """刷新候选程序列表，并把当前已生效的选择回填到列表里"""
+        """刷新候选程序列表（二级窗口开着时同步重画）"""
         names = set(W.list_procs()) | set(W.G.scope_seen.keys()) | set(W.G.scope_list)
         names = sorted(n for n in names if n and n != "<未识别>" and n.lower() != "system")
         self.scope_items = names
-        self.scope_box.delete(0, "end")
-        for n in names:
-            self.scope_box.insert("end", n)
-        for n in W.G.scope_list:
-            if n in names:
-                self.scope_box.selection_set(names.index(n))
-        self.scope_mode.set(W.G.scope_mode)
+        if self.scope_win is not None:
+            self._scope_fill()
         self._scope_tip()
 
+    def _scope_fill(self):
+        """按搜索词重画列表，并把 self.scope_sel 回填成选中态"""
+        q = (self.scope_search.get() if self.scope_win is not None else "").strip().lower()
+        self.scope_view = [n for n in self.scope_items if not q or q in n.lower()]
+        self.scope_box.delete(0, "end")
+        for n in self.scope_view:
+            self.scope_box.insert("end", n)
+        for i, n in enumerate(self.scope_view):
+            if n in self.scope_sel:
+                self.scope_box.selection_set(i)
+        self.lab_scope_list.config(
+            text="共 %d 项" % len(self.scope_items) if len(self.scope_view) == len(self.scope_items)
+            else "筛出 %d / 共 %d 项" % (len(self.scope_view), len(self.scope_items)))
+        self._scope_sync_count()
+
+    def _scope_on_select(self, _e=None):
+        """把列表里的选择同步回 self.scope_sel。
+
+        搜索会把列表筛短，直接以 curselection() 为准会丢掉被筛掉的那部分，
+        所以只对「当前可见项」做增删，不可见项保留原样。
+        """
+        picked = set(self.scope_view[i] for i in self.scope_box.curselection())
+        for n in self.scope_view:
+            self.scope_sel.discard(n)
+        self.scope_sel |= picked
+        self._scope_sync_count()
+
+    def _scope_all(self, on):
+        """全选 / 清空，只作用于当前筛选出来的项"""
+        for n in self.scope_view:
+            if on:
+                self.scope_sel.add(n)
+            else:
+                self.scope_sel.discard(n)
+        self._scope_fill()
+
+    def _scope_sync_count(self):
+        if self.scope_win is None or not hasattr(self, "lab_scope_count"):
+            return
+        dirty = self._scope_dirty()
+        self.lab_scope_count.config(
+            text="已选 %d 项%s" % (len(self.scope_sel), " · 未保存" if dirty else ""))
+
+    def _scope_dirty(self):
+        return (self.scope_mode.get() != W.G.scope_mode
+                or sorted(self.scope_sel) != sorted(W.G.scope_list))
+
+    def clear_scope(self):
+        self.scope_sel.clear()
+        if self.scope_win is not None:
+            self._scope_fill()
+
     def apply_scope(self):
-        sel = [self.scope_items[i] for i in self.scope_box.curselection()]
-        mode, lst = W.set_scope(self.scope_mode.get(), sel)
+        """保存：把二级窗口里的勾选写进引擎，然后关掉窗口回到主界面"""
+        mode, lst = W.set_scope(self.scope_mode.get(), sorted(self.scope_sel))
+        self.scope_sel = set(lst)
         if mode == "only":
             W.log_event("config", "接管范围：仅 " + (", ".join(lst) or "（空名单=不接管任何程序）"))
         elif mode == "exclude":
             W.log_event("config", "接管范围：排除 " + (", ".join(lst) or "（空名单=全部接管）"))
         else:
             W.log_event("config", "接管范围：全部程序")
+        self.close_scope(force=True)
         self._scope_tip()
         self.refresh()
 
-    def clear_scope(self):
-        self.scope_box.selection_clear(0, "end")
+    def close_scope(self, force=False):
+        """关闭二级窗口。有未保存改动先问一句 —— 勾了半天点错返回很恼人"""
+        if self.scope_win is None:
+            return False
+        if not force and self._scope_dirty():
+            try:
+                if not messagebox.askyesno("放弃改动？",
+                                           "勾选还没保存，返回将丢弃这些改动。确定返回吗？",
+                                           parent=self.scope_win):
+                    return False
+            except Exception:
+                pass
+        try:
+            self.scope_win.destroy()
+        except Exception:
+            pass
+        self.scope_win = None
+        # 丢弃改动，回到引擎当前值：mode 也要一起回滚，否则下次打开窗口
+        # 会显示成上次没保存的模式，和引擎里真正生效的对不上
+        self.scope_mode.set(W.G.scope_mode)
+        self.scope_sel = set(W.G.scope_list)
+        self._scope_tip()
+        return True
 
     def _scope_tip(self):
-        """标题下方提示：显示当前已生效的范围 + 未应用的本地改动"""
+        """主界面那一行摘要：只显示引擎里已生效的范围"""
         g = W.G
         if g.scope_mode == "all":
             eff = "全部程序"
         elif g.scope_mode == "only":
-            eff = "仅 %d 个程序" % len(g.scope_list) + (
+            eff = "仅接管 %d 个程序" % len(g.scope_list) + (
                 "（" + ", ".join(g.scope_list[:4]) + ("…" if len(g.scope_list) > 4 else "") + "）"
                 if g.scope_list else "（空名单 = 不接管任何程序）")
         else:
             eff = "排除 %d 个程序" % len(g.scope_list) + (
                 "（" + ", ".join(g.scope_list[:4]) + ("…" if len(g.scope_list) > 4 else "") + "）"
                 if g.scope_list else "（空名单 = 全部接管）")
-        local = [self.scope_items[i] for i in self.scope_box.curselection()]
-        dirty = (self.scope_mode.get() != g.scope_mode) or (sorted(local) != sorted(g.scope_list))
-        tip = "当前生效：" + eff
-        if dirty:
-            tip += "　｜　未应用：%s + %d 项" % (
-                {"all": "全部", "only": "仅选定", "exclude": "排除选定"}[self.scope_mode.get()],
-                len(local))
-        tip += "\n范围外的程序仍会经过代理，但会被原样转发、不受弱网影响。" \
-               "程序需先发起过网络连接才会出现在列表中；若识别不到进程名，仅选定模式下会按未接管处理。"
-        self.lab_scope.config(text=tip)
+        self.lab_scope.config(text=eff)
 
     def _build_log(self):
         box = self._card(self.root, "事件日志", expand=True)

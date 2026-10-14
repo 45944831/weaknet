@@ -26,22 +26,26 @@ ck("JS 语法 node --check", node.returncode == 0)
 if node.returncode != 0:
     print(node.stderr[:400])
 
-# ---- 2. 接管范围卡片的 DOM ----
-for i in ["scopeToggle", "scopeBody", "scopeArrow", "scopeHint", "scopeBrief",
-          "scopeTip", "scopeSearch", "scopeList", "scopeApplyBtn",
-          "scopeReloadBtn", "scopeClearBtn"]:
+# ---- 2. 接管范围：主页面入口 + 二级界面的 DOM ----
+for i in ["scopeCard", "scopeOpenBtn", "scopeBrief", "scopeTip",
+          "scopePage", "scopeBackBtn", "scopeBackBtn2", "scopeCount",
+          "scopeListHint", "scopeSearch", "scopeList", "scopeApplyBtn",
+          "scopeReloadBtn", "scopeAllBtn", "scopeNoneBtn"]:
     ck("存在 #%s" % i, ('id="%s"' % i) in src)
 
 # ---- 3. 三种模式的 radio ----
 ck("三种模式 radio 齐全",
    all(('value="%s"' % v) in src for v in ("all", "only", "exclude")))
 
-# ---- 4. 折叠默认收起 ----
-ck("接管范围默认折叠", 'id="scopeBody" style="display:none"' in src)
-
-# ---- 5. 停止按钮仍在折叠区外（回归检查）----
-body = src[src.index('id="scopeBody"'):src.index('id="scopeApplyBtn"')]
-ck("停止按钮未被卷进接管范围折叠区", "stopBtn" not in body)
+# ---- 4. 二级界面默认隐藏，且入口是按钮 ----
+ck("二级界面默认隐藏", 'id="scopePage" style="display:none"' in src)
+ck("主页面入口是按钮（不再是折叠标题）",
+   'id="scopeOpenBtn"' in src and "scopeToggle" not in src)
+ck("二级界面带返回按钮（顶部 + 底部两处）",
+   "scopeBackBtn" in src and "scopeBackBtn2" in src)
+ck("点击入口按钮打开二级界面", '$("scopeOpenBtn").onclick' in src)
+ck("返回时丢弃未保存改动", "closeScopePage" in src and "scopeSnapshot" in src)
+ck("保存后返回主页面", "closeScopePage(true)" in src)
 
 # ---- 6. CSS ----
 for c in [".scope-modes", ".scope-list", ".scope-row", ".scope-search"]:

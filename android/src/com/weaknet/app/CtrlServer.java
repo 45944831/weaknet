@@ -32,6 +32,7 @@ public class CtrlServer implements Runnable {
         this.dashFile = dashFile;
         this.ctx = ctx;
         MyPresets.bind(ctx);        // 自定义场景要落 SharedPreferences，先把上下文备好
+        FloatSettings.bind(ctx);    // 悬浮窗设置同理
     }
 
     public void run() {
@@ -275,6 +276,65 @@ public class CtrlServer implements Runnable {
                 respond(200, JSON_CT, o.toString().getBytes("UTF-8"));
                 return;
             }
+            // ---- 悬浮窗（限速飘窗）设置：显示哪些行 / 自定义文本 / 字号 / 透明度 ----
+            if ("/api/float".equals(path)) {
+                if (method.equals("POST") && body != null && body.length() > 0) {
+                    try {
+                        JSONObject d = new JSONObject(body);
+                        java.util.List<String> lines = new java.util.ArrayList<String>();
+                        JSONArray arr = d.optJSONArray("lines");
+                        if (arr != null) {
+                            for (int i = 0; i < arr.length(); i++) lines.add(arr.optString(i, ""));
+                        }
+                        FloatSettings.S s = FloatSettings.save(lines, d.optString("custom", ""),
+                                (float) d.optDouble("alpha", 0.92), d.optInt("text_sp", 10));
+                        FloatWindow.reload();      // 正在显示就按新设置重建，立刻看到效果
+                        WeakNet.I.log("config", "悬浮窗设置：" + (s.lines.isEmpty()
+                                ? "仅标题行" : s.lines.size() + " 行"));
+                        JSONObject o = new JSONObject();
+                        o.put("ok", true);
+                        o.put("settings", FloatSettings.toJson(s));
+                        o.put("shown", FloatWindow.isShown());
+                        respond(200, JSON_CT, o.toString().getBytes("UTF-8"));
+                    } catch (Exception e) {
+                        respond(400, JSON_CT, "{\"error\":\"bad request\"}".getBytes("UTF-8"));
+                    }
+                    return;
+                }
+                respond(200, JSON_CT, FloatSettings.describe(ctx).toString().getBytes("UTF-8"));
+                return;
+            }
+            if (method.equals("POST") && "/api/float/show".equals(path)) {
+                boolean want = false;
+                try {
+                    want = new JSONObject(body).optBoolean("show", false);
+                } catch (Exception e) {
+                    // ignore
+                }
+                boolean ok = true;
+                String msg;
+                if (want) {
+                    if (!FloatWindow.canOverlay(ctx)) {
+                        ok = false;
+                        msg = "未授予悬浮窗权限";
+                    } else {
+                        FloatWindow.get(ctx).show();
+                        ok = waitShown(true);      // show() 是 post 到主线程的，等它真的挂上
+                        msg = ok ? "飘窗已显示" : "飘窗显示失败";
+                    }
+                } else {
+                    FloatWindow.get(ctx).hide();
+                    ok = waitShown(false);
+                    msg = "飘窗已收起";
+                }
+                JSONObject o = new JSONObject();
+                o.put("ok", ok);
+                o.put("shown", FloatWindow.isShown());
+                o.put("can_overlay", FloatWindow.canOverlay(ctx));
+                o.put("msg", msg);
+                respond(200, JSON_CT, o.toString().getBytes("UTF-8"));
+                return;
+            }
             if (method.equals("POST") && "/api/preset".equals(path)) {
                 String key = null;
                 try {
@@ -415,6 +475,22 @@ public class CtrlServer implements Runnable {
             return sb.toString();
         }
 
+        /**
+         * 飘窗的 show()/hide() 都是 post 到主线程执行的，调用后不能立刻读到结果。
+         * 这里等它真的挂上/摘掉再应答，否则页面会显示一个还没发生的旧状态。
+         */
+        private boolean waitShown(boolean want) {
+            for (int i = 0; i < 20; i++) {
+                if (FloatWindow.isShown() == want) return true;
+                try {
+                    Thread.sleep(50);
+                } catch (InterruptedException e) {
+                    return FloatWindow.isShown() == want;
+                }
+            }
+            return FloatWindow.isShown() == want;
+        }
+
         private JSONObject statusJson() throws Exception {
             JSONObject o = new JSONObject();
             o.put("profile", WeakNet.I.profile.toJson());
@@ -434,6 +510,12 @@ public class CtrlServer implements Runnable {
             for (String p : new java.util.ArrayList<String>(WeakNet.I.scopePkgs)) sl.put(p);
             sc.put("list", sl);
             o.put("scope", sc);
+            // 悬浮窗（仅 Android 有）：桌面端没有这个字段，页面据此隐藏设置卡片
+            JSONObject fw = new JSONObject();
+            fw.put("supported", true);
+            fw.put("shown", FloatWindow.isShown());
+            fw.put("can_overlay", FloatWindow.canOverlay(ctx));
+            o.put("float", fw);
             JSONObject st = new JSONObject();
             st.put("total", WeakNet.I.connTotal.get());
             st.put("active", WeakNet.I.connActive.get());
