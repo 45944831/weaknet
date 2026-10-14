@@ -51,8 +51,15 @@ public class MainPanels {
 
     private LinearLayout builtinGrid;
     private LinearLayout mineGrid;
-    private Button btnNew;      // ➕ 新建 / ✏️ 编辑（选中自定义时变成编辑）
+    /** 选中内置档位时才出现的那一行：查看 / 修改该档位的参数 */
+    private LinearLayout builtinRow;
+    private Button btnPeek;
+    /** ➕ 新建：文案与行为恒定（选中自定义场景时也不变成编辑，否则就没法新建第二个了） */
+    private Button btnNew;
     private Button btnShare;
+    /** 选中自定义场景时才出现的那一行：编辑 + 删除 */
+    private LinearLayout tailRow;
+    private Button btnEdit;
     private Button btnDel;
     private TextView logText;
 
@@ -112,7 +119,7 @@ public class MainPanels {
     void sync() {
         reloadScenesIfChanged();
         syncHighlight();
-        syncTailBtns();
+        syncSceneBtns();
         int n = ShareNet.inboxCount();
         if (btnShare != null) {
             btnShare.setText(n > 0 ? "🔗 环境共享（" + n + " 条待处理）" : "🔗 环境共享");
@@ -128,8 +135,34 @@ public class MainPanels {
         builtinGrid = new LinearLayout(a);
         builtinGrid.setOrientation(LinearLayout.VERTICAL);
         card.addView(builtinGrid, full(0, 0, 0, 2));
-        card.addView(hint("选中一支即刻生效——选中的场景会变蓝；"
-                + "没在测试时会顺手接管流量，选「直连」则完全不限制。"));
+
+        // 查看 / 修改参数：内置档位是写死在代码里的，改不动也存不住，
+        // 所以这里打开的是「以该档位为初值」的表单，改完另存一条到「我的自定义」。
+        builtinRow = new LinearLayout(a);
+        builtinRow.setOrientation(LinearLayout.HORIZONTAL);
+        btnPeek = new Button(a);
+        btnPeek.setAllCaps(false);
+        btnPeek.setTextSize(13);
+        btnPeek.setSingleLine(true);
+        btnPeek.setText("👀 查看 / 修改参数");
+        btnPeek.setTextColor(0xFF2F3F52);
+        btnPeek.setBackground(box(0xFFFFFFFF, 0xFFD7DEEA, 8));
+        btnPeek.setPadding(dp(12), dp(9), dp(12), dp(9));
+        btnPeek.setContentDescription("查看或修改当前测试环境的参数");
+        btnPeek.setOnClickListener(new View.OnClickListener() {
+            public void onClick(View v) {
+                peekBuiltin();
+            }
+        });
+        builtinRow.addView(btnPeek, new LinearLayout.LayoutParams(
+                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        builtinRow.setVisibility(View.GONE);
+        card.addView(builtinRow, full(0, dp(6), 0, 2));
+
+        card.addView(hint("点一下只是「选中」（选中的会变蓝），不会开始弱网——"
+                + "要真正生效，点上面的「▶ 开始弱网测试」。"
+                + "想改某支内置档位的参数，选中后点上面的「👀 查看 / 修改参数」"
+                + "（改完会另存一条到「我的自定义」）。"));
         return card;
     }
 
@@ -151,13 +184,14 @@ public class MainPanels {
         btnNew = new Button(a);
         btnNew.setAllCaps(false);
         btnNew.setTextSize(12);
+        btnNew.setText("➕ 新建");
         btnNew.setTextColor(0xFF7A4FF3);
         btnNew.setBackground(box(0xFFF3EFFF, 0xFFD9CBFB, 8));
         btnNew.setPadding(dp(10), dp(4), dp(10), dp(4));
+        btnNew.setContentDescription("新建自定义场景");
         btnNew.setOnClickListener(new View.OnClickListener() {
             public void onClick(View v) {
-                String key = WeakNet.I.presetKey;
-                openEditor(key != null && key.startsWith("u:") ? key.substring(2) : null);
+                openEditor(null);       // 永远是新建：想改已有的场景用下面的「✏️ 编辑」
             }
         });
         head.addView(btnNew);
@@ -183,31 +217,97 @@ public class MainPanels {
         mineGrid.setOrientation(LinearLayout.VERTICAL);
         card.addView(mineGrid, full(0, 4, 0, 4));
 
+        // 编辑 + 删除：只有选中自定义场景时才出现，两个并排各占一半宽度
+        tailRow = new LinearLayout(a);
+        tailRow.setOrientation(LinearLayout.HORIZONTAL);
+
+        btnEdit = new Button(a);
+        btnEdit.setAllCaps(false);
+        btnEdit.setTextSize(13);
+        btnEdit.setText("✏️ 编辑");
+        btnEdit.setTextColor(0xFF2F3F52);
+        btnEdit.setBackground(box(0xFFFFFFFF, 0xFFD7DEEA, 8));
+        btnEdit.setPadding(dp(12), dp(9), dp(12), dp(9));
+        btnEdit.setContentDescription("编辑当前场景");
+        btnEdit.setOnClickListener(new View.OnClickListener() {
+            public void onClick(View v) {
+                String key = WeakNet.I.presetKey;
+                if (key != null && key.startsWith("u:")) openEditor(key.substring(2));
+            }
+        });
+        LinearLayout.LayoutParams elp = new LinearLayout.LayoutParams(
+                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
+        elp.setMargins(0, 0, dp(6), 0);
+        tailRow.addView(btnEdit, elp);
+
         btnDel = new Button(a);
         btnDel.setAllCaps(false);
         btnDel.setTextSize(13);
-        btnDel.setText("🗑 删除当前场景");
+        btnDel.setText("🗑 删除");
         btnDel.setTextColor(0xFFD93025);
         btnDel.setBackground(box(0xFFFFFFFF, 0xFFF3C3C0, 8));
         btnDel.setPadding(dp(12), dp(9), dp(12), dp(9));
+        btnDel.setContentDescription("删除当前场景");
         btnDel.setOnClickListener(new View.OnClickListener() {
             public void onClick(View v) {
                 delCurrent();
             }
         });
-        card.addView(btnDel, full(0, 0, 0, 4));
+        tailRow.addView(btnDel, new LinearLayout.LayoutParams(
+                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        tailRow.setVisibility(View.GONE);
+        card.addView(tailRow, full(0, 0, 0, 4));
 
-        card.addView(hint("自定义场景可保存 13 项参数，也能通过「🔗 环境共享」"
+        card.addView(hint("自定义场景可保存 13 项参数；「➕ 新建」随时可以再加一条，"
+                + "选中某条后下面会出现「✏️ 编辑 / 🗑 删除」。也能通过「🔗 环境共享」"
                 + "与同一局域网里的电脑/其他手机互推。"));
         return card;
     }
 
-    /** 删除/编辑按钮跟随当前生效场景：只有选中自定义时才出现 */
-    private void syncTailBtns() {
+    /**
+     * 场景相关按钮跟随当前生效场景：
+     *   · 选中内置档位 → 测试环境卡片出现「👀 查看 / 修改参数」；
+     *   · 选中自定义场景 → 自定义卡片出现「编辑 + 删除」这一行。
+     * 「➕ 新建」在标题行，文案和行为都不随选中场景变化——否则选中一条自定义之后
+     * 按钮变成「编辑」，就再也建不了第二条了。
+     */
+    private void syncSceneBtns() {
         String key = WeakNet.I.presetKey;
         boolean mine = key != null && key.startsWith("u:");
-        if (btnDel != null) btnDel.setVisibility(mine ? View.VISIBLE : View.GONE);
-        if (btnNew != null) btnNew.setText(mine ? "✏️ 编辑" : "➕ 新建");
+        boolean builtin = isBuiltinKey(key);
+        if (tailRow != null) tailRow.setVisibility(mine ? View.VISIBLE : View.GONE);
+        if (builtinRow != null) builtinRow.setVisibility(builtin ? View.VISIBLE : View.GONE);
+        if (btnPeek != null && builtin) {
+            String s = Profile.shortOf(key);
+            // 带上场景名才知道在看哪一支；名字长时尾部省略，别把按钮撑成两行
+            btnPeek.setText("👀 参数：" + (s.length() > 0 ? s : key));
+        }
+        if (btnNew != null) btnNew.setText("➕ 新建");
+    }
+
+    /** 是不是有参数可看的内置档位（直连就是不限速，没什么可改的，排除掉） */
+    private static boolean isBuiltinKey(String key) {
+        if (key == null || key.startsWith("u:") || "direct".equals(key)) return false;
+        for (String k : Profile.KEYS) {
+            if (k.equals(key)) return true;
+        }
+        return false;
+    }
+
+    /**
+     * 打开内置档位的参数表单：以该档位当前的参数为初值。
+     * 内置档位本身改不了（写死在代码里），所以保存时是另存一条自定义场景并应用。
+     */
+    private void peekBuiltin() {
+        String key = WeakNet.I.presetKey;
+        if (!isBuiltinKey(key)) {
+            Toast.makeText(a, "先选中一支内置测试环境", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        Profile p = profileOf(key);
+        if (p == null) return;
+        String s = Profile.shortOf(key);
+        openEditor(null, p, s.length() > 0 ? s : p.name);
     }
 
     // ---------------------------------------------------------------- 事件日志
@@ -428,13 +528,17 @@ public class MainPanels {
             reloadScenesIfChanged();
             return;
         }
-        WeakNet.I.setProfile(p, key);
-        WeakNet.I.log("config", "切换场景：" + p.name);
-        Toast.makeText(a, "已应用场景：" + p.name, Toast.LENGTH_SHORT).show();
+        // 选中 ≠ 开始：没在测试时只把这支场景记下来，不接管、不限速，
+        // 必须用户自己点「▶ 开始弱网测试」才落到流量上（selectScene 里已按 limitOn 判断）
+        boolean testing = WeakNet.I.limitOn;
+        WeakNet.I.selectScene(p, key);
+        WeakNet.I.log("config", (testing ? "切换场景：" : "选择场景：") + p.name);
+        Toast.makeText(a, testing ? ("已切换场景：" + p.name)
+                        : ("已选「" + p.name + "」，点「▶ 开始弱网测试」才生效"),
+                Toast.LENGTH_SHORT).show();
         syncHighlight();
-        syncTailBtns();
+        syncSceneBtns();
         a.updateStatus();
-        a.ensureTakeover();     // 没接管的话顺手接管，否则选了场景也落不到流量上
     }
 
     private void delCurrent() {
@@ -456,7 +560,7 @@ public class MainPanels {
         sceneSig = null;
         reloadScenesIfChanged();
         syncHighlight();
-        syncTailBtns();
+        syncSceneBtns();
         a.updateStatus();
     }
 
@@ -488,13 +592,32 @@ public class MainPanels {
 
     /** @param id 要编辑的自定义场景 id；null = 新建 */
     void openEditor(String id) {
+        openEditor(id, null, "");
+    }
+
+    /**
+     * 打开 13 项参数表单。
+     *
+     * @param id       要编辑的自定义场景 id；null = 新建
+     * @param seed     非空 = 以这个内置档位的参数为初值打开（内置档位改不动，
+     *                 所以保存时是「另存一条自定义」而不是覆盖它）
+     * @param seedName 内置档位的显示名，用来给另存的那条起默认名
+     */
+    void openEditor(String id, Profile seed, String seedName) {
+        final boolean fromBuiltin = (id == null && seed != null);
         editing.set(id == null ? "" : id);
         editorFields.clear();
         edName = null;
+        a.suspendFloat();          // 飘窗会盖住弹窗上半部分并吃掉点击
         editorDlg = new Dialog(a);
         editorDlg.requestWindowFeature(Window.FEATURE_NO_TITLE);
         editorDlg.setCancelable(true);
         editorDlg.setCanceledOnTouchOutside(true);
+        editorDlg.setOnDismissListener(new DialogInterface.OnDismissListener() {
+            public void onDismiss(DialogInterface d) {
+                a.restoreFloat();
+            }
+        });
 
         JSONObject cur = null;
         String curName = "";
@@ -504,6 +627,10 @@ public class MainPanels {
                 cur = it.profile.toJson();
                 curName = it.name;
             }
+        } else if (fromBuiltin) {
+            cur = seed.toJson();
+            String n = (seedName == null || seedName.length() == 0) ? "自定义场景" : seedName;
+            curName = n + " 副本";
         }
 
         ScrollView sv = new ScrollView(a);
@@ -518,7 +645,8 @@ public class MainPanels {
         head.setOrientation(LinearLayout.HORIZONTAL);
         head.setGravity(Gravity.CENTER_VERTICAL);
         TextView t = new TextView(a);
-        t.setText(id == null ? "➕ 新建自定义场景" : "✏️ 编辑自定义场景");
+        t.setText(id != null ? "✏️ 编辑自定义场景"
+                : (fromBuiltin ? "👀 内置档位参数" : "➕ 新建自定义场景"));
         t.setTextSize(16);
         t.setTextColor(0xFF1F2430);
         t.setTypeface(null, Typeface.BOLD);
@@ -537,6 +665,13 @@ public class MainPanels {
         head.addView(close);
         card.addView(head);
         card.addView(divider(dp(8)));
+
+        if (fromBuiltin) {
+            String n = (seedName == null || seedName.length() == 0) ? "该档位" : seedName;
+            card.addView(hint("下面是「" + n + "」的参数，可以直接改。"
+                    + "内置档位本身是固定的，改完点「另存为自定义并应用」，"
+                    + "会新建一条到「我的自定义」，不会影响原来的档位。"));
+        }
 
         edName = new EditText(a);
         edName.setHint("场景名称，例：地铁早高峰");
@@ -579,7 +714,7 @@ public class MainPanels {
         // 固定在底部后键盘弹出、翻看参数时它们都一直在眼前。
         Button save = new Button(a);
         save.setAllCaps(false);
-        save.setText("保存并应用");
+        save.setText(fromBuiltin ? "另存为自定义并应用" : "保存并应用");
         save.setTextSize(14);
         save.setTextColor(Color.WHITE);
         save.setBackground(box(0xFF2F6FED, 0xFF2F6FED, 8));
@@ -706,14 +841,18 @@ public class MainPanels {
             Toast.makeText(a, "保存失败", Toast.LENGTH_SHORT).show();
             return;
         }
-        WeakNet.I.setProfile(it.profile.copy(), "u:" + it.id);
+        // 与「选场景」同一条规矩：没在测试时保存只是存下来并选中，不自动开始
+        boolean testing = WeakNet.I.limitOn;
+        WeakNet.I.selectScene(it.profile.copy(), "u:" + it.id);
         WeakNet.I.log("config", "保存自定义场景：" + it.name);
-        Toast.makeText(a, "已保存并应用：" + it.name, Toast.LENGTH_SHORT).show();
+        Toast.makeText(a, testing ? ("已保存并应用：" + it.name)
+                        : ("已保存「" + it.name + "」，点「▶ 开始弱网测试」才生效"),
+                Toast.LENGTH_SHORT).show();
         closeEditor();
         sceneSig = null;
         reloadScenesIfChanged();
         syncHighlight();
-        syncTailBtns();
+        syncSceneBtns();
         a.updateStatus();
     }
 

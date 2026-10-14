@@ -53,6 +53,13 @@ public class SettingsSheet {
         if (a == null || a.isFinishing()) return;
         if (dlg == null) build();
         sync();
+        if (dlg != null) {
+            dlg.setOnDismissListener(new DialogInterface.OnDismissListener() {
+                public void onDismiss(DialogInterface d) {
+                    a.restoreFloat();          // 飘窗是系统悬浮窗，弹窗期间收起过
+                }
+            });
+        }
         if (dlg != null && !dlg.isShowing()) dlg.show();
     }
 

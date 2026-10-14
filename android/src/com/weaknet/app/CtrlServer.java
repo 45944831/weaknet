@@ -371,7 +371,8 @@ public class CtrlServer implements Runnable {
                     respond(400, JSON_CT, "{\"error\":\"bad request\"}".getBytes("UTF-8"));
                     return;
                 }
-                WeakNet.I.setProfile(p, key);
+                // 与 App 界面同一条规矩：切场景只是选中，没在测试时不施加限速
+                WeakNet.I.selectScene(p, key);
                 WeakNet.I.log("config", "切换场景：" + p.name);
                 respond(200, JSON_CT, "{\"ok\":true}".getBytes("UTF-8"));
                 return;

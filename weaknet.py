@@ -11,7 +11,7 @@ WeakNet —— App 弱网测试工具（本地代理式弱网模拟器）
   - DNS 故障（域名解析失败）
   - 立即拒连（模拟完全断网）
   - 周期性断网（模拟基站切换 / Wi-Fi 与 4G 切换）
-  - 内置 Wi-Fi / 4G / 5G / 高铁 / 电梯等 14 种预设场景
+  - 内置 Wi-Fi / 4G / 4G 弱网 / 5G / 高铁 / 电梯 / 高丢包 / 高延迟等 17 种预设场景
   - 桌面 GUI（weaknet_gui.py）实时配置与监控；控制端口默认 http://127.0.0.1:8899（仅提供 /api）
 
 用法：
@@ -384,6 +384,12 @@ PRESETS = {
             "down_kbps": 20000, "up_kbps": 10000}),
     # 5G：空口延迟比 4G 低一个量级（实测良好覆盖下 RTT 约 10~20ms），
     # 下行按 100Mbps 给，够触发「秒开」级别的体验，也能跑满多数 App 的预加载
+    # 4G 弱网：地下车库 / 城中村 / 演唱会现场这类「有 4G 图标但速率塌了」的场景，
+    # 速率比 5G 弱覆盖再低一档，丢包与偶发断流更明显（4G 的重传比 5G 慢）
+    "4g_weak": ("4G 弱网（边缘/室内）", "弱网环境",
+                {"latency_up_ms": 70, "latency_down_ms": 110, "jitter_ms": 45,
+                 "down_kbps": 3000, "up_kbps": 800, "loss_pct": 4,
+                 "disconnect_pct": 1, "stall_ms": 1200}),
     "5g": ("5G（良好覆盖）", "常规网络",
            {"latency_up_ms": 12, "latency_down_ms": 20, "jitter_ms": 8,
             "down_kbps": 100000, "up_kbps": 40000}),
@@ -402,6 +408,17 @@ PRESETS = {
     "satellite": ("卫星链路（高延迟）", "弱网环境",
                   {"latency_up_ms": 700, "latency_down_ms": 700, "jitter_ms": 80,
                    "down_kbps": 2000, "up_kbps": 512}),
+    # 高丢包：带宽看着够（能起连、能握手），但每三个包就丢一个 ——
+    # 典型症状是视频卡成 PPT、图片加载到一半、长连接反复重试
+    "high_loss": ("高丢包（30% 丢包）", "弱网环境",
+                  {"latency_up_ms": 100, "latency_down_ms": 150, "jitter_ms": 80,
+                   "down_kbps": 8000, "up_kbps": 3000, "loss_pct": 30,
+                   "stall_ms": 800}),
+    # 高延迟：带宽正常、也不丢包，纯粹是往返慢（跨境链路、卫星回传、代理中转），
+    # 用来复现「点一下要等半天才有反应」而不是「传不动」
+    "high_latency": ("高延迟（RTT 800ms）", "弱网环境",
+                     {"latency_up_ms": 400, "latency_down_ms": 400, "jitter_ms": 60,
+                      "down_kbps": 10000, "up_kbps": 5000}),
     "highspeed_rail": ("高铁 / 地铁（高速移动）", "极端环境",
                        {"latency_up_ms": 60, "latency_down_ms": 100, "jitter_ms": 150,
                         "down_kbps": 1500, "up_kbps": 512, "loss_pct": 8,
@@ -1176,6 +1193,23 @@ async def set_profile(prof, key):
         G.flap_task = asyncio.create_task(flap_loop())
 
 
+async def select_scene(prof, key):
+    """只「选中」一支场景，不启动弱网。
+
+    没点总开关之前不碰引擎参数（否则选一下场景流量就被限住了，等于偷偷开始测试）：
+    只记下 preset_key，等用户点「开启限速」时由 set_limit(True) 按这个 key 复原。
+    已经在测试中时，切场景照旧立即生效。
+    """
+    G.preset_key = key
+    if has_limits(prof):
+        G.last_profile = dict(prof)
+    if not G.limit_on:
+        return False
+    await set_profile(prof, key)
+    G.limit_on = True
+    return True
+
+
 async def set_limit(on):
     """限速总开关。
 
@@ -1728,7 +1762,8 @@ async def handle_ctrl(reader, writer):
             if prof is None:
                 send_response(writer, 400, JSON_CT, b'{"error":"bad request"}')
             else:
-                await set_profile(prof, key)
+                # 与 GUI 同一条规矩：切场景只是选中，没开启限速时不施加
+                await select_scene(prof, key)
                 log_event("config", "切换场景：" + prof["name"])
                 send_response(writer, 200, JSON_CT, b'{"ok":true}')
         elif method == "POST" and path == "/api/profile":

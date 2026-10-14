@@ -24,8 +24,9 @@ public class Profile {
     // 2026-10 起去掉 3g / edge / gprs / dialup：这几种制式与拨号上网已退网，
     // 不再是有意义的测试档位；需要极慢网时直接用自定义参数压带宽。
     public static final String[] KEYS = {
-            "direct", "wifi", "4g", "5g",
+            "direct", "wifi", "4g", "4g_weak", "5g",
             "5g_weak", "wifi_weak", "congestion", "satellite",
+            "high_loss", "high_latency",
             "highspeed_rail", "elevator", "flapping", "blackhole", "dns_fail", "airplane"
     };
 
@@ -34,6 +35,7 @@ public class Profile {
         if ("direct".equals(key)) return "直连";
         if ("wifi".equals(key)) return "Wi-Fi 良好";
         if ("4g".equals(key)) return "4G LTE";
+        if ("4g_weak".equals(key)) return "4G 弱网";
         if ("5g".equals(key)) return "5G 良好";
         if ("5g_weak".equals(key)) return "5G 弱覆盖";
         if ("wifi_weak".equals(key)) return "弱 Wi-Fi";
@@ -45,14 +47,17 @@ public class Profile {
         if ("blackhole".equals(key)) return "黑洞无响应";
         if ("dns_fail".equals(key)) return "DNS 故障";
         if ("airplane".equals(key)) return "完全断网";
+        if ("high_loss".equals(key)) return "高丢包";
+        if ("high_latency".equals(key)) return "高延迟";
         return "";
     }
 
     public static String catOf(String key) {
         if ("direct".equals(key) || "wifi".equals(key) || "4g".equals(key)
                 || "5g".equals(key)) return "常规网络";
-        if ("5g_weak".equals(key) || "wifi_weak".equals(key) || "congestion".equals(key)
-                || "satellite".equals(key)) return "弱网环境";
+        if ("4g_weak".equals(key) || "5g_weak".equals(key) || "wifi_weak".equals(key)
+                || "congestion".equals(key) || "satellite".equals(key)
+                || "high_loss".equals(key) || "high_latency".equals(key)) return "弱网环境";
         return "极端环境";
     }
 
@@ -66,6 +71,13 @@ public class Profile {
             p.name = "4G LTE";
             p.latencyUpMs = 40; p.latencyDownMs = 60; p.jitterMs = 15;
             p.downKbps = 20000; p.upKbps = 10000;
+        } else if ("4g_weak".equals(key)) {
+            // 4G 弱覆盖：地下车库 / 城中村 / 演唱会现场这类「有 4G 图标但速率塌了」的场景，
+            // 速率比 5G 弱覆盖再低一档，丢包与偶发断流更明显（4G 的重传比 5G 慢）
+            p.name = "4G 弱网（边缘/室内）";
+            p.latencyUpMs = 70; p.latencyDownMs = 110; p.jitterMs = 45;
+            p.downKbps = 3000; p.upKbps = 800; p.lossPct = 4;
+            p.disconnectPct = 1; p.stallMs = 1200;
         } else if ("5g".equals(key)) {
             p.name = "5G（良好覆盖）";
             p.latencyUpMs = 12; p.latencyDownMs = 20; p.jitterMs = 8;
@@ -87,6 +99,18 @@ public class Profile {
             p.name = "卫星链路（高延迟）";
             p.latencyUpMs = 700; p.latencyDownMs = 700; p.jitterMs = 80;
             p.downKbps = 2000; p.upKbps = 512;
+        } else if ("high_loss".equals(key)) {
+            // 高丢包：带宽看着够（能起连、能握手），但每三个包就丢一个 ——
+            // 典型症状是视频卡成 PPT、图片加载到一半、长连接反复重试
+            p.name = "高丢包（30% 丢包）";
+            p.latencyUpMs = 100; p.latencyDownMs = 150; p.jitterMs = 80;
+            p.downKbps = 8000; p.upKbps = 3000; p.lossPct = 30; p.stallMs = 800;
+        } else if ("high_latency".equals(key)) {
+            // 高延迟：带宽正常、也不丢包，纯粹是往返慢（跨境链路、卫星回传、代理中转），
+            // 用来复现「点一下要等半天才有反应」而不是「传不动」
+            p.name = "高延迟（RTT 800ms）";
+            p.latencyUpMs = 400; p.latencyDownMs = 400; p.jitterMs = 60;
+            p.downKbps = 10000; p.upKbps = 5000;
         } else if ("highspeed_rail".equals(key)) {
             p.name = "高铁 / 地铁（高速移动）";
             p.latencyUpMs = 60; p.latencyDownMs = 100; p.jitterMs = 150;

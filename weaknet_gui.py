@@ -37,11 +37,12 @@ FONT_T = ("Microsoft YaHei UI", 13, "bold")
 # GUI 里的短名称（Web 控制台仍用全名）
 SHORT = {
     "direct": "直连", "wifi": "Wi-Fi 良好", "4g": "4G LTE", "5g": "5G 良好",
-    "5g_weak": "5G 弱覆盖",
+    "4g_weak": "4G 弱网", "5g_weak": "5G 弱覆盖",
     "wifi_weak": "弱 Wi-Fi", "congestion": "网络拥塞", "satellite": "卫星链路",
     "highspeed_rail": "高铁/地铁", "elevator": "电梯/地下室",
     "flapping": "频繁断连", "blackhole": "黑洞（无响应）",
     "dns_fail": "DNS 故障", "airplane": "完全断网",
+    "high_loss": "高丢包", "high_latency": "高延迟",
 }
 
 # key, 标签, 单位, 上限
@@ -1064,8 +1065,10 @@ class App:
         else:
             prof = W.build_preset_profile(key)
             name = W.PRESETS[key][0]
-        self._run(W.set_profile(prof, key))
-        W.log_event("config", "切换场景：" + name)
+        # 选中 ≠ 开始：没开限速时只把这支场景记下来（按钮照旧高亮），
+        # 必须用户点「▶ 开启限速」才真正落到流量上
+        applied = self._run(W.select_scene(prof, key))
+        W.log_event("config", ("切换场景：" if applied else "选择场景（未开启限速，未生效）：") + name)
         self.load_current()
         self.refresh()
 
@@ -1083,8 +1086,10 @@ class App:
                 and prof["dns_fail_pct"] <= 0 and prof["reject_pct"] <= 0 \
                 and prof["flap_sec"] <= 0:
             prof["name"] = "直连（不限制）"
-        self._run(W.set_profile(prof, "custom"))
-        W.log_event("config", "应用自定义参数：" + prof["name"])
+        # 同上：没开限速时这组参数只是存下来并选中，点「▶ 开启限速」才生效
+        applied = self._run(W.select_scene(prof, "custom"))
+        W.log_event("config", ("应用自定义参数：" if applied
+                               else "记下自定义参数（未开启限速，未生效）：") + prof["name"])
         self.refresh()
 
     def load_current(self):
@@ -1193,7 +1198,15 @@ class App:
         else:
             self.dot.config(text=("● 限速运行中" if g.gate_open else "● 周期断网中"),
                             fg=OK if g.gate_open else WARN)
-        self.stat["scene"].config(text=g.profile.get("name", "-"))
+        # 未开启限速时 profile 还是直连（选场景不会灌进引擎），
+        # 直接显示 profile 的名字会永远是「直连（不限制）」——按 preset_key 显示选中的那支
+        scene = g.profile.get("name", "-")
+        if not g.limit_on and g.preset_key:
+            try:
+                scene = W.build_preset_profile(g.preset_key).get("name", scene) + "（未开启）"
+            except Exception:
+                pass
+        self.stat["scene"].config(text=scene)
         self.stat["conns"].config(text=str(g.conns_total))
         self.stat["active"].config(text=str(g.conns_active))
         self.stat["down"].config(text=fmt_rate(self._rate[0]))

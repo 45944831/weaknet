@@ -186,23 +186,43 @@ public class MainActivity extends Activity {
         setContentView(root);
 
         updateStatus();
-        handler.postDelayed(new Runnable() {
-            public void run() {
-                requestVpn(false);              // 自动接管（尊重上次停止意图）
-            }
-        }, 600);
+        // 启动时不自动接管：接管与限速是一体的，只能由用户点总开关触发。
+        // 早期版本会在这里 requestVpn(false) 自动接管，结果是刚打开 App 就已经把
+        // 流量拽进通道（状态栏挂着 VPN 图标，却什么都没限），与「手动启动才生效」相悖。
         startStatusLoop();
     }
 
     private void openSettings() {
+        suspendFloat();
         if (sheet == null) sheet = new SettingsSheet(this);
         sheet.show();
     }
 
     /** 「指定程序…」：接管范围（哪些 App 进弱网），二级界面里勾选 */
     private void openScope() {
+        suspendFloat();
         if (scope == null) scope = new ScopeSheet(this);
         scope.show();
+    }
+
+    // ---- 限速飘窗是 SYSTEM_ALERT_WINDOW，会盖在二级界面上方把点击吃掉 ----
+    // 表现：弱网测试中打开「指定程序」，模式按钮（接管一切 / 仅选中的）点不动，
+    // 因为飘窗的矩形正好压在弹窗上半部分。所以弹窗期间先收起来，关掉再放回去。
+    private boolean floatWasShown = false;
+
+    /** 打开二级界面前调用：记下飘窗状态并收起 */
+    void suspendFloat() {
+        if (FloatWindow.isShown()) {
+            floatWasShown = true;
+            FloatWindow.get(this).hide();
+        }
+    }
+
+    /** 二级界面关掉后调用：原来显示着就放回去 */
+    void restoreFloat() {
+        if (!floatWasShown) return;
+        floatWasShown = false;
+        if (FloatWindow.canOverlay(this)) FloatWindow.get(this).show();
     }
 
     /** 二级界面里改完范围后要延迟再看一次状态（重建 tun 需要一点时间） */
@@ -303,17 +323,32 @@ public class MainActivity extends Activity {
         boolean lim = WeakNet.I.limitOn;
         Profile p = WeakNet.I.profile;
         String scope = scopeText();
+        // 未启动时 profile 还是直连（选场景不会灌进引擎），所以「已选哪一支」要按
+        // presetKey 找，直接显示 p.name 会永远显示「直连（不限制）」
+        String scene = sceneName();
         if (on && lim) {
             status.setText("弱网测试进行中 · " + p.name + "\n" + p.summary() + "\n已接管流量（" + scope + "）");
         } else if (on) {
-            status.setText("已接管流量，但未开始弱网测试\n按上面的按钮开始（当前场景：" + p.name + "）");
+            status.setText("已接管流量，但未开始弱网测试\n按上面的按钮开始（已选：" + scene + "）");
         } else {
-            status.setText("未接管 · 按「▶ 开始弱网测试」一键开始（无需在 Wi-Fi 里手配代理）");
+            status.setText("未接管 · 按「▶ 开始弱网测试」开始\n已选场景：" + scene);
         }
         syncTestBtn();
         syncScope();
         if (sheet != null) sheet.sync();
         if (panels != null) panels.sync();
+    }
+
+    /** 当前「选中」的场景名（没开始时 profile 仍是直连，得按 presetKey 反查） */
+    private String sceneName() {
+        String key = WeakNet.I.presetKey;
+        if (key == null) return "直连";
+        if (key.startsWith("u:")) {
+            MyPresets.Item it = MyPresets.find(key.substring(2));
+            return it != null ? it.name : "自定义";
+        }
+        String s = Profile.shortOf(key);
+        return s.length() > 0 ? s : key;
     }
 
     /** 当前接管范围的一句话简述，供状态卡复用 */
@@ -413,16 +448,6 @@ public class MainActivity extends Activity {
                 updateStatus();
             }
         }, 900);
-    }
-
-    /**
-     * 供 {@link MainPanels} 切场景后调用：没接管的话顺手接管，
-     * 否则「点了个场景但流量根本没过通道」——看着像没生效。
-     */
-    void ensureTakeover() {
-        if (VpnNetService.active) return;
-        if (WeakNet.I.presetKey == null || "direct".equals(WeakNet.I.presetKey)) return;
-        requestVpn(true, true);      // silent：没授权过就不弹窗，等用户点总开关
     }
 
     /** key → Profile：内置预设名或 u:<id> 形式的自定义场景 */

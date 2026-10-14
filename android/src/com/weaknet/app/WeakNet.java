@@ -81,10 +81,10 @@ public class WeakNet {
         profile = p;
         presetKey = key;
         gateOpen = true;
-        // 应用了「有内容」的场景就等于开启限速，回到全零（直连）就等于是关掉：
-        // 三个入口（App 按钮 / 控制台 / 接口）不必各自维护一份开关状态
-        limitOn = p.hasLimits();
-        if (limitOn) lastProfile = p.copy();   // 记住最后一次生效的场景，供「再次开启」复原
+        // 这里刻意不动 limitOn：限速与否只由总开关（setLimitOn）决定。
+        // 早期版本在这里按「场景有没有限制」推断开关，结果是点一下场景按钮就等于
+        // 静默开始了弱网测试——用户要的是「选好场景，点开始才生效」。
+        if (p.hasLimits()) lastProfile = p.copy();   // 记住最后一次生效的场景，供「再次开启」复原
         profileGen++;                       // 唤醒/打断黑洞等长时间挂起
         // 原地更新速率：已在途连接持有的正是这两个桶，切换/停止后立刻生效
         upBucket.setKbps(p.upKbps);
@@ -126,6 +126,21 @@ public class WeakNet {
     }
 
     /**
+     * 只「选中」一支场景，不启动弱网。
+     *
+     * 没在点总开关之前，引擎参数保持原样（否则选一下场景流量就被限住了，等于偷偷
+     * 开始了测试）：这里只记下 presetKey，等用户点「▶ 开始弱网测试」时由
+     * applyLimitOn() 按这个 key 复原出场景再施加。已经在测试中时，切场景照旧立即生效。
+     */
+    public synchronized void selectScene(Profile p, String key) {
+        presetKey = key;
+        if (p != null && p.hasLimits()) lastProfile = p.copy();
+        if (!limitOn) return;
+        setProfile(p, key);
+        limitOn = true;             // setProfile 不再推断开关，测试中切场景要保持开着
+    }
+
+    /**
      * 限速总开关。关闭不是丢掉用户选的场景：presetKey 保留，下次开启直接复原，
      * 免得每次开关都要重选一遍。
      *
@@ -137,7 +152,7 @@ public class WeakNet {
         } else {
             setProfile(new Profile(), presetKey);
         }
-        limitOn = on;      // 覆盖 setProfile 的推断：自定义全零也算「已开启」
+        limitOn = on;      // 开关只认这里：自定义场景哪怕全零，用户点开了就算「已开启」
     }
 
     /**

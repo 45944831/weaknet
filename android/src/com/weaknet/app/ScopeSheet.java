@@ -75,6 +75,13 @@ public class ScopeSheet {
         if (a == null || a.isFinishing()) return;
         if (dlg == null) build();
         load();
+        if (dlg != null) {
+            dlg.setOnDismissListener(new DialogInterface.OnDismissListener() {
+                public void onDismiss(DialogInterface d) {
+                    a.restoreFloat();          // 飘窗是系统悬浮窗，弹窗期间收起过
+                }
+            });
+        }
         if (dlg != null && !dlg.isShowing()) dlg.show();
     }
 
@@ -101,11 +108,13 @@ public class ScopeSheet {
         synchronized (WeakNet.I.scopePkgs) {
             sel.addAll(WeakNet.I.scopePkgs);
         }
+        // 每次打开都重画列表：show() 里 dlg 可能是刚重建的（listHost 是全新的空容器），
+        // 只在「apps 为空」时才 renderList 会导致第二次打开只剩一个空壳，勾选框也对不上。
         if (apps.isEmpty()) {
             apps.clear();
             apps.addAll(AppList.load(a));
-            renderList();
         }
+        renderList();
         applyMode();
         applyFilter();
     }
