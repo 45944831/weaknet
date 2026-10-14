@@ -9,13 +9,13 @@
 
 ---
 
-## 下载（Release v1.0.2）
+## 下载（Release v1.1.0）
 
 > Windows 端 `WeakNet.exe` 以 GUI 子系统打包，双击直接出界面，**不会弹出 DOS 黑框**；Android 端安装 `WeakNet.apk` 即可。
 
 | 文件 | 平台 | 大小 | SHA-256 |
 | --- | --- | --- | --- |
-| [`WeakNet.exe`](https://github.com/45944831/weaknet/releases/latest/download/WeakNet.exe) | Windows（GUI 版，免装 Python） | 10.1 MB | `8d9d3856…73f083d` |
+| [`WeakNet.exe`](https://github.com/45944831/weaknet/releases/latest/download/WeakNet.exe) | Windows（GUI 版，免装 Python） | 10.1 MB | `6e5ffffd…8e568f9` |
 | [`WeakNet.apk`](https://github.com/45944831/weaknet/releases/latest/download/WeakNet.apk) | Android 7.0+ | 95 KB | `063a684e…dd25bf` |
 
 发布页：https://github.com/45944831/weaknet/releases/latest
@@ -23,7 +23,7 @@
 完整校验值：
 
 ```
-8d9d3856244ecdcf4b90aee79438abfffd0cc906651e9be95f986f2dc73f083d  WeakNet.exe
+6e5ffffdbef5505c7d0450b315228e6fbc2a8c199caa382c194d3b9ea8e568f9  WeakNet.exe
 063a684e44f29a678edf2d0c21fa1f7da92e7962f560738cb3dc68bb6cdd25bf  WeakNet.apk
 ```
 
@@ -54,7 +54,38 @@ python weaknet.py --proxy-port 8888 --ctrl-port 8899
 > 界面只保留桌面 GUI（`weaknet_gui.py`）与 Android 原生 Activity。
 > 本机 HTTP 服务仍在，只 `/api/*` 供脚本/自动化调用，访问 `http://127.0.0.1:8899/` 会返回一句说明而非页面。
 
-桌面 GUI 布局：顶部状态条带**限速总开关**（`▶ 开启限速` / `⏹ 停止限速`）、一键接管本机流量、局域网访问；其下**通栏置顶是「接管范围」**——它是「这次测谁」的开关，范围不对后面所有参数都白调，所以放在最显眼的位置；再往下左边是**场景预设 + 自定义参数**，右边是**事件日志**。**「🔗 环境共享」按钮在「⭐ 我的自定义」标题旁边**——共享的正是这些自定义场景，入口放在它们旁边最顺手。自定义参数默认折叠，点标题展开。
+桌面 GUI 布局：顶部状态条带**限速总开关**（`▶ 开启限速` / `⏹ 停止限速`）、一键接管本机流量、局域网访问；其下**通栏置顶是「接管范围」**——它是「这次测谁」的开关，范围不对后面所有参数都白调，所以放在最显眼的位置；再往下左边是**场景预设 + 自定义参数**，右边是**「📱 USB 手机弱网」与事件日志**。**「🔗 环境共享」按钮在「⭐ 我的自定义」标题旁边**——共享的正是这些自定义场景，入口放在它们旁边最顺手。自定义参数默认折叠，点标题展开。
+
+### 手机（USB 弱网，免装 APK）
+
+Windows 端可以直接给**插在 USB 上的 Android 手机**施加弱网，手机上不需要装任何东西：
+
+1. 手机打开「开发者选项 → USB 调试」，插上 USB 线（要能传数据），在手机上点「允许 USB 调试」
+2. 界面右栏「📱 USB 手机弱网」→ 点 **「🔄 刷新设备」** → 从下拉框里选一台（多设备时）
+3. 点 **「连接手机」** → 状态行显示「已接管 …」即生效，再选场景、点「▶ 开启限速」开始弱网
+   （连上但没开限速时状态行会提示「当前等同直连」）
+4. 测完点 **「断开」**，或直接退出程序 —— 两者都会自动把手机还原成直连，不会留下代理
+
+原理就是两条 adb 命令：`adb reverse` 把手机的 `localhost:8888` 反向映射到电脑的代理端口，
+再 `settings put global http_proxy` 让手机的系统代理指向它，流量于是顺着 USB 线进出 WeakNet。
+
+> **写入失败怎么办（很常见）**：不少手机 —— 尤其是 Android 13+ 的国产 ROM（OPPO / ColorOS 等）——
+> 禁止 adb 改写全局设置，会报 `Permission denial: writing to settings requires
+> android.permission.WRITE_SECURE_SETTINGS`。这是 ROM 的限制而非 WeakNet 的问题，
+> 界面会如实报错并给出替代途径，不会假装成功。可以试：
+>
+> 1. 开发者选项里打开 **「USB 调试（安全设置）」** 或 **「禁止权限监控」**，拔插 USB 后重试
+> 2. 手机已 root：先 `adb root` 再连
+> 3. 改用手写代理：手机连上与电脑相同的 Wi-Fi，在 WLAN 的代理里填电脑局域网 IP + 端口
+>    （电脑这边先点「开启局域网访问」）
+> 4. 或装 `WeakNet.apk` —— `VpnService` 直接接管整机流量，不需要这些权限
+>
+> 还有个前提要清楚：这条路径走的是**系统 HTTP 代理**，只对按系统代理走的 App 生效
+> （浏览器、WebView、以及大多数用 `HttpURLConnection` / OkHttp 默认配置的 App）；
+> 直连 socket 或自带代理设置的 App 不受影响。要整机无差别接管，请用 APK。
+
+首次使用时若提示找不到 `adb.exe`，点卡片里的 **「选择 adb」** 指定它的位置（通常在 Android SDK
+的 `platform-tools` 目录下），路径会记进 `weaknet_settings.json`，下次自动使用。
 
 ### Android
 
@@ -233,6 +264,7 @@ python -m PyInstaller --onefile --windowed --clean --noconfirm --name WeakNet \
 weaknet/
 ├── weaknet.py            核心引擎（asyncio 代理 + HTTP 控制接口，无界面形态）
 ├── weaknet_gui.py        GUI 主程序（tkinter，唯一的图形界面）
+├── usb_phone.py          USB 手机弱网：adb 查找 / 设备列举 / reverse 与全局代理的写入与还原
 ├── gen_icon.py           图标生成脚本（PIL 纯代码绘制）
 ├── logserver.py          限速验证用的本地测速服务端
 ├── assets/               Windows 图标（ico / png）
@@ -273,6 +305,9 @@ weaknet/
 | 环境共享窗口 | 28 项：改名、设备列表、推送（勾选不会被 3 秒自动刷新冲掉）、收件箱三种处理、按钮禁用态、关闭时停掉定时刷新 |
 | 自定义场景 | 36 项：保存 / 重名加序号 / 与内置预设同款按钮 / 删除跟随选中项 / 外部新增自动重画 |
 | 自定义参数越界值 | 丢包率等百分比字段夹到 0~100（修复前 999% 会变成「全丢」，与断网难区分） |
+| USB 手机弱网（adb 层） | 真机 OPPO PEYM00 / Android 13：`adb devices` 识别、`reverse` 映射建立与撤销、`settings get` 回读全部正确；手机 → 电脑的 TCP 连接经 reverse 隧道打通（PC 侧收到握手） |
+| USB 手机弱网（权限受限路径） | 同一台真机上 `settings put global` 被 ROM 拒绝时：如实报错、给出 4 条替代途径，并自动回滚已建的 reverse 映射，手机上无残留 |
+| EXE 冒烟（v1.1.0） | 7/7：GUI 子系统无 DOS 窗口、无 conhost、主窗口标题、`/api/status` 响应、`/api/run` 开关正常 |
 
 ---
 
@@ -280,4 +315,8 @@ weaknet/
 
 - Android 悬浮窗权限需用户在系统设置中授予一次（App 内会引导跳转）
 - Android 端需在 VPN 授权弹窗点「允许」，这是 Android 系统强制的，无法绕过
+- **USB 手机弱网**依赖手机允许 adb 写入全局设置：Android 13+ 的不少国产 ROM 会拒绝
+  （报 `WRITE_SECURE_SETTINGS`），此时请用界面提示里的替代途径（开发者选项中的
+  「USB 调试（安全设置）」/「禁止权限监控」、root、Wi-Fi 手动代理，或改用 APK）
+- USB 手机弱网走的是系统 HTTP 代理，只影响按系统代理走的 App；要整机接管请用 APK
 - 桌面 EXE 是 PyInstaller 单文件打包，首次启动需解压临时文件，稍慢属正常
