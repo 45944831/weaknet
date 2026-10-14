@@ -1,0 +1,785 @@
+package com.weaknet.app;
+
+import android.app.Dialog;
+import android.content.DialogInterface;
+import android.graphics.Color;
+import android.graphics.Typeface;
+import android.graphics.drawable.ColorDrawable;
+import android.graphics.drawable.GradientDrawable;
+import android.text.InputType;
+import android.util.TypedValue;
+import android.view.Gravity;
+import android.view.MotionEvent;
+import android.view.View;
+import android.view.ViewGroup;
+import android.view.Window;
+import android.view.WindowManager;
+import android.widget.Button;
+import android.widget.EditText;
+import android.widget.LinearLayout;
+import android.widget.ScrollView;
+import android.widget.TextView;
+import android.widget.Toast;
+
+import org.json.JSONObject;
+
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+
+/**
+ * 主界面的三块内容：测试环境 / ⭐ 我的自定义 / 事件日志。
+ *
+ * 这三块原本散落在设置浮层里（桌面版是网页控制台），现在直接铺在主界面上：
+ * 选择弱网场景是最高频的操作，为了点它而多开一层浮层纯属多余。
+ * 布局是「顶栏固定 + 下面整体滚动」（见 {@link MainActivity}），这里只负责往
+ * 容器里塞卡片，不承担窗口标题那类职责。
+ *
+ * 刷新策略：MainActivity 每 3 秒的状态循环会调 {@link #sync()}——
+ *   · 场景按钮：只有「内置+自定义」的 key 集合变了才重建网格，否则只更新高亮，
+ *     免得每隔几秒把整片按钮推翻重画（用户在滚动时会被抖走）；
+ *   · 事件日志：比对条数与最后一条时间戳，没变化就不碰 TextView。
+ */
+public class MainPanels {
+    /** 场景按钮一行几个：手机竖屏窄，3 列刚好放得下短名 */
+    private static final int COLS = 3;
+    /** 日志最多显示多少条（引擎侧保留 300 条） */
+    private static final int LOG_MAX = 60;
+
+    private final MainActivity a;
+
+    private LinearLayout builtinGrid;
+    private LinearLayout mineGrid;
+    private Button btnNew;      // ➕ 新建 / ✏️ 编辑（选中自定义时变成编辑）
+    private Button btnShare;
+    private Button btnDel;
+    private TextView logText;
+
+    /** key -> 按钮：内置预设 key 或 u:<id> */
+    private final Map<String, Button> builtinBtns = new LinkedHashMap<String, Button>();
+    private final Map<String, Button> mineBtns = new LinkedHashMap<String, Button>();
+    /** 编辑场景时挂着的 id（新建为空） */
+    private final java.util.concurrent.atomic.AtomicReference<String> editing =
+            new java.util.concurrent.atomic.AtomicReference<String>("");
+    private final Map<String, EditText> editorFields = new LinkedHashMap<String, EditText>();
+    private EditText edName;
+    private Dialog editorDlg;
+
+    private ShareSheet share;
+    private String sceneSig = null;
+    private String logSig = "";
+
+    MainPanels(MainActivity a) {
+        this.a = a;
+    }
+
+    // ---------------------------------------------------------------- 生命周期
+
+    /** 构建三张卡片，挂到主界面的滚动容器上 */
+    void build(LinearLayout host) {
+        host.addView(builtinCard(), cardLp());
+        host.addView(mineCard(), cardLp());
+        host.addView(logCard(), cardLp());
+        sync();
+    }
+
+    /** 关窗口：共享浮层要在 Activity 销毁前收起 */
+    void close() {
+        if (share != null) share.close();
+        if (editorDlg != null) {
+            try {
+                editorDlg.dismiss();
+            } catch (Exception e) {
+                // ignore
+            }
+            editorDlg = null;
+        }
+    }
+
+    boolean shareShowing() {
+        return share != null && share.isShowing();
+    }
+
+    void closeShare() {
+        if (share != null) share.close();
+    }
+
+    /**
+     * 状态循环回调：同步按钮高亮、删除/编辑按钮的显隐、共享待处理条数与日志。
+     * 每隔几秒被调用一次，所以里面刻意做了「没变化就不重画」的判断。
+     */
+    void sync() {
+        reloadScenesIfChanged();
+        syncHighlight();
+        syncTailBtns();
+        int n = ShareNet.inboxCount();
+        if (btnShare != null) {
+            btnShare.setText(n > 0 ? "🔗 环境共享（" + n + " 条待处理）" : "🔗 环境共享");
+        }
+        renderLog();
+    }
+
+    // ---------------------------------------------------------------- 测试环境
+
+    private LinearLayout builtinCard() {
+        LinearLayout card = cardShell();
+        card.addView(title("🎯 测试环境（点一下即生效）"));
+        builtinGrid = new LinearLayout(a);
+        builtinGrid.setOrientation(LinearLayout.VERTICAL);
+        card.addView(builtinGrid, full(0, 0, 0, 2));
+        card.addView(hint("选中一支即刻生效——选中的场景会变蓝；"
+                + "没在测试时会顺手接管流量，选「直连」则完全不限制。"));
+        return card;
+    }
+
+    // ---------------------------------------------------------------- 我的自定义
+
+    private LinearLayout mineCard() {
+        LinearLayout card = cardShell();
+        LinearLayout head = new LinearLayout(a);
+        head.setOrientation(LinearLayout.HORIZONTAL);
+        head.setGravity(Gravity.CENTER_VERTICAL);
+
+        TextView t = new TextView(a);
+        t.setText("⭐ 我的自定义");
+        t.setTextSize(14);
+        t.setTextColor(0xFF1F2430);
+        t.setTypeface(null, Typeface.BOLD);
+        head.addView(t, new LinearLayout.LayoutParams(0, dp(30), 1f));
+
+        btnNew = new Button(a);
+        btnNew.setAllCaps(false);
+        btnNew.setTextSize(12);
+        btnNew.setTextColor(0xFF7A4FF3);
+        btnNew.setBackground(box(0xFFF3EFFF, 0xFFD9CBFB, 8));
+        btnNew.setPadding(dp(10), dp(4), dp(10), dp(4));
+        btnNew.setOnClickListener(new View.OnClickListener() {
+            public void onClick(View v) {
+                String key = WeakNet.I.presetKey;
+                openEditor(key != null && key.startsWith("u:") ? key.substring(2) : null);
+            }
+        });
+        head.addView(btnNew);
+
+        btnShare = new Button(a);
+        btnShare.setAllCaps(false);
+        btnShare.setTextSize(12);
+        btnShare.setTextColor(0xFF7A4FF3);
+        btnShare.setBackground(box(0xFFF3EFFF, 0xFFD9CBFB, 8));
+        btnShare.setPadding(dp(10), dp(4), dp(10), dp(4));
+        btnShare.setOnClickListener(new View.OnClickListener() {
+            public void onClick(View v) {
+                openShare();
+            }
+        });
+        LinearLayout.LayoutParams sp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        sp.setMargins(dp(6), 0, 0, 0);
+        head.addView(btnShare, sp);
+        card.addView(head);
+
+        mineGrid = new LinearLayout(a);
+        mineGrid.setOrientation(LinearLayout.VERTICAL);
+        card.addView(mineGrid, full(0, 4, 0, 4));
+
+        btnDel = new Button(a);
+        btnDel.setAllCaps(false);
+        btnDel.setTextSize(13);
+        btnDel.setText("🗑 删除当前场景");
+        btnDel.setTextColor(0xFFD93025);
+        btnDel.setBackground(box(0xFFFFFFFF, 0xFFF3C3C0, 8));
+        btnDel.setPadding(dp(12), dp(9), dp(12), dp(9));
+        btnDel.setOnClickListener(new View.OnClickListener() {
+            public void onClick(View v) {
+                delCurrent();
+            }
+        });
+        card.addView(btnDel, full(0, 0, 0, 4));
+
+        card.addView(hint("自定义场景可保存 13 项参数，也能通过「🔗 环境共享」"
+                + "与同一局域网里的电脑/其他手机互推。"));
+        return card;
+    }
+
+    /** 删除/编辑按钮跟随当前生效场景：只有选中自定义时才出现 */
+    private void syncTailBtns() {
+        String key = WeakNet.I.presetKey;
+        boolean mine = key != null && key.startsWith("u:");
+        if (btnDel != null) btnDel.setVisibility(mine ? View.VISIBLE : View.GONE);
+        if (btnNew != null) btnNew.setText(mine ? "✏️ 编辑" : "➕ 新建");
+    }
+
+    // ---------------------------------------------------------------- 事件日志
+
+    private LinearLayout logCard() {
+        LinearLayout card = cardShell();
+
+        LinearLayout head = new LinearLayout(a);
+        head.setOrientation(LinearLayout.HORIZONTAL);
+        head.setGravity(Gravity.CENTER_VERTICAL);
+        TextView t = new TextView(a);
+        t.setText("📋 事件日志");
+        t.setTextSize(14);
+        t.setTextColor(0xFF1F2430);
+        t.setTypeface(null, Typeface.BOLD);
+        head.addView(t, new LinearLayout.LayoutParams(0, dp(30), 1f));
+        Button btnClear = new Button(a);
+        btnClear.setAllCaps(false);
+        btnClear.setTextSize(12);
+        btnClear.setText("清空");
+        btnClear.setTextColor(0xFF5A6472);
+        btnClear.setBackground(box(0xFFFFFFFF, 0xFFD7DEEA, 8));
+        btnClear.setPadding(dp(12), dp(4), dp(12), dp(4));
+        btnClear.setOnClickListener(new View.OnClickListener() {
+            public void onClick(View v) {
+                synchronized (WeakNet.I.events) {
+                    WeakNet.I.events.clear();
+                }
+                logSig = "";
+                renderLog();
+                Toast.makeText(a, "已清空日志", Toast.LENGTH_SHORT).show();
+            }
+        });
+        head.addView(btnClear);
+        card.addView(head);
+
+        // 固定高度的独立滚动区：外层是整页 ScrollView，这里必须自己能滚，
+        // 并且触摸时禁止外层拦截，否则手指一动就把整页带走了。
+        final ScrollView sv = new ScrollView(a);
+        sv.setBackground(box(0xFFFFFFFF, 0xFFE3E8EF, 8));
+        logText = new TextView(a);
+        logText.setTextSize(11);
+        logText.setTypeface(Typeface.MONOSPACE);
+        logText.setTextColor(0xFF4A5260);
+        logText.setPadding(dp(8), dp(8), dp(8), dp(8));
+        sv.addView(logText);
+        sv.setOnTouchListener(new View.OnTouchListener() {
+            public boolean onTouch(View v, MotionEvent ev) {
+                v.getParent().requestDisallowInterceptTouchEvent(true);
+                return false;
+            }
+        });
+        card.addView(sv, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, dp(150)));
+        return card;
+    }
+
+    /** 画日志：最新的在最上面，条数与最后一条时间戳都没变就不重画 */
+    private void renderLog() {
+        if (logText == null) return;
+        List<String[]> snap;
+        synchronized (WeakNet.I.events) {
+            snap = new ArrayList<String[]>(WeakNet.I.events);
+        }
+        String sig;
+        synchronized (WeakNet.I.events) {
+            sig = snap.size() + "|" + (snap.isEmpty() ? "" : snap.get(snap.size() - 1)[0]
+                    + snap.get(snap.size() - 1)[2]);
+        }
+        if (sig.equals(logSig)) return;
+        logSig = sig;
+
+        StringBuilder sb = new StringBuilder();
+        if (snap.isEmpty()) {
+            sb.append("（暂无事件）\n开启接管并访问网络后，连接、断连、丢包、DNS 故障等会记在这里。");
+        } else {
+            int from = Math.max(0, snap.size() - LOG_MAX);
+            for (int i = snap.size() - 1; i >= from; i--) {
+                String[] e = snap.get(i);
+                sb.append(e[0]).append("  ").append(tagOf(e[1])).append(e[2]).append('\n');
+            }
+            if (snap.size() > LOG_MAX) {
+                sb.append("… 另有 ").append(snap.size() - LOG_MAX).append(" 条较早事件未显示");
+            }
+        }
+        logText.setText(sb.toString());
+    }
+
+    /** 事件类型 → 便于扫一眼的中文前缀 */
+    private static String tagOf(String type) {
+        if (type == null) return "";
+        if ("config".equals(type)) return "[配置] ";
+        if ("connect".equals(type)) return "[连接] ";
+        if ("disconnect".equals(type)) return "[断连] ";
+        if ("dns".equals(type)) return "[DNS] ";
+        if ("timeout".equals(type)) return "[超时] ";
+        if ("reject".equals(type)) return "[拒连] ";
+        if ("flap".equals(type)) return "[网络切换] ";
+        if ("share".equals(type)) return "[共享] ";
+        if ("error".equals(type)) return "[错误] ";
+        return "[" + type + "] ";
+    }
+
+    // ---------------------------------------------------------------- 场景
+
+    /** key → Profile：内置预设 key 或 u:<id> 形式的自定义场景 */
+    private static Profile profileOf(String key) {
+        if (key == null) return null;
+        if (key.startsWith("u:")) {
+            MyPresets.Item it = MyPresets.find(key.substring(2));
+            return it == null ? null : it.profile;
+        }
+        for (String k : Profile.KEYS) {
+            if (k.equals(key)) {
+                try {
+                    return Profile.build(k);
+                } catch (Exception e) {
+                    return null;
+                }
+            }
+        }
+        return null;
+    }
+
+    /** key 集合没变就不重建网格（避免每 3 秒把整片按钮推翻重画） */
+    private void reloadScenesIfChanged() {
+        StringBuilder sb = new StringBuilder();
+        List<String[]> builtin = new ArrayList<String[]>();
+        for (String k : Profile.KEYS) {
+            Profile p = null;
+            try {
+                p = Profile.build(k);
+            } catch (Exception e) {
+                p = null;
+            }
+            if (p == null) continue;
+            String s = Profile.shortOf(k);
+            builtin.add(new String[]{k, s.length() > 0 ? s : p.name});
+            sb.append(k).append(',');
+        }
+        sb.append('|');
+        List<String[]> mine = new ArrayList<String[]>();
+        for (MyPresets.Item it : MyPresets.load()) {
+            mine.add(new String[]{"u:" + it.id, it.name});
+            sb.append(it.id).append(',');
+        }
+        String sig = sb.toString();
+        if (sig.equals(sceneSig)) return;
+        sceneSig = sig;
+        builtinBtns.clear();
+        mineBtns.clear();
+        renderGrid(builtinGrid, builtin, builtinBtns, "（没有可用场景）");
+        renderGrid(mineGrid, mine, mineBtns,
+                "（还没有自定义场景：点「➕ 新建」配一组参数，或从别人那儿共享过来）");
+    }
+
+    private void renderGrid(LinearLayout host, List<String[]> items,
+                            Map<String, Button> out, String empty) {
+        if (host == null) return;
+        host.removeAllViews();
+        if (items.isEmpty()) {
+            host.addView(hint(empty));
+            return;
+        }
+        LinearLayout row = null;
+        for (int i = 0; i < items.size(); i++) {
+            if (i % COLS == 0) {
+                row = new LinearLayout(a);
+                row.setOrientation(LinearLayout.HORIZONTAL);
+                host.addView(row, new LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+            }
+            final String key = items.get(i)[0];
+            Button b = new Button(a);
+            b.setAllCaps(false);
+            b.setTextSize(12);
+            b.setSingleLine(true);
+            b.setText(items.get(i)[1]);
+            b.setBackground(box(0xFFF1F4FA, 0xFFD7DEEA, 8));
+            b.setTextColor(0xFF2F3F52);
+            b.setPadding(dp(6), dp(8), dp(6), dp(8));
+            LinearLayout.LayoutParams bp = new LinearLayout.LayoutParams(
+                    0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
+            bp.setMargins(0, dp(3), dp(6), dp(3));
+            b.setLayoutParams(bp);
+            b.setOnClickListener(new View.OnClickListener() {
+                public void onClick(View v) {
+                    applyKey(key);
+                }
+            });
+            row.addView(b);
+            out.put(key, b);
+        }
+    }
+
+    /** 当前生效的场景高亮（内置蓝、自定义紫） */
+    private void syncHighlight() {
+        String cur = WeakNet.I.presetKey;
+        for (Map.Entry<String, Button> e : builtinBtns.entrySet()) {
+            boolean on = e.getKey().equals(cur);
+            e.getValue().setBackground(box(on ? 0xFF2F6FED : 0xFFF1F4FA,
+                    on ? 0xFF2F6FED : 0xFFD7DEEA, 8));
+            e.getValue().setTextColor(on ? Color.WHITE : 0xFF2F3F52);
+        }
+        for (Map.Entry<String, Button> e : mineBtns.entrySet()) {
+            boolean on = e.getKey().equals(cur);
+            e.getValue().setBackground(box(on ? 0xFF7A4FF3 : 0xFFF1F4FA,
+                    on ? 0xFF7A4FF3 : 0xFFD7DEEA, 8));
+            e.getValue().setTextColor(on ? Color.WHITE : 0xFF2F3F52);
+        }
+    }
+
+    private void applyKey(String key) {
+        Profile p = profileOf(key);
+        if (p == null) {
+            Toast.makeText(a, "这条场景已不存在，已刷新列表", Toast.LENGTH_SHORT).show();
+            sceneSig = null;
+            reloadScenesIfChanged();
+            return;
+        }
+        WeakNet.I.setProfile(p, key);
+        WeakNet.I.log("config", "切换场景：" + p.name);
+        Toast.makeText(a, "已应用场景：" + p.name, Toast.LENGTH_SHORT).show();
+        syncHighlight();
+        syncTailBtns();
+        a.updateStatus();
+        a.ensureTakeover();     // 没接管的话顺手接管，否则选了场景也落不到流量上
+    }
+
+    private void delCurrent() {
+        String key = WeakNet.I.presetKey;
+        if (key == null || !key.startsWith("u:")) return;
+        MyPresets.Item it = MyPresets.find(key.substring(2));
+        if (it == null) {
+            sceneSig = null;
+            reloadScenesIfChanged();
+            return;
+        }
+        String name = it.name;
+        MyPresets.delete(it.id);
+        WeakNet.I.log("config", "删除自定义场景：" + name);
+        // 删掉的正是当前的场景：切回直连，免得 presetKey 指向不存在的 id
+        WeakNet.I.setProfile(new Profile(), "direct");
+        WeakNet.I.limitOn = false;
+        Toast.makeText(a, "已删除「" + name + "」", Toast.LENGTH_SHORT).show();
+        sceneSig = null;
+        reloadScenesIfChanged();
+        syncHighlight();
+        syncTailBtns();
+        a.updateStatus();
+    }
+
+    // ---------------------------------------------------------------- 环境共享
+
+    private void openShare() {
+        if (share == null) share = new ShareSheet(a);
+        share.show();
+    }
+
+    // ---------------------------------------------------------------- 自定义场景编辑器
+
+    /** 13 项参数：key / 中文标签 / 默认值（与桌面版自定义面板一致） */
+    private static final String[][] FIELDS = {
+            {"down_kbps", "下行带宽 (kbps)", "0"},
+            {"up_kbps", "上行带宽 (kbps)", "0"},
+            {"latency_up_ms", "上行延迟 (ms)", "0"},
+            {"latency_down_ms", "下行延迟 (ms)", "0"},
+            {"jitter_ms", "抖动 (ms)", "0"},
+            {"loss_pct", "丢包 (%)", "0"},
+            {"disconnect_pct", "随机断连 (%)", "0"},
+            {"timeout_pct", "黑洞：无响应 (%)", "0"},
+            {"dns_fail_pct", "DNS 故障 (%)", "0"},
+            {"reject_pct", "拒连 (%)", "0"},
+            {"stall_ms", "卡顿时长 (ms)", "600"},
+            {"flap_sec", "网络切换周期 (s，0=关)", "0"},
+            {"flap_blackout_sec", "切换黑窗时长 (s)", "2"},
+    };
+
+    /** @param id 要编辑的自定义场景 id；null = 新建 */
+    void openEditor(String id) {
+        editing.set(id == null ? "" : id);
+        editorFields.clear();
+        edName = null;
+        editorDlg = new Dialog(a);
+        editorDlg.requestWindowFeature(Window.FEATURE_NO_TITLE);
+        editorDlg.setCancelable(true);
+        editorDlg.setCanceledOnTouchOutside(true);
+
+        JSONObject cur = null;
+        String curName = "";
+        if (id != null) {
+            MyPresets.Item it = MyPresets.find(id);
+            if (it != null) {
+                cur = it.profile.toJson();
+                curName = it.name;
+            }
+        }
+
+        ScrollView sv = new ScrollView(a);
+        LinearLayout card = new LinearLayout(a);
+        card.setOrientation(LinearLayout.VERTICAL);
+        card.setBackground(box(Color.WHITE, 0xFFDDE3EC, 14));
+        card.setPadding(dp(14), dp(12), dp(14), dp(14));
+
+        // 标题行：标题占满剩余宽度，右侧一个 ✕ 关闭——
+        // 表单是模态浮层，只靠点外部/返回键收起的话，键盘弹起时用户容易找不到退路
+        LinearLayout head = new LinearLayout(a);
+        head.setOrientation(LinearLayout.HORIZONTAL);
+        head.setGravity(Gravity.CENTER_VERTICAL);
+        TextView t = new TextView(a);
+        t.setText(id == null ? "➕ 新建自定义场景" : "✏️ 编辑自定义场景");
+        t.setTextSize(16);
+        t.setTextColor(0xFF1F2430);
+        t.setTypeface(null, Typeface.BOLD);
+        head.addView(t, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        TextView close = new TextView(a);
+        close.setText("✕");
+        close.setTextSize(17);
+        close.setTextColor(0xFF8A94A6);
+        close.setPadding(dp(10), dp(2), dp(4), dp(2));
+        close.setContentDescription("关闭自定义参数");
+        close.setOnClickListener(new View.OnClickListener() {
+            public void onClick(View v) {
+                cancelEdit();
+            }
+        });
+        head.addView(close);
+        card.addView(head);
+        card.addView(divider(dp(8)));
+
+        edName = new EditText(a);
+        edName.setHint("场景名称，例：地铁早高峰");
+        edName.setText(curName);
+        edName.setTextSize(14);
+        // content-desc：既是无障碍标签，也让 uiautomator 脚本能精确定位每个输入框
+        edName.setContentDescription("场景名称");
+        card.addView(edName, full(0, 0, 0, 6));
+
+        for (String[] f : FIELDS) {
+            LinearLayout row = new LinearLayout(a);
+            row.setOrientation(LinearLayout.HORIZONTAL);
+            row.setGravity(Gravity.CENTER_VERTICAL);
+            TextView lb = new TextView(a);
+            lb.setText(f[1]);
+            lb.setTextSize(12);
+            lb.setTextColor(0xFF5A6472);
+            row.addView(lb, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+            EditText ed = new EditText(a);
+            ed.setTextSize(13);
+            ed.setSingleLine(true);
+            ed.setInputType(InputType.TYPE_CLASS_NUMBER | InputType.TYPE_NUMBER_FLAG_DECIMAL);
+            ed.setGravity(Gravity.END);
+            ed.setContentDescription(f[1]);
+            String v = cur != null ? String.valueOf(cur.opt(f[0])) : f[2];
+            if (cur == null) v = f[2];
+            ed.setText(v);
+            LinearLayout.LayoutParams ep = new LinearLayout.LayoutParams(dp(96),
+                    ViewGroup.LayoutParams.WRAP_CONTENT);
+            ep.setMargins(dp(8), dp(2), 0, dp(2));
+            row.addView(ed, ep);
+            card.addView(row);
+            editorFields.put(f[0], ed);
+        }
+
+        card.addView(hint("带宽填 0 表示不限；百分比是每条连接命中该故障的概率。"));
+
+        // 底部固定一行：取消 + 保存并应用——
+        // 13 行参数肯定超屏，按钮放内容末尾的话得先滚到底才点得到；
+        // 固定在底部后键盘弹出、翻看参数时它们都一直在眼前。
+        Button save = new Button(a);
+        save.setAllCaps(false);
+        save.setText("保存并应用");
+        save.setTextSize(14);
+        save.setTextColor(Color.WHITE);
+        save.setBackground(box(0xFF2F6FED, 0xFF2F6FED, 8));
+        save.setPadding(dp(12), dp(11), dp(12), dp(11));
+        save.setContentDescription("保存并应用");
+        save.setOnClickListener(new View.OnClickListener() {
+            public void onClick(View v) {
+                saveEdited();
+            }
+        });
+
+        Button cancel = new Button(a);
+        cancel.setAllCaps(false);
+        cancel.setText("取消");
+        cancel.setTextSize(14);
+        cancel.setTextColor(0xFF5A6472);
+        cancel.setBackground(box(0xFFFFFFFF, 0xFFD7DEEA, 8));
+        cancel.setPadding(dp(12), dp(11), dp(12), dp(11));
+        cancel.setContentDescription("取消编辑");
+        cancel.setOnClickListener(new View.OnClickListener() {
+            public void onClick(View v) {
+                cancelEdit();
+            }
+        });
+
+        LinearLayout foot = new LinearLayout(a);
+        foot.setOrientation(LinearLayout.HORIZONTAL);
+        LinearLayout.LayoutParams fp = new LinearLayout.LayoutParams(
+                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
+        foot.addView(cancel, fp);
+        fp = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
+        fp.setMargins(dp(8), 0, 0, 0);
+        foot.addView(save, fp);
+
+        sv.addView(card, new android.widget.FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        LinearLayout outer = new LinearLayout(a);
+        outer.setOrientation(LinearLayout.VERTICAL);
+        outer.addView(sv, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
+        outer.addView(foot, full(0, dp(8), 0, 0));
+
+        int m = dp(12);
+        android.widget.FrameLayout.LayoutParams ol =
+                new android.widget.FrameLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        ol.setMargins(m, m, m, m);
+        editorDlg.setContentView(outer, ol);
+
+        Window w = editorDlg.getWindow();
+        if (w != null) {
+            w.setBackgroundDrawable(new ColorDrawable(Color.TRANSPARENT));
+            w.setLayout(WindowManager.LayoutParams.MATCH_PARENT,
+                    WindowManager.LayoutParams.WRAP_CONTENT);
+            w.setGravity(Gravity.CENTER);
+            // 键盘弹出时压缩内容区（而不是把整个窗口平推出屏），
+            // 底部固定的保存按钮在键盘上方始终可见可点
+            w.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE);
+            editorDlg.setOnShowListener(new DialogInterface.OnShowListener() {
+                public void onShow(DialogInterface di) {
+                    if (editorDlg == null) return;
+                    Window win = editorDlg.getWindow();
+                    if (win == null) return;
+                    try {
+                        int wide = a.getResources().getDisplayMetrics().widthPixels - dp(24);
+                        int maxH = (int) (a.getResources().getDisplayMetrics().heightPixels * 0.9);
+                        card.measure(
+                                View.MeasureSpec.makeMeasureSpec(wide, View.MeasureSpec.EXACTLY),
+                                View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED));
+                        // 内容高度 + 底部按钮行（约 46dp）+ 外边距
+                        int h = card.getMeasuredHeight() + dp(46) + dp(24);
+                        win.setLayout(WindowManager.LayoutParams.MATCH_PARENT,
+                                Math.min(h, maxH));
+                    } catch (Exception e) {
+                        // 测量失败就保持系统默认高度
+                    }
+                }
+            });
+        }
+        editorDlg.show();
+    }
+
+    /** 关掉表单（不保存） */
+    private void closeEditor() {
+        if (editorDlg != null) {
+            try {
+                editorDlg.dismiss();
+            } catch (Exception e) {
+                // ignore
+            }
+            editorDlg = null;
+        }
+        editorFields.clear();
+        edName = null;
+    }
+
+    /** ✕ / 取消：不写入任何东西，直接收起表单 */
+    private void cancelEdit() {
+        closeEditor();
+        Toast.makeText(a, "已取消，未保存", Toast.LENGTH_SHORT).show();
+    }
+
+    /** 读取表单 → 保存 → 立即应用为当前场景 */
+    private void saveEdited() {
+        String name = edName == null ? "" : String.valueOf(edName.getText()).trim();
+        if (name.length() == 0) name = "自定义场景";
+        JSONObject o = new JSONObject();
+        try {
+            for (String[] f : FIELDS) {
+                EditText ed = editorFields.get(f[0]);
+                String s = ed == null ? "" : String.valueOf(ed.getText()).trim();
+                if (s.length() == 0) continue;
+                // 有小数点的按 double 读（百分比），其余按整数（带宽、毫秒）
+                if (s.indexOf('.') >= 0) o.put(f[0], Double.parseDouble(s));
+                else o.put(f[0], Long.parseLong(s));
+            }
+        } catch (Exception e) {
+            Toast.makeText(a, "参数填得不对：" + e.getMessage(), Toast.LENGTH_SHORT).show();
+            return;
+        }
+        String id = editing.get();
+        MyPresets.Item it = MyPresets.save(id.length() == 0 ? null : id, name, o);
+        if (it == null) {
+            Toast.makeText(a, "保存失败", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        WeakNet.I.setProfile(it.profile.copy(), "u:" + it.id);
+        WeakNet.I.log("config", "保存自定义场景：" + it.name);
+        Toast.makeText(a, "已保存并应用：" + it.name, Toast.LENGTH_SHORT).show();
+        closeEditor();
+        sceneSig = null;
+        reloadScenesIfChanged();
+        syncHighlight();
+        syncTailBtns();
+        a.updateStatus();
+    }
+
+    // ---------------------------------------------------------------- 控件工厂
+
+    private LinearLayout cardShell() {
+        LinearLayout c = new LinearLayout(a);
+        c.setOrientation(LinearLayout.VERTICAL);
+        c.setBackground(box(0xFFF7F9FC, 0xFFE3E8EF, 12));
+        c.setPadding(dp(12), dp(10), dp(12), dp(12));
+        return c;
+    }
+
+    private LinearLayout.LayoutParams cardLp() {
+        LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        p.setMargins(dp(14), 0, dp(14), dp(10));
+        return p;
+    }
+
+    private LinearLayout.LayoutParams full(int l, int t, int r, int b) {
+        LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        p.setMargins(dp(l), dp(t), dp(r), dp(b));
+        return p;
+    }
+
+    private TextView title(String text) {
+        TextView t = new TextView(a);
+        t.setText(text);
+        t.setTextSize(14);
+        t.setTextColor(0xFF1F2430);
+        t.setTypeface(null, Typeface.BOLD);
+        t.setPadding(0, 0, 0, dp(2));
+        return t;
+    }
+
+    private TextView hint(String text) {
+        TextView t = new TextView(a);
+        t.setText(text);
+        t.setTextSize(11);
+        t.setTextColor(0xFF8A94A6);
+        t.setPadding(dp(2), dp(2), dp(2), 0);
+        return t;
+    }
+
+    private View divider(int gap) {
+        View v = new View(a);
+        v.setBackgroundColor(0xFFE6EAF0);
+        LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, 1);
+        p.setMargins(0, gap, 0, gap);
+        v.setLayoutParams(p);
+        return v;
+    }
+
+    private GradientDrawable box(int fill, int stroke, int radiusDp) {
+        GradientDrawable g = new GradientDrawable();
+        g.setColor(fill);
+        g.setStroke(1, stroke);
+        g.setCornerRadius(dp(radiusDp));
+        return g;
+    }
+
+    private int dp(int v) {
+        return (int) TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP, v,
+                a.getResources().getDisplayMetrics());
+    }
+}

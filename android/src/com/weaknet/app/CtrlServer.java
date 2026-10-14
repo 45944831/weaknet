@@ -4,32 +4,27 @@ import org.json.JSONArray;
 import org.json.JSONObject;
 
 import java.io.BufferedInputStream;
-import java.io.ByteArrayOutputStream;
-import java.io.File;
-import java.io.FileInputStream;
 import java.io.IOException;
-import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.InetSocketAddress;
 import java.net.ServerSocket;
 import java.net.Socket;
+import java.util.ArrayList;
 import java.util.List;
 
-/** 控制台 HTTP 服务：提供页面与 /api/*（与桌面版接口完全一致） */
+/** 控制 HTTP 服务：只提供 /api/*（界面改为 App 原生 MainActivity） */
 public class CtrlServer implements Runnable {
     private static final String JSON_CT = "application/json; charset=utf-8";
 
     private final int port;
     private final ProxyServer proxy;
-    private final File dashFile;
     private final android.content.Context ctx;
     private ServerSocket server;
     private volatile boolean stopped = false;
 
-    public CtrlServer(int port, ProxyServer proxy, File dashFile, android.content.Context ctx) {
+    public CtrlServer(int port, ProxyServer proxy, android.content.Context ctx) {
         this.port = port;
         this.proxy = proxy;
-        this.dashFile = dashFile;
         this.ctx = ctx;
         MyPresets.bind(ctx);        // 自定义场景要落 SharedPreferences，先把上下文备好
         FloatSettings.bind(ctx);    // 悬浮窗设置同理
@@ -121,12 +116,72 @@ public class CtrlServer implements Runnable {
         }
 
         private void route(String method, String path, String body) throws Exception {
+            // 网页控制台已下线，界面在 App 原生 MainActivity 里。
+            // 这里只保留 HTTP API（脚本/自动化仍可调用），访问根路径给一句说明而不是空白页。
             if ("/".equals(path) || "/index.html".equals(path)) {
-                respond(200, "text/html; charset=utf-8", readFile(dashFile));
+                respond(200, "text/plain; charset=utf-8",
+                        ("WeakNet\n\n控制台已改为 App 原生界面，网页端不再提供。\n"
+                                + "HTTP 控制接口仍可用，见 /api/status。\n").getBytes("UTF-8"));
                 return;
             }
             if ("/api/status".equals(path)) {
                 respond(200, JSON_CT, statusJson().toString().getBytes("UTF-8"));
+                return;
+            }
+            // ---- 环境共享：只读状态，便于脚本验证「手机也能被 PC 发现 / 收到推送」----
+            if ("/api/share".equals(path)) {
+                respond(200, JSON_CT, ShareNet.statusJson().toString().getBytes("UTF-8"));
+                return;
+            }
+            if ("POST".equals(method) && "/api/share/name".equals(path)) {
+                try {
+                    ShareNet.setUserName(new JSONObject(body).optString("name", ""));
+                    respond(200, JSON_CT, ShareNet.statusJson().toString().getBytes("UTF-8"));
+                } catch (Exception e) {
+                    respond(400, JSON_CT, "{\"error\":\"bad request\"}".getBytes("UTF-8"));
+                }
+                return;
+            }
+            if ("POST".equals(method) && "/api/share/push".equals(path)) {
+                // 给脚本用：{peer: "<id>", ids: [...]}；真实界面走 ShareSheet
+                try {
+                    JSONObject d = new JSONObject(body);
+                    ShareNet.Peer p = ShareNet.findPeer(d.optString("peer", ""));
+                    JSONArray ids = d.optJSONArray("ids");
+                    List<String> list = new ArrayList<String>();
+                    if (ids != null) {
+                        for (int i = 0; i < ids.length(); i++) list.add(ids.optString(i, ""));
+                    }
+                    // 推送是同步 HTTP，必须挪出 HTTP 线程；最多等 15 秒
+                    final ShareNet.Peer fp = p;
+                    final List<String> flist = list;
+                    final ShareNet.PushResult[] holder = new ShareNet.PushResult[1];
+                    Thread t = new Thread(new Runnable() {
+                        public void run() {
+                            holder[0] = ShareNet.push(fp, flist);
+                        }
+                    }, "share-push-api");
+                    t.setDaemon(true);
+                    t.start();
+                    t.join(15000);
+                    JSONObject o = new JSONObject();
+                    o.put("ok", holder[0] != null && holder[0].ok);
+                    o.put("msg", holder[0] == null ? "推送超时或未完成" : holder[0].msg);
+                    respond(200, JSON_CT, o.toString().getBytes("UTF-8"));
+                } catch (Exception e) {
+                    respond(400, JSON_CT, "{\"error\":\"bad request\"}".getBytes("UTF-8"));
+                }
+                return;
+            }
+            if ("POST".equals(method) && "/api/share/inbox".equals(path)) {
+                try {
+                    JSONObject d = new JSONObject(body);
+                    JSONObject r = ShareNet.resolveInbox(d.optString("id", ""),
+                            d.optString("action", "keep"), d.optString("name", ""));
+                    respond(200, JSON_CT, r.toString().getBytes("UTF-8"));
+                } catch (Exception e) {
+                    respond(400, JSON_CT, "{\"error\":\"bad request\"}".getBytes("UTF-8"));
+                }
                 return;
             }
             if ("/api/presets".equals(path)) {
@@ -188,55 +243,24 @@ public class CtrlServer implements Runnable {
                 return;
             }
             if ("/api/targets".equals(path)) {
-                // 可接管的目标 = 已安装的、有启动入口的应用（过滤掉纯后台服务，便于用户辨认）
+                // 可接管的目标 = 已安装的应用（与手机端「指定程序」共用 AppList，结果一致）
                 JSONObject o = new JSONObject();
                 o.put("type", "package");
                 o.put("unit", "应用");
                 JSONArray a = new JSONArray();
+                java.util.List<AppList.Row> rows = AppList.load(ctx);
                 try {
-                    android.content.pm.PackageManager pm = ctx.getPackageManager();
-                    java.util.List<JSONObject> rows = new java.util.ArrayList<JSONObject>();
-                    // 首选：查「启动器」intent —— 与 Manifest 里 <queries> 声明的是同一个，
-                    // 也是官方推荐的写法（只看有启动入口的应用，过滤掉纯后台服务）。
-                    android.content.Intent main = new android.content.Intent(
-                            android.content.Intent.ACTION_MAIN);
-                    main.addCategory(android.content.Intent.CATEGORY_LAUNCHER);
-                    java.util.List<android.content.pm.ResolveInfo> ris =
-                            pm.queryIntentActivities(main, 0);
-                    for (android.content.pm.ResolveInfo ri : ris) {
-                        String pkg = ri.activityInfo.packageName;
-                        if (ctx.getPackageName().equals(pkg)) continue;
+                    for (AppList.Row r : rows) {
                         JSONObject it = new JSONObject();
-                        it.put("id", pkg);
-                        it.put("name", ri.loadLabel(pm).toString());
-                        it.put("desc", pkg);
-                        rows.add(it);
+                        it.put("id", r.id);
+                        it.put("name", r.name);
+                        it.put("desc", r.id);
+                        a.put(it);
                     }
-                    // 兜底：上面查不到说明被包可见性挡住了，退回枚举已安装应用，
-                    // 宁可多列几个后台服务，也不能给用户一张空列表（选不出 App = 功能不可用）。
-                    if (rows.isEmpty()) {
-                        for (android.content.pm.ApplicationInfo ai
-                                : pm.getInstalledApplications(0)) {
-                            if (ctx.getPackageName().equals(ai.packageName)) continue;
-                            JSONObject it = new JSONObject();
-                            it.put("id", ai.packageName);
-                            it.put("name", pm.getApplicationLabel(ai).toString());
-                            it.put("desc", ai.packageName);
-                            rows.add(it);
-                        }
-                    }
-                    WeakNet.I.log("config", "应用列表：启动器 " + ris.size()
-                            + " 项，最终 " + rows.size() + " 个");
-                    // 按显示名排序，方便查找
-                    java.util.Collections.sort(rows, new java.util.Comparator<JSONObject>() {
-                        public int compare(JSONObject x, JSONObject y) {
-                            return x.optString("name").compareToIgnoreCase(y.optString("name"));
-                        }
-                    });
-                    for (JSONObject it : rows) a.put(it);
                 } catch (Exception e) {
                     WeakNet.I.log("error", "读取应用列表失败：" + e.getMessage());
                 }
+                WeakNet.I.log("config", "应用列表：" + rows.size() + " 个");
                 o.put("items", a);
                 respond(200, JSON_CT, o.toString().getBytes("UTF-8"));
                 return;
@@ -363,11 +387,34 @@ public class CtrlServer implements Runnable {
                 }
                 return;
             }
+            // 限速总开关：App 启动后默认关闭，用户点「开启限速」才生效
+            if (method.equals("POST") && "/api/run".equals(path)) {
+                boolean enable = false;
+                try {
+                    enable = new JSONObject(body).optBoolean("enable");
+                } catch (Exception e) {
+                    respond(400, JSON_CT, "{\"error\":\"bad request\"}".getBytes("UTF-8"));
+                    return;
+                }
+                Profile restore = null;
+                if (enable) {
+                    restore = buildKeyProfile(WeakNet.I.presetKey);   // 内置 / 自定义场景
+                    if (restore == null) restore = WeakNet.I.lastProfile;
+                    if (restore == null) restore = new Profile();
+                }
+                WeakNet.I.setLimitOn(enable, restore);
+                WeakNet.I.log("config", enable
+                        ? "开启限速：" + WeakNet.I.profile.name
+                        : "停止限速（恢复直连，场景保留：" + WeakNet.I.presetKey + "）");
+                respond(200, JSON_CT, ("{\"ok\":true,\"limit_on\":" + WeakNet.I.limitOn + "}")
+                        .getBytes("UTF-8"));
+                return;
+            }
             // 不限方法：页面若以 GET 发出也要能停（前端漏带 body 时会走 GET，
             // 只认 POST 就会返回 404，表现为「停止按钮点了没反应」）
             if ("/api/stop".equals(path)) {
-                WeakNet.I.setProfile(new Profile(), "direct");
-                WeakNet.I.log("config", "停止模拟，恢复直连");
+                WeakNet.I.setLimitOn(false, null);
+                WeakNet.I.log("config", "停止限速，恢复直连");
                 respond(200, JSON_CT, "{\"ok\":true}".getBytes("UTF-8"));
                 return;
             }
@@ -495,6 +542,7 @@ public class CtrlServer implements Runnable {
             JSONObject o = new JSONObject();
             o.put("profile", WeakNet.I.profile.toJson());
             o.put("preset_key", WeakNet.I.presetKey);
+            o.put("limit_on", WeakNet.I.limitOn);
             o.put("gate_open", WeakNet.I.gateOpen);
             JSONObject listen = new JSONObject();
             listen.put("host", proxy.host());
@@ -557,17 +605,4 @@ public class CtrlServer implements Runnable {
         }
     }
 
-    private static byte[] readFile(File f) {
-        try {
-            FileInputStream in = new FileInputStream(f);
-            ByteArrayOutputStream bo = new ByteArrayOutputStream();
-            byte[] buf = new byte[8192];
-            int n;
-            while ((n = in.read(buf)) > 0) bo.write(buf, 0, n);
-            in.close();
-            return bo.toByteArray();
-        } catch (Exception e) {
-            return "<html><body>控制台页面缺失</body></html>".getBytes();
-        }
-    }
 }

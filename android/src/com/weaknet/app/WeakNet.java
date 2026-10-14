@@ -21,6 +21,10 @@ public class WeakNet {
 
     public volatile Profile profile = new Profile();
     public volatile String presetKey = "direct";
+    // 限速总开关：App 启动后默认关闭 —— 只是待命，不施加任何弱网参数，
+    // 用户必须显式开启（控制台点「开启限速」或选一个场景）才生效
+    public volatile boolean limitOn = false;
+    public volatile Profile lastProfile = null;    // 最后一次生效的场景（再次开启时复原）
     public volatile boolean gateOpen = true;
 
     public final AtomicInteger connTotal = new AtomicInteger();
@@ -77,6 +81,10 @@ public class WeakNet {
         profile = p;
         presetKey = key;
         gateOpen = true;
+        // 应用了「有内容」的场景就等于开启限速，回到全零（直连）就等于是关掉：
+        // 三个入口（App 按钮 / 控制台 / 接口）不必各自维护一份开关状态
+        limitOn = p.hasLimits();
+        if (limitOn) lastProfile = p.copy();   // 记住最后一次生效的场景，供「再次开启」复原
         profileGen++;                       // 唤醒/打断黑洞等长时间挂起
         // 原地更新速率：已在途连接持有的正是这两个桶，切换/停止后立刻生效
         upBucket.setKbps(p.upKbps);
@@ -115,6 +123,21 @@ public class WeakNet {
             flapThread.setDaemon(true);
             flapThread.start();
         }
+    }
+
+    /**
+     * 限速总开关。关闭不是丢掉用户选的场景：presetKey 保留，下次开启直接复原，
+     * 免得每次开关都要重选一遍。
+     *
+     * @param restore 开启时要应用的场景（由调用方按 presetKey 解析好；为 null 则用直连）
+     */
+    public synchronized void setLimitOn(boolean on, Profile restore) {
+        if (on) {
+            setProfile(restore != null ? restore : new Profile(), presetKey);
+        } else {
+            setProfile(new Profile(), presetKey);
+        }
+        limitOn = on;      // 覆盖 setProfile 的推断：自定义全零也算「已开启」
     }
 
     /**

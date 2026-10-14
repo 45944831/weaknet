@@ -11,8 +11,8 @@ WeakNet —— App 弱网测试工具（本地代理式弱网模拟器）
   - DNS 故障（域名解析失败）
   - 立即拒连（模拟完全断网）
   - 周期性断网（模拟基站切换 / Wi-Fi 与 4G 切换）
-  - 内置 Wi-Fi / 4G / 3G / 2G / 拨号 / 高铁 / 电梯等 16 种预设场景
-  - Web 控制台实时配置与监控（默认 http://127.0.0.1:8899）
+  - 内置 Wi-Fi / 4G / 5G / 高铁 / 电梯等 14 种预设场景
+  - 桌面 GUI（weaknet_gui.py）实时配置与监控；控制端口默认 http://127.0.0.1:8899（仅提供 /api）
 
 用法：
   python weaknet.py [--host 127.0.0.1] [--proxy-port 8888] [--ctrl-port 8899]
@@ -34,7 +34,6 @@ import traceback
 import urllib.parse
 import urllib.request
 import uuid
-import webbrowser
 from collections import deque
 from pathlib import Path
 
@@ -126,7 +125,8 @@ def is_weaknet_running(port):
     return False
 
 
-DASH_FILE = resource_path("dashboard.html")
+# 网页控制台（dashboard.html）已下线：控制界面只剩桌面 GUI（weaknet_gui.py）。
+# 本机 HTTP 服务保留用于自动化调用（/api/...），不再提供可视化页面。
 
 
 # --------------------------------------------------------------------------
@@ -359,7 +359,21 @@ def default_profile(name="直连（不限制）"):
     }
 
 
+def has_limits(prof):
+    """这组参数是否真的会「动」流量（与全默认的直连有没有区别）。
+
+    用来推断限速总开关的语义：应用了带内容的场景就等于把限速打开，
+    回到全零就等于是关掉。这样网页 / GUI / 接口三个入口不用各自维护一份状态。
+    """
+    d = default_profile()
+    return any(prof.get(k) != d.get(k) for k in d if k != "name")
+
+
 # key: (名称, 分类, 参数覆盖)
+#
+# 2026-10 清理过时的制式：2G EDGE / 2G GPRS / 56K 拨号 / 3G 已陆续退网
+# （国内外运营商关停 2G/3G、拨号上网早已不存在），留着只会让测试同学误以为
+# 现网还有这些档位。想要「极慢网」直接用自定义参数压带宽即可，不必挂靠已退网的制式。
 PRESETS = {
     "direct": ("直连（不限制）", "常规网络", {}),
     "wifi": ("Wi-Fi 良好", "常规网络",
@@ -368,18 +382,17 @@ PRESETS = {
     "4g": ("4G LTE", "常规网络",
            {"latency_up_ms": 40, "latency_down_ms": 60, "jitter_ms": 15,
             "down_kbps": 20000, "up_kbps": 10000}),
-    "3g": ("3G", "常规网络",
-           {"latency_up_ms": 150, "latency_down_ms": 200, "jitter_ms": 50,
-            "down_kbps": 2000, "up_kbps": 1000}),
-    "edge": ("2G EDGE", "常规网络",
-             {"latency_up_ms": 400, "latency_down_ms": 600, "jitter_ms": 200,
-              "down_kbps": 250, "up_kbps": 100, "loss_pct": 2}),
-    "gprs": ("2G GPRS（极慢）", "常规网络",
-             {"latency_up_ms": 600, "latency_down_ms": 900, "jitter_ms": 300,
-              "down_kbps": 60, "up_kbps": 40, "loss_pct": 5}),
-    "dialup": ("56K 拨号", "常规网络",
-               {"latency_up_ms": 150, "latency_down_ms": 250, "jitter_ms": 40,
-                "down_kbps": 56, "up_kbps": 33}),
+    # 5G：空口延迟比 4G 低一个量级（实测良好覆盖下 RTT 约 10~20ms），
+    # 下行按 100Mbps 给，够触发「秒开」级别的体验，也能跑满多数 App 的预加载
+    "5g": ("5G（良好覆盖）", "常规网络",
+           {"latency_up_ms": 12, "latency_down_ms": 20, "jitter_ms": 8,
+            "down_kbps": 100000, "up_kbps": 40000}),
+    # 5G 弱覆盖：室内深处 / 小区边缘 / 地铁口，常见的是 SA 还能驻留但速率塌到几 Mbps，
+    # 伴随少量丢包与偶发断流（比 Wi-Fi 弱信号更容易「看着有信号实际传不动」）
+    "5g_weak": ("5G 弱覆盖（室内/边缘）", "弱网环境",
+                {"latency_up_ms": 50, "latency_down_ms": 80, "jitter_ms": 35,
+                 "down_kbps": 6000, "up_kbps": 1500, "loss_pct": 2,
+                 "disconnect_pct": 1, "stall_ms": 1000}),
     "wifi_weak": ("弱 Wi-Fi（隔墙/远端）", "弱网环境",
                   {"latency_up_ms": 60, "latency_down_ms": 120, "jitter_ms": 60,
                    "down_kbps": 5000, "up_kbps": 2000, "loss_pct": 3}),
@@ -604,6 +617,10 @@ def delete_user_preset(pid):
 class G:
     profile = default_profile()
     preset_key = "direct"
+    # 限速总开关：启动后默认关闭（False）——应用只是待命，不施加任何弱网参数，
+    # 流量原样转发。用户必须显式开启（点「开启限速」或选一个场景）才生效。
+    limit_on = False
+    last_profile = None                # 最后一次生效过的场景（「再次开启」时复原用）
     gate_open = True
     events = deque(maxlen=300)
     conns_total = 0
@@ -1151,8 +1168,34 @@ async def set_profile(prof, key):
             pass
         G.flap_task = None
     G.gate_open = True
+    # 应用带内容的场景即视为「开启限速」，回到全零（直连）即视为「关闭」
+    G.limit_on = has_limits(prof)
+    if G.limit_on:
+        G.last_profile = dict(prof)     # 记住最后一次生效的场景，供「再次开启」复原
     if prof["flap_sec"] > 0:
         G.flap_task = asyncio.create_task(flap_loop())
+
+
+async def set_limit(on):
+    """限速总开关。
+
+    关闭不是丢掉用户选的场景：preset_key 保留，下次开启直接复原，
+    免得每次开关都要重选一遍。开启时若当前是「直连」，就按 preset_key 重建。
+    """
+    on = bool(on)
+    key = G.preset_key
+    if on:
+        try:
+            prof = build_preset_profile(key)
+        except Exception:
+            # key 是 "custom"（自定义参数）一类没有预设可查的情况：
+            # 用最后一次生效过的场景复原，避免开启时把用户调好的参数冲掉
+            prof = G.last_profile or default_profile()
+        await set_profile(prof, key)
+    else:
+        await set_profile(default_profile(), key)
+    G.limit_on = on                     # 覆盖 set_profile 的推断：自定义全零也算「已开启」
+    return G.limit_on
 
 
 async def restart_proxy(host):
@@ -1563,6 +1606,7 @@ def status_payload():
     return {
         "profile": G.profile,
         "preset_key": G.preset_key,
+        "limit_on": G.limit_on,
         "gate_open": G.gate_open,
         "listen": {"host": G.proxy_host, "port": G.proxy_port},
         "lan_ip": G.lan_ip,
@@ -1628,7 +1672,11 @@ async def handle_ctrl(reader, writer):
         body = await reader.readexactly(cl) if cl else b""
 
         if path in ("/", "/index.html"):
-            send_response(writer, 200, "text/html; charset=utf-8", DASH_FILE.read_bytes())
+            # 网页控制台已下线（只保留 GUI）。留一句说明，免得浏览器打开是空白页、看不出原因
+            send_response(writer, 200, "text/plain; charset=utf-8",
+                          ("WeakNet 控制台已改为纯桌面界面，网页端不再提供。\n"
+                           "请运行 WeakNet.exe 使用图形界面；\n"
+                           "本机 HTTP 控制接口仍可用，见 /api/status。\n").encode("utf-8"))
         elif path == "/api/status":
             send_response(writer, 200, JSON_CT,
                           json.dumps(status_payload(), ensure_ascii=False).encode())
@@ -1698,10 +1746,28 @@ async def handle_ctrl(reader, writer):
             await set_profile(prof, "custom")
             log_event("config", "应用自定义参数")
             send_response(writer, 200, JSON_CT, b'{"ok":true}')
+        elif path == "/api/run":
+            # 限速总开关。GET 视为查询，POST {enable:true/false} 为切换。
+            if method == "POST" and body:
+                try:
+                    enable = bool(json.loads(body).get("enable"))
+                except Exception:
+                    enable = None
+                if enable is None:
+                    send_response(writer, 400, JSON_CT, b'{"error":"bad request"}')
+                else:
+                    await set_limit(enable)
+                    log_event("config", ("开启限速：" + G.profile["name"]) if enable
+                              else "停止限速（恢复直连，场景保留：" + G.preset_key + "）")
+                    send_response(writer, 200, JSON_CT,
+                                  ('{"ok":true,"limit_on":%s}' % ("true" if G.limit_on else "false")).encode())
+            else:
+                send_response(writer, 200, JSON_CT,
+                              ('{"ok":true,"limit_on":%s}' % ("true" if G.limit_on else "false")).encode())
         elif path == "/api/stop":
             # 不限方法：页面若以 GET 发出也要能停（历史上前端漏带 body 导致 GET 404、按钮点了没反应）
-            await set_profile(default_profile(), "direct")
-            log_event("config", "停止模拟，恢复直连")
+            await set_limit(False)
+            log_event("config", "停止限速，恢复直连")
             send_response(writer, 200, JSON_CT, b'{"ok":true}')
         elif method == "POST" and path == "/api/sysproxy":
             try:
@@ -1871,13 +1937,9 @@ async def main():
     if not can_bind(ctrl_port, "127.0.0.1"):
         if is_weaknet_running(ctrl_port):
             url = f"http://127.0.0.1:{ctrl_port}/"
-            log(f"[WeakNet] 已经有一个实例在运行：{url}")
-            log("[WeakNet] 本实例不再重复启动，直接复用它即可。")
+            log(f"[WeakNet] 已经有一个实例在运行（控制接口 {url}）")
+            log("[WeakNet] 本实例不再重复启动，请直接使用已有的那个界面。")
             if FROZEN:
-                try:
-                    webbrowser.open(url)
-                except Exception:
-                    pass
                 try:
                     input("  按回车关闭本窗口...")
                 except Exception:
@@ -1906,17 +1968,12 @@ async def main():
     url = f"http://127.0.0.1:{ctrl_port}/"
     log("=" * 58)
     log("  WeakNet 弱网模拟工具已启动")
-    log(f"  控制台   :  {url}")
+    log(f"  控制接口 :  {url}  (HTTP API，供脚本调用；界面请用 WeakNet.exe)")
     log(f"  代理地址 :  {G.proxy_host}:{G.proxy_port}")
-    log(f"  局域网 IP:  {G.lan_ip}  (手机测试请在控制台开启局域网访问)")
+    log(f"  局域网 IP:  {G.lan_ip}  (手机测试请在界面里点「开启局域网访问」)")
+    log("  限速状态 :  未开启 —— 启动后默认不限制任何流量，请在界面点「▶ 开启限速」")
     log("  关闭本窗口即停止工具（会自动解除系统代理接管）")
     log("=" * 58)
-
-    if FROZEN:      # EXE 模式：直接帮用户打开控制台
-        try:
-            webbrowser.open(url)
-        except Exception:
-            pass
 
     async with G.proxy_server, ctrl:
         await asyncio.Event().wait()

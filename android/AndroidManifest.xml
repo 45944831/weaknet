@@ -42,10 +42,15 @@
             </intent-filter>
         </service>
 
+        <!-- 固定竖版：界面不随手机方向旋转（screenOrientation 声明 + 代码兜底双保险）。
+             另外声明 configChanges，万一系统仍投递旋转配置变化，也不会重建 Activity
+             导致设置/共享浮层被销毁。 -->
         <activity
             android:name=".MainActivity"
             android:exported="true"
-            android:label="WeakNet">
+            android:label="WeakNet"
+            android:screenOrientation="portrait"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />

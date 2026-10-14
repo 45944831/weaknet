@@ -92,6 +92,30 @@ public class VpnNetService extends VpnService {
         }
     }
 
+    /**
+     * 改了「接管范围」后重建通道。VpnService 的「哪些 App 走 tun」只在 establish() 时生效，
+     * 不停掉重建的话，新范围对已经建立的连接无效（表现就是「加了名单却没生效」）。
+     *
+     * 用 ACTION_START 重启：它会清掉 userStopped，避免被上一轮的「不复活」逻辑挡住。
+     */
+    public static void rebuild(Context ctx) {
+        boolean was = active;
+        stop(ctx);
+        if (!was) return;
+        new android.os.Handler(ctx.getMainLooper()).postDelayed(new Runnable() {
+            public void run() {
+                try {
+                    Intent i = new Intent(ctx, VpnNetService.class);
+                    i.setAction(ACTION_START);
+                    if (android.os.Build.VERSION.SDK_INT >= 26) ctx.startForegroundService(i);
+                    else ctx.startService(i);
+                } catch (Exception e) {
+                    WeakNet.I.log("error", "重建 VPN 失败：" + e.getMessage());
+                }
+            }
+        }, 700);      // 等上一个 tun 完全释放再建，避免路由/端口冲突
+    }
+
     public int onStartCommand(Intent intent, int flags, int startId) {
         String act = (intent == null) ? null : intent.getAction();
         if (ACTION_STOP.equals(act)) {

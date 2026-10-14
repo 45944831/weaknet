@@ -5,10 +5,16 @@ android/_cm_check/
 android/_jw/
 android/_tmpcls/
 android/_tmpdex/
+_build*/
 _build_gui/
 _build_cli/
 _build/
 *.spec
+
+# ===== 本地自测脚本与调试截图（开发期临时物，不入库）=====
+_t_*.py
+_t_*.cjs
+_t_*.log
 
 # ===== 自备的 Android SDK（269MB，需自行下载，见 README）=====
 android/sdk/
@@ -20,6 +26,7 @@ android/cmdline.zip
 *.idsig
 
 # ===== 运行时产物 =====
+*.log
 weaknet.log
 # 用户保存的自定义场景（运行时生成，随环境而异，不入仓库）
 weaknet_presets.json
@@ -32,3 +39,6 @@ __pycache__/
 # ===== 系统 / 编辑器 =====
 .DS_Store
 Thumbs.db
+
+# ===== 布局预览截图（临时）=====
+_shot_*.png

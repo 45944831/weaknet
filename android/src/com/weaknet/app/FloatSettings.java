@@ -21,7 +21,7 @@ import java.util.List;
 public class FloatSettings {
     // ---- 可选显示行：id / 名称 / 说明 / 示例 ----
     public static final String[][] FIELDS = {
-            {"scene",  "场景名",     "当前弱网场景；周期断网时追加「· 断网中」", "地铁 3G"},
+            {"scene",  "场景名",     "当前弱网场景；周期断网时追加「· 断网中」", "地铁 5G"},
             {"limit",  "限速值",     "上下行限速，0 = 不限",                     "限速 ↓1.5M ↑512k"},
             {"rate",   "实时速率",   "每 500ms 实测的上下行速度",               "实时 ↓120KB/s ↑8KB/s"},
             {"loss",   "弱网参数",   "延迟 / 抖动 / 丢包",                       "延迟 120±30ms · 丢包 3%"},
@@ -33,7 +33,7 @@ public class FloatSettings {
 
     /** 自定义文本支持的变量：{xxx} 会在刷新时被替换 */
     public static final String[][] VARS = {
-            {"{scene}", "场景名", "地铁 3G"},
+            {"{scene}", "场景名", "地铁 5G"},
             {"{down}", "下行限速", "1.5M"},
             {"{up}", "上行限速", "512k"},
             {"{rate_down}", "下行实时速率", "120KB/s"},

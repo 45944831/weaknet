@@ -63,9 +63,10 @@ ZIPALIGN="$(pick_exe "$BT" zipalign)"
 [ -n "$AAPT2" ]    || { echo "错误：build-tools 里找不到 aapt2：$BT"; exit 1; }
 [ -n "$ZIPALIGN" ] || { echo "错误：build-tools 里找不到 zipalign：$BT"; exit 1; }
 
-echo "==> 0. 准备 assets"
-mkdir -p build/classes build/dex assets
-cp -f "../dashboard.html" assets/dashboard.html
+echo "==> 0. 准备工作目录"
+# 网页控制台已下线，不再需要 assets/dashboard.html；界面改为 App 原生 MainActivity
+rm -rf assets
+mkdir -p build/classes build/dex
 
 echo "==> 1. javac"
 rm -rf build/classes && mkdir -p build/classes
@@ -85,7 +86,7 @@ rm -f build/res.zip
 
 echo "==> 3b. aapt2 link"
 rm -f build/base.apk
-"$AAPT2" link -I "$ANDROID_JAR" --manifest AndroidManifest.xml -A assets \
+"$AAPT2" link -I "$ANDROID_JAR" --manifest AndroidManifest.xml \
   -R build/res.zip \
   --min-sdk-version 24 --target-sdk-version 29 --version-code 1 --version-name 1.0 \
   -o build/base.apk 2>&1 | tail -10

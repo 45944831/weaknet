@@ -21,16 +21,38 @@ public class Profile {
     public int flapSec = 0;
     public int flapBlackoutSec = 2;
 
+    // 2026-10 起去掉 3g / edge / gprs / dialup：这几种制式与拨号上网已退网，
+    // 不再是有意义的测试档位；需要极慢网时直接用自定义参数压带宽。
     public static final String[] KEYS = {
-            "direct", "wifi", "4g", "3g", "edge", "gprs", "dialup",
-            "wifi_weak", "congestion", "satellite",
+            "direct", "wifi", "4g", "5g",
+            "5g_weak", "wifi_weak", "congestion", "satellite",
             "highspeed_rail", "elevator", "flapping", "blackhole", "dns_fail", "airplane"
     };
 
+    /** 按钮上的短名（手机屏窄，全名会把按钮撑出卡片；与桌面版 SHORT 保持一致） */
+    public static String shortOf(String key) {
+        if ("direct".equals(key)) return "直连";
+        if ("wifi".equals(key)) return "Wi-Fi 良好";
+        if ("4g".equals(key)) return "4G LTE";
+        if ("5g".equals(key)) return "5G 良好";
+        if ("5g_weak".equals(key)) return "5G 弱覆盖";
+        if ("wifi_weak".equals(key)) return "弱 Wi-Fi";
+        if ("congestion".equals(key)) return "网络拥塞";
+        if ("satellite".equals(key)) return "卫星链路";
+        if ("highspeed_rail".equals(key)) return "高铁/地铁";
+        if ("elevator".equals(key)) return "电梯/地下室";
+        if ("flapping".equals(key)) return "频繁断连";
+        if ("blackhole".equals(key)) return "黑洞无响应";
+        if ("dns_fail".equals(key)) return "DNS 故障";
+        if ("airplane".equals(key)) return "完全断网";
+        return "";
+    }
+
     public static String catOf(String key) {
-        if ("direct".equals(key) || "wifi".equals(key) || "4g".equals(key) || "3g".equals(key)
-                || "edge".equals(key) || "gprs".equals(key) || "dialup".equals(key)) return "常规网络";
-        if ("wifi_weak".equals(key) || "congestion".equals(key) || "satellite".equals(key)) return "弱网环境";
+        if ("direct".equals(key) || "wifi".equals(key) || "4g".equals(key)
+                || "5g".equals(key)) return "常规网络";
+        if ("5g_weak".equals(key) || "wifi_weak".equals(key) || "congestion".equals(key)
+                || "satellite".equals(key)) return "弱网环境";
         return "极端环境";
     }
 
@@ -44,22 +66,15 @@ public class Profile {
             p.name = "4G LTE";
             p.latencyUpMs = 40; p.latencyDownMs = 60; p.jitterMs = 15;
             p.downKbps = 20000; p.upKbps = 10000;
-        } else if ("3g".equals(key)) {
-            p.name = "3G";
-            p.latencyUpMs = 150; p.latencyDownMs = 200; p.jitterMs = 50;
-            p.downKbps = 2000; p.upKbps = 1000;
-        } else if ("edge".equals(key)) {
-            p.name = "2G EDGE";
-            p.latencyUpMs = 400; p.latencyDownMs = 600; p.jitterMs = 200;
-            p.downKbps = 250; p.upKbps = 100; p.lossPct = 2;
-        } else if ("gprs".equals(key)) {
-            p.name = "2G GPRS（极慢）";
-            p.latencyUpMs = 600; p.latencyDownMs = 900; p.jitterMs = 300;
-            p.downKbps = 60; p.upKbps = 40; p.lossPct = 5;
-        } else if ("dialup".equals(key)) {
-            p.name = "56K 拨号";
-            p.latencyUpMs = 150; p.latencyDownMs = 250; p.jitterMs = 40;
-            p.downKbps = 56; p.upKbps = 33;
+        } else if ("5g".equals(key)) {
+            p.name = "5G（良好覆盖）";
+            p.latencyUpMs = 12; p.latencyDownMs = 20; p.jitterMs = 8;
+            p.downKbps = 100000; p.upKbps = 40000;
+        } else if ("5g_weak".equals(key)) {
+            p.name = "5G 弱覆盖（室内/边缘）";
+            p.latencyUpMs = 50; p.latencyDownMs = 80; p.jitterMs = 35;
+            p.downKbps = 6000; p.upKbps = 1500; p.lossPct = 2;
+            p.disconnectPct = 1; p.stallMs = 1000;
         } else if ("wifi_weak".equals(key)) {
             p.name = "弱 Wi-Fi（隔墙/远端）";
             p.latencyUpMs = 60; p.latencyDownMs = 120; p.jitterMs = 60;
@@ -163,6 +178,19 @@ public class Profile {
             // ignore
         }
         return o;
+    }
+
+    /**
+     * 与全默认（直连）相比，这组参数是否真的会「动」流量。
+     * stallMs 默认 600ms，本身不构成限制，不参与比较。
+     */
+    public boolean hasLimits() {
+        Profile d = new Profile();
+        return latencyUpMs != d.latencyUpMs || latencyDownMs != d.latencyDownMs
+                || jitterMs != d.jitterMs || downKbps != d.downKbps || upKbps != d.upKbps
+                || lossPct != d.lossPct || disconnectPct != d.disconnectPct
+                || timeoutPct != d.timeoutPct || dnsFailPct != d.dnsFailPct
+                || rejectPct != d.rejectPct || flapSec != d.flapSec;
     }
 
     public String summary() {
