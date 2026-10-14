@@ -350,7 +350,9 @@ public class VpnNetService extends VpnService {
                                 key, seq, mss);
                         tcpSessions.put(key, ns);
                         WeakNet.I.connTotal.incrementAndGet();
-                        exec.execute(new Runnable() {
+                        // 必须走会话自己的串行队列：保证 start() 先于后续数据包执行，
+                        // 否则首批数据包会在上游连好之前到达，被当成「上游未就绪」全部丢弃。
+                        ns.submit(new Runnable() {
                             public void run() {
                                 ns.start();
                                 if (ns.isClosed()) tcpSessions.remove(key);
@@ -371,7 +373,9 @@ public class VpnNetService extends VpnService {
                 final long fseq = seq;
                 final long lack = ack;
                 final int fw = window;
-                exec.execute(new Runnable() {
+                // 走会话自己的串行队列，保证上行数据包严格按到达顺序进入 TCP 状态机
+                // （放全局并发线程池会乱序，导致绝大多数包被误判成重传而丢弃）
+                fs.submit(new Runnable() {
                     public void run() {
                         fs.onClientPacket(ff, fseq, lack, fp, fpl, fw);
                         if (fs.isClosed()) tcpSessions.remove(key);

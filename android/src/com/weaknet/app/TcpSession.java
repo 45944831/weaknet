@@ -4,6 +4,9 @@ import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.InetSocketAddress;
 import java.net.Socket;
+import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
 
 /**
  * 一条 TCP 会话：tun 侧伪造 TCP 状态机 + 真实 Socket 转发，并注入弱网参数。
@@ -29,6 +32,20 @@ public class TcpSession {
     private OutputStream sout;
     private InputStream sin;
 
+    /**
+     * 本会话专属的**单线程串行**执行器。
+     *
+     * 为什么不能用全局线程池：TCP 上行是严格有序的状态机 —— onClientPacket 里只要
+     * seq 不等于期望值就判定为「乱序/重传」，只回一个重复 ACK 而不把数据交给上游。
+     * 并发线程会让同一条连接的数据包乱序抵达，绝大多数包因此被误判丢弃，客户端
+     * 收到一堆重复 ACK 触发快速重传，又再次乱序……实测上行会从 60MB/s 塌到 3~5KB/s。
+     * 下行之所以一直正常，是因为它本来就是每条连接一个单线程顺序写。
+     *
+     * 空闲 30 秒回收线程：弱网测试可能同时挂着上百条连接，常驻线程会白白吃掉内存，
+     * 而队列里的任务依然保留，下次有包进来会自动再拉起一个线程。
+     */
+    private final ThreadPoolExecutor serial;
+
     TcpSession(VpnNetService vpn, String clientIp, int clientPort,
                String remoteIp, int remotePort, String key, long clientIsn, int mss) {
         this.vpn = vpn;
@@ -39,6 +56,19 @@ public class TcpSession {
         this.key = key;
         this.clientSeq = (clientIsn + 1) & 0xFFFFFFFFL;
         this.clientMss = Math.max(536, Math.min(mss, 1400));
+        ThreadPoolExecutor e = new ThreadPoolExecutor(
+                1, 1, 30L, TimeUnit.SECONDS, new LinkedBlockingQueue<Runnable>());
+        e.allowCoreThreadTimeOut(true);
+        this.serial = e;
+    }
+
+    /** 提交一个需要按序执行的任务（建连、上行数据包、关闭）。已关闭时静默丢弃。 */
+    void submit(Runnable r) {
+        try {
+            serial.execute(r);
+        } catch (Exception e) {
+            // 会话已关闭或线程池已停：丢掉即可，连接本来就要断了
+        }
     }
 
     boolean isClosed() {
@@ -219,6 +249,12 @@ public class TcpSession {
         if (closed) return;
         closed = true;
         closeSocket();
+        // 停掉串行队列：丢弃排队的上行包，并唤醒正在等令牌/延迟的线程
+        try {
+            serial.shutdownNow();
+        } catch (Exception e) {
+            // ignore
+        }
     }
 
     private void closeSocket() {

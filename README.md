@@ -9,14 +9,14 @@
 
 ---
 
-## 下载（Release v1.1.0）
+## 下载（Release v1.1.1）
 
 > Windows 端 `WeakNet.exe` 以 GUI 子系统打包，双击直接出界面，**不会弹出 DOS 黑框**；Android 端安装 `WeakNet.apk` 即可。
 
 | 文件 | 平台 | 大小 | SHA-256 |
 | --- | --- | --- | --- |
 | [`WeakNet.exe`](https://github.com/45944831/weaknet/releases/latest/download/WeakNet.exe) | Windows（GUI 版，免装 Python） | 10.1 MB | `6e5ffffd…8e568f9` |
-| [`WeakNet.apk`](https://github.com/45944831/weaknet/releases/latest/download/WeakNet.apk) | Android 7.0+ | 95 KB | `063a684e…dd25bf` |
+| [`WeakNet.apk`](https://github.com/45944831/weaknet/releases/latest/download/WeakNet.apk) | Android 7.0+ | 93 KB | `e5d92e15…892797` |
 
 发布页：https://github.com/45944831/weaknet/releases/latest
 
@@ -24,7 +24,7 @@
 
 ```
 6e5ffffdbef5505c7d0450b315228e6fbc2a8c199caa382c194d3b9ea8e568f9  WeakNet.exe
-063a684e44f29a678edf2d0c21fa1f7da92e7962f560738cb3dc68bb6cdd25bf  WeakNet.apk
+e5d92e151a79d83808b31c22a0d6fba164dceb0cb023c8e6db20acd6f1892797  WeakNet.apk
 ```
 
 > 若 GitHub 下载慢或打不开，可在链接前加 `https://ghproxy.net/` 走镜像加速，例如
@@ -308,6 +308,8 @@ weaknet/
 | USB 手机弱网（adb 层） | 真机 OPPO PEYM00 / Android 13：`adb devices` 识别、`reverse` 映射建立与撤销、`settings get` 回读全部正确；手机 → 电脑的 TCP 连接经 reverse 隧道打通（PC 侧收到握手） |
 | USB 手机弱网（权限受限路径） | 同一台真机上 `settings put global` 被 ROM 拒绝时：如实报错、给出 4 条替代途径，并自动回滚已建的 reverse 映射，手机上无残留 |
 | EXE 冒烟（v1.1.0） | 7/7：GUI 子系统无 DOS 窗口、无 conhost、主窗口标题、`/api/status` 响应、`/api/run` 开关正常 |
+| **Android 上行吞吐（v1.1.1 修复）** | VPN 接管后上行 **0.03 Mbps → 206 Mbps**（物理基准 515 Mbps、下行同期 180 Mbps）。修复前只有 3~5 KB/s 且与限速档位无关 |
+| **APK 场景矩阵回归（v1.1.1）** | 11 个场景全通过：延迟注入实测 RTT 仍压在「基线 37ms + 单向延迟×2」上（卫星 700 → 1452ms、高延迟 400 → 837ms）；4G LTE 下行设定 20000 kbps 实测 20534（-2.7% 误差，修复前为 19160） |
 
 ---
 
