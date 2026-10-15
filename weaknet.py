@@ -658,6 +658,11 @@ class G:
     scope_list = []             # exe 名（小写）列表
     scope_seen = {}             # 观测到的进程名 -> 次数（便于用户选择要接管谁）
     bytes_bypass = 0            # 未接管程序的直通流量（不计入弱网统计）
+    # 全局令牌桶：上下行各一份，所有连接共享。
+    # ——必须是全局的。早先每条连接各建一个桶，结果开 8 条并发下载能跑出设定带宽的
+    # 2.6 倍：带宽是链路级的资源，8 条连接只是分同一条链路，不该各自拿一份配额。
+    bucket_up = None
+    bucket_down = None
     user_presets = None         # 自定义栏（用户保存的场景），None = 尚未从磁盘加载
     # ---- 环境共享 ----
     self_id = ""                # 本机标识（区分广播是不是自己发的）
@@ -826,8 +831,15 @@ def detect_lan_ip():
 # --------------------------------------------------------------------------
 
 class Bucket:
-    """令牌桶。速率随当前场景实时变化（切场景/停止后已在途的连接也会立即跟上）"""
+    """令牌桶。速率随当前场景实时变化（切场景/停止后已在途的连接也会立即跟上）
+
+    桶容量（允许的最大突发）取 BURST_SEC 秒的配额。不能给到 1 秒：桶是全局共享的，
+    空闲一段时间后会攒满，一个 4MB 的下载能一口气吃掉整秒配额冲出去，
+    测出来的速率就变成设定值的两倍多 —— 看着像限速失效。真实链路也不会这样，
+    TCP 自己的初始突发也就几十 KB。
+    """
     __slots__ = ("rate", "tokens", "last", "lock", "kbps")
+    BURST_SEC = 0.25
 
     def __init__(self, kbps=0):
         self.rate = 0.0
@@ -843,7 +855,10 @@ class Bucket:
             return
         self.kbps = kbps
         self.rate = kbps * 128.0 if kbps else 0.0   # kbps * 1024 / 8 = B/s
-        self.tokens = min(self.tokens, self.rate) if self.rate else 0.0
+        self.tokens = min(self.tokens, self.cap()) if self.rate else 0.0
+
+    def cap(self):
+        return self.rate * self.BURST_SEC if self.rate else 0.0
 
     async def consume(self, n):
         """按字节消耗令牌。注意：单次数据量可能远大于 1 秒的配额（例如 2G 下读取
@@ -858,8 +873,8 @@ class Bucket:
                     self.tokens = 0.0
                     return
                 now = time.monotonic()
-                # 令牌上限 = 1 秒突发
-                self.tokens = min(self.tokens + (now - self.last) * self.rate, self.rate)
+                # 令牌上限 = 桶容量（短暂突发可以，攒到整秒不行）
+                self.tokens = min(self.tokens + (now - self.last) * self.rate, self.cap())
                 self.last = now
                 take = min(remain, self.tokens)
                 if take > 0:
@@ -921,56 +936,153 @@ def _latency_delay(prof, direction):
     return max(0.0, (base + random.uniform(-jit, jit)) / 1000.0)
 
 
+class DelayLine:
+    """延迟投递队列：把「延迟」和「带宽」解耦。
+
+    最省事的写法是在转发每块数据前 sleep 一下，但那样同一时刻只有一块数据在途，
+    吞吐会退化成「1 块 / RTT」——64KB 的块配 700ms 延迟只剩 0.7Mbps，而真实弱网
+    是靠拥塞窗口让多个包同时在途的。所以这里改成：数据块按到期时间入队，由独立的
+    投递协程按期写出，读端立刻回去读下一块。
+
+    队列有上限，积压满了就卡住读端，压力沿 TCP 窗口传回发送方，不会把内存撑爆。
+    投递等待用的是可打断的 nap()：点了停止 / 切场景，积压的数据立刻放行。
+    """
+
+    MAX_BLOCKS = 64             # 在途块数上限（64KB × 64 ≈ 4MB），兼作背压阈值
+
+    __slots__ = ("writer", "q", "task", "pending", "label")
+
+    def __init__(self, writer, label=""):
+        self.writer = writer
+        self.q = asyncio.Queue(maxsize=self.MAX_BLOCKS)
+        self.task = None
+        self.pending = 0
+        self.label = label
+
+    def start(self):
+        self.task = asyncio.create_task(self._run())
+        return self
+
+    def _idle(self):
+        """没有「排在自己前面、但还没真正写出」的数据 —— 此时才配走零延迟快路径"""
+        return self.pending == 0 and self.q.empty()
+
+    def abort(self):
+        """连接已被掐断，积压数据不必再投递"""
+        if self.task is not None and not self.task.done():
+            self.task.cancel()
+
+    async def submit(self, data, delay, gen):
+        if delay <= 0 and self._idle():
+            # 零延迟且无在途数据：直接写。直连档靠这条快路径保持满速，不被队列调度拖慢
+            self.writer.write(data)
+            await self.writer.drain()
+            return
+        self.pending += len(data)
+        await self.q.put((data, time.monotonic() + delay, gen))
+
+    async def _run(self):
+        try:
+            while True:
+                item = await self.q.get()
+                if item is None:                 # 结束哨兵
+                    return
+                data, due, gen = item
+                wait = due - time.monotonic()
+                if wait > 0:
+                    await nap(wait, gen)         # 切场景 / 停止时立刻放行
+                try:
+                    self.writer.write(data)
+                    await self.writer.drain()
+                except (ConnectionError, OSError):
+                    return
+                finally:
+                    self.pending -= len(data)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            return
+
+    async def aclose(self):
+        """排空队列后再返回。
+
+        少了这一步，连接结束时最后几块数据会被丢掉 —— 短连接（HTTP、curl）尤其明显：
+        响应尾部还在队列里，读端已经 EOF 返回，对端一个字节都收不到。
+        """
+        t = self.task
+        if t is None:
+            return
+        self.task = None
+        try:
+            await self.q.put(None)
+            await asyncio.wait_for(t, timeout=30)
+        except (asyncio.TimeoutError, TimeoutError):
+            t.cancel()
+        except BaseException:
+            t.cancel()
+            raise
+
+
 # --------------------------------------------------------------------------
 # 双向管道：延迟 + 抖动 + 限速 + 丢包卡顿 + 随机断连
 # --------------------------------------------------------------------------
 
-async def pipe(reader, writer, bucket, prof, direction, ctx):
+async def pipe(reader, writer, prof, direction, ctx):
     """注意：每块数据都重新读取 G.profile，保证「停止模拟 / 切换场景」对已在途的连接立即生效"""
     gen = G.gen
-    d = _latency_delay(prof, direction)
-    if d:
-        await nap(d, gen)
-    while True:
-        try:
-            data = await reader.read(65536)
-        except (ConnectionError, OSError):
-            return
-        if not data:
-            return
-        n = len(data)
-        if ctx.fixed:                          # 直通流量不计入弱网统计
-            G.bytes_bypass += n
-        elif direction == "up":
-            G.bytes_up += n
-        else:
-            G.bytes_down += n
-        # 直通连接用固定 profile，其余实时跟随 G.profile（切场景后立即生效）。
-        # 必须用 ctx 而非全局：pipe 是并发的，多条连接同时跑，全局会互相串味。
-        prof = ctx.prof if ctx.fixed else G.profile
-        rate_key = "up_kbps" if direction == "up" else "down_kbps"
-        bucket.sync(prof.get(rate_key, 0))     # 停止/放宽限速后立即恢复全速
-        # 丢包 -> 表现为一段时间的传输停顿（TCP 重传效果）
-        if prof["loss_pct"] and random.random() * 100 < prof["loss_pct"]:
-            await nap(prof["stall_ms"] / 1000.0 * (0.5 + random.random()), gen)
-            prof = G.profile
-        # 随机断连 -> 立即掐断整条连接（两侧 RST/FIN）
-        if prof["disconnect_pct"] and random.random() * 100 < prof["disconnect_pct"]:
-            log_event("disconnect", "模拟断连：" + ctx.label)
-            ctx.abort_all()
-            raise Abort()
-        await bucket.consume(n)
-        try:
-            writer.write(data)
-            await writer.drain()
-        except (ConnectionError, OSError):
-            return
+    dl = DelayLine(writer, ctx.label).start()
+    try:
+        while True:
+            try:
+                data = await reader.read(65536)
+            except (ConnectionError, OSError):
+                return
+            if not data:
+                return
+            n = len(data)
+            if ctx.fixed:                          # 直通流量不计入弱网统计
+                G.bytes_bypass += n
+            elif direction == "up":
+                G.bytes_up += n
+            else:
+                G.bytes_down += n
+            # 直通连接用固定 profile，其余实时跟随 G.profile（切场景后立即生效）。
+            # 必须用 ctx 而非全局：pipe 是并发的，多条连接同时跑，全局会互相串味。
+            prof = ctx.prof if ctx.fixed else G.profile
+            if not ctx.fixed:
+                # 全局共享令牌桶：一条链路一份带宽，并发连接分摊而不是各拿一份。
+                # 直通连接不参与（否则它会把全局桶的速率刷成 0，等于给所有人解限速）。
+                rate_key = "up_kbps" if direction == "up" else "down_kbps"
+                bucket = G.bucket_up if direction == "up" else G.bucket_down
+                if bucket is None:                 # 服务未初始化时的兜底
+                    bucket = Bucket(prof.get(rate_key, 0))
+                else:
+                    bucket.sync(prof.get(rate_key, 0))   # 停止/放宽限速后立即恢复全速
+                await bucket.consume(n)
+            # 丢包 -> 表现为一段时间的传输停顿（TCP 重传效果）
+            if prof["loss_pct"] and random.random() * 100 < prof["loss_pct"]:
+                await nap(prof["stall_ms"] / 1000.0 * (0.5 + random.random()), gen)
+                prof = G.profile
+            # 随机断连 -> 立即掐断整条连接（两侧 RST/FIN）
+            if prof["disconnect_pct"] and random.random() * 100 < prof["disconnect_pct"]:
+                log_event("disconnect", "模拟断连：" + ctx.label)
+                ctx.abort_all()
+                raise Abort()
+            # 延迟：每块数据都注入，而不是只在建连时注入一次。
+            # 只在建连时等一次的话，HTTP keep-alive / 视频流 / WebSocket 这类
+            # 长连接里除了第一个请求，后面的数据全是零延迟，延迟参数等于没设。
+            await dl.submit(data, _latency_delay(prof, direction), gen)
+    except Abort:
+        dl.abort()
+        raise
+    finally:
+        # 离开前必须排空延迟队列，否则响应尾部的最后几块数据会被丢掉
+        await dl.aclose()
 
 
 async def run_tunnel(ctx, c_reader, s_writer, s_reader, c_writer, prof):
-    up = asyncio.create_task(pipe(c_reader, s_writer, Bucket(prof["up_kbps"]), prof, "up", ctx))
-    down = asyncio.create_task(pipe(s_reader, c_writer, Bucket(prof["down_kbps"]), prof, "down", ctx))
-    # 注：Bucket 的速率会在 pipe 内随当前场景实时同步（见 pipe/bucket.sync）
+    up = asyncio.create_task(pipe(c_reader, s_writer, prof, "up", ctx))
+    down = asyncio.create_task(pipe(s_reader, c_writer, prof, "down", ctx))
     done, pending = await asyncio.wait({up, down}, return_when=asyncio.FIRST_COMPLETED)
     for t in pending:
         t.cancel()
@@ -1939,6 +2051,9 @@ async def handle_ctrl(reader, writer):
 async def serve(host, proxy_port, ctrl_port):
     """启动代理 + 控制台服务（CLI 与 GUI 共用），返回 (proxy_server, ctrl_server)"""
     G.wake = asyncio.Event()          # 供 nap() 打断挂起连接使用
+    # 全局令牌桶必须在事件循环里创建（内部有 asyncio.Lock），且要先于任何连接建立
+    G.bucket_up = Bucket(0)
+    G.bucket_down = Bucket(0)
     init_identity()                   # 「我是谁」——局域网共享要用
     proxy = await asyncio.start_server(handle_proxy, host, proxy_port, limit=1 << 20)
     ctrl = await asyncio.start_server(handle_ctrl, "127.0.0.1", ctrl_port)
