@@ -42,3 +42,7 @@ Thumbs.db
 
 # ===== 布局预览截图（临时）=====
 _shot_*.png
+
+# ===== PyInstaller 产物（EXE 本身入库，构建中间产物不入库）=====
+build/
+dist/
