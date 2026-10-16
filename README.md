@@ -9,22 +9,22 @@
 
 ---
 
-## 下载（Release v1.1.3）
+## 下载（Release v1.1.4）
 
 > Windows 端 `WeakNet.exe` 以 GUI 子系统打包，双击直接出界面，**不会弹出 DOS 黑框**；Android 端安装 `WeakNet.apk` 即可。
 
 | 文件 | 平台 | 大小 | SHA-256 |
 | --- | --- | --- | --- |
-| [`WeakNet.exe`](https://github.com/45944831/weaknet/releases/latest/download/WeakNet.exe) | Windows（GUI 版，免装 Python） | 10.1 MB | `2a5197df…22e11a` |
-| [`WeakNet.apk`](https://github.com/45944831/weaknet/releases/latest/download/WeakNet.apk) | Android 7.0+ | 97 KB | `5166547e…de3229` |
+| [`WeakNet.exe`](https://github.com/45944831/weaknet/releases/latest/download/WeakNet.exe) | Windows（GUI 版，免装 Python） | 10.1 MB | `586eeb7a…f00e` |
+| [`WeakNet.apk`](https://github.com/45944831/weaknet/releases/latest/download/WeakNet.apk) | Android 7.0+ | 97 KB | `c1c8cd40…6287` |
 
 发布页：https://github.com/45944831/weaknet/releases/latest
 
 完整校验值：
 
 ```
-2a5197df4541b08d93c13e1d043a623b18a2e1dc59cbe2f911eb36ec7522e11a  WeakNet.exe
-5166547e3dd121d2f2ffac641988368b45ff3c70765ae918e655631f24de3229  WeakNet.apk
+586eeb7a58e2c95a5a8a7dd2a8903a5bcfb6f8dc09aca273b35d5edad188f00e  WeakNet.exe
+c1c8cd40794d0f5f5477c850987521f486abc010731656bb23a7370d447b6287  WeakNet.apk
 ```
 
 > 若 GitHub 下载慢或打不开，可在链接前加 `https://ghproxy.net/` 走镜像加速，例如

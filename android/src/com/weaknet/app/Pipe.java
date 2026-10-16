@@ -5,17 +5,28 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.Socket;
+import java.util.Arrays;
 
 /** 管道：延迟 + 抖动 + 令牌桶限速 + 丢包卡顿 + 随机断连 */
 public class Pipe {
     public static void run(InputStream in, OutputStream out, Bucket bucket, boolean up, ConnCtx ctx) {
-        try {
-            Profile p = WeakNet.I.profile;
-            int base = up ? p.latencyUpMs : p.latencyDownMs;
-            int jit = p.jitterMs;
-            long d = base + (jit > 0 ? (long) ((Math.random() * 2 - 1) * jit) : 0);
-            if (d > 0) Thread.sleep(d);
+        run(in, out, bucket, up, ctx, null);
+    }
 
+    /**
+     * eofAction：本方向读到 EOF（对端半关闭）后的收尾动作。
+     * 原来固定 out.close()——Java 里关 socket 输出流等于关掉整个 socket，
+     * 客户端「发完请求就 shutdown 写端」的常见行为（curl/nc/POST）
+     * 会被传导成连接全关，下行响应一个字节都出不去。
+     * 正确做法是 shutdownOutput 只关本方向，对向继续跑到 EOF。
+     */
+    public static void run(InputStream in, OutputStream out, Bucket bucket, boolean up, ConnCtx ctx, Runnable eofAction) {
+        // 延迟投递队列：延迟和带宽解耦，不能每块 sleep——那样同一时刻只有一块在途，
+        // 吞吐退化成「1 块/RTT」。与 tun 路径的 TcpSession 用同一个 DelayLine。
+        // 原来这里只在函数开头 Thread.sleep 一次：CONNECT 隧道里第一个请求之后
+        // 完全零延迟（HTTPS / WebSocket 这类长连接延迟参数等于没设）。
+        DelayLine dl = new DelayLine("pipe-" + (up ? "up" : "down"), 1 << 20);
+        try {
             byte[] buf = new byte[65536];
             while (true) {
                 int n = in.read(buf);
@@ -35,18 +46,69 @@ public class Pipe {
                     break;
                 }
                 bucket.consume(n);
-                out.write(buf, 0, n);
-                out.flush();
+                // 每块都按当前场景算延迟（切场景对已在途的连接立即生效）。
+                // 必须拷贝：buf 下一轮 read 就覆写，而 job 是异步跑的。
+                final byte[] blk = Arrays.copyOf(buf, n);
+                final OutputStream w = out;
+                dl.post(DelayLine.delayMs(up), new Runnable() {
+                    public void run() {
+                        try {
+                            w.write(blk, 0, blk.length);
+                            w.flush();
+                        } catch (Exception e) {
+                            // 连接已断：忽略
+                        }
+                    }
+                }, n);
             }
         } catch (Exception e) {
             // 连接关闭 / 中断
         } finally {
+            if (ctx.isAborted()) {
+                dl.close();                     // 已掐断：积压数据不必投递
+            } else {
+                drain(dl);                      // 排空：否则连接尾部的数据被丢
+            }
             try {
-                out.close();
+                if (eofAction != null) eofAction.run();
+                else out.close();
             } catch (Exception e) {
                 // ignore
             }
         }
+    }
+
+    /** 等延迟队列排空（慢档位 256kbps 下 1MB 积压需要 32s，120s 留足余量） */
+    static void drain(DelayLine dl) {
+        long deadline = System.currentTimeMillis() + 120000;
+        while (dl.pendingBytes() > 0 && System.currentTimeMillis() < deadline) {
+            try {
+                Thread.sleep(20);
+            } catch (InterruptedException e) {
+                break;
+            }
+        }
+        dl.close();
+    }
+
+    /**
+     * 单块数据的延迟写出。用于代理路径的请求头：普通 HTTP 的请求是逐行 read 的，
+     * 读到的瞬间就离开管道、不经过 DelayLine——不在这里补一下，上行延迟对
+     * 正文为空的 GET 完全不生效（实测 RTT 只有设定值的一半）。
+     */
+    public static void writeDelayed(OutputStream out, byte[] data, boolean up) {
+        DelayLine dl = new DelayLine("pipe-hdr", 0);
+        dl.post(DelayLine.delayMs(up), new Runnable() {
+            public void run() {
+                try {
+                    out.write(data);
+                    out.flush();
+                } catch (Exception e) {
+                    // 连接已断：忽略
+                }
+            }
+        }, data.length);
+        drain(dl);
     }
 
     /** 令牌桶限速器（字节/秒） */
@@ -107,6 +169,7 @@ class ConnCtx {
     public final Socket client;
     public Socket upstream;
     public String label = "?";
+    private volatile boolean aborted = false;   // 模拟断连标记：积压数据不必投递
 
     ConnCtx(Socket client) {
         this.client = client;
@@ -118,7 +181,12 @@ class ConnCtx {
     }
 
     public void closeAll() {
+        aborted = true;
         cleanup();
+    }
+
+    public boolean isAborted() {
+        return aborted;
     }
 
     public void cleanup() {

@@ -1003,19 +1003,26 @@ class DelayLine:
         except Exception:
             return
 
-    async def aclose(self):
+    async def aclose(self, timeout=None):
         """排空队列后再返回。
 
         少了这一步，连接结束时最后几块数据会被丢掉 —— 短连接（HTTP、curl）尤其明显：
         响应尾部还在队列里，读端已经 EOF 返回，对端一个字节都收不到。
+
+        timeout=None 时按积压量估算：慢档位（如电梯 256kbps）下 4MB 积压需要
+        125s 才能交付完，用固定 30s 会把响应尾部整段丢掉（下载总是差最后一段）。
         """
         t = self.task
         if t is None:
             return
         self.task = None
+        if timeout is None:
+            # 64KB 一块、每块至少留 30s 余量；速率信息由 pipe 通过 rate_kbps 传入更准，
+            # 这里用保守的块数估算兜底（调用方一般会显式传 timeout）
+            timeout = max(30.0, self.pending / 32768.0 + 30.0)
         try:
             await self.q.put(None)
-            await asyncio.wait_for(t, timeout=30)
+            await asyncio.wait_for(t, timeout=timeout)
         except (asyncio.TimeoutError, TimeoutError):
             t.cancel()
         except BaseException:
@@ -1076,23 +1083,59 @@ async def pipe(reader, writer, prof, direction, ctx):
         dl.abort()
         raise
     finally:
-        # 离开前必须排空延迟队列，否则响应尾部的最后几块数据会被丢掉
-        await dl.aclose()
+        # 离开前必须排空延迟队列，否则响应尾部的最后几块数据会被丢。
+        # 超时必须按「积压字节 / 当前速率」算：固定 30s 在慢档位（256kbps 下
+        # 4MB 积压需 125s）会把尾部整段丢掉。直连/未限速时给 30s 兜底即可。
+        rate_kbps = prof.get(rate_key, 0) if not ctx.fixed else 0
+        if rate_kbps and dl.pending:
+            need = dl.pending * 8.0 / (rate_kbps * 1000.0) + 30.0
+        else:
+            need = 30.0
+        await dl.aclose(timeout=max(30.0, min(need, 600.0)))
 
 
 async def run_tunnel(ctx, c_reader, s_writer, s_reader, c_writer, prof):
+    """双向转发。
+
+    一端收到 FIN 只代表「这个方向的数据发完了」：把 FIN 转给对端，另一个方向
+    必须继续跑到 EOF。早期实现是 FIRST_COMPLETED 后直接 cancel 另一端，客户端
+    一发完请求就半关闭（curl / nc / 带 body 的 POST 都会这样）时响应会被整条
+    砍掉——实测 0 字节、2ms 内 EOF，普通 HTTP 转发完全不可用。
+    """
     up = asyncio.create_task(pipe(c_reader, s_writer, prof, "up", ctx))
     down = asyncio.create_task(pipe(s_reader, c_writer, prof, "down", ctx))
-    done, pending = await asyncio.wait({up, down}, return_when=asyncio.FIRST_COMPLETED)
-    for t in pending:
-        t.cancel()
-    if pending:
-        await asyncio.gather(*pending, return_exceptions=True)
-    for t in done:
-        try:
-            t.exception()
-        except Exception:
-            pass
+    # task -> 该方向结束时应当半关闭的对端 writer
+    peer_of = {up: s_writer, down: c_writer}
+    pending = {up, down}
+    try:
+        while pending:
+            done, pending = await asyncio.wait(
+                pending, return_when=asyncio.FIRST_COMPLETED)
+            hard_stop = False
+            for t in done:
+                try:
+                    t.exception()
+                except Exception:
+                    hard_stop = True        # Abort / 连接错误：拆掉整条连接
+                else:
+                    # 正常 EOF：FIN 转给对端。此时 pipe 的 finally 已排空延迟队列，
+                    # FIN 不会插到数据前面。
+                    try:
+                        peer_of[t].write_eof()
+                    except Exception:
+                        pass
+            if hard_stop or not pending:
+                break
+            # 另一端通常会跟着结束；挂死的 keep-alive 客户端到点也拆，防连接泄漏
+            done2, pending = await asyncio.wait(
+                pending, timeout=60, return_when=asyncio.FIRST_COMPLETED)
+            if not done2:
+                break
+    finally:
+        for t in (up, down):
+            if not t.done():
+                t.cancel()
+        await asyncio.gather(up, down, return_exceptions=True)
 
 
 # --------------------------------------------------------------------------
@@ -1236,7 +1279,17 @@ async def handle_proxy(reader, writer):
                     continue
                 out.append(h.rstrip(b"\r\n"))
             out.append(b"Connection: close")
-            s_writer.write(b"\r\n".join(out) + b"\r\n\r\n")
+            hdr = b"\r\n".join(out) + b"\r\n\r\n"
+            # 请求头也要吃上行延迟。请求行/请求头是 readline() 逐行读的，读到的
+            # 瞬间就离开管道，不经过 DelayLine——正文为空的 GET 因此只能吃到单向
+            # 延迟，实测 RTT 只有设定值的一半（各 400ms 设定实测 430ms）。
+            # 头只有一块、体量极小，按建连的方式直接等一次即可，不影响吞吐
+            # （吞吐走 pipe 里的延迟队列，多块同时在途）。
+            d = _latency_delay(prof, "up")
+            while d > 0 and await nap(d, G.gen):
+                prof = G.profile        # 期间切换了场景/停止：按新参数重算
+                d = _latency_delay(prof, "up")
+            s_writer.write(hdr)
             await s_writer.drain()
             await run_tunnel(ctx, reader, s_writer, s_reader, writer, prof)
     except Abort:

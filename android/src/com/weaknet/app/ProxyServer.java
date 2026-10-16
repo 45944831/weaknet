@@ -193,8 +193,9 @@ public class ProxyServer implements Runnable {
             }
             req.append("Connection: close\r\n\r\n");
             OutputStream uout = up.getOutputStream();
-            uout.write(req.toString().getBytes("ISO-8859-1"));
-            uout.flush();
+            // 请求头也要吃上行延迟：请求是逐行 read 的，读到的瞬间就离开管道，
+            // 不经过 DelayLine——正文为空的 GET 会只能吃到单向延迟，RTT 少一半。
+            Pipe.writeDelayed(uout, req.toString().getBytes("ISO-8859-1"), true);
             WeakNet.I.log("connect", "HTTP 代理 " + host + ":" + port + path);
             pump(ctx, in, up);
         }
@@ -209,14 +210,29 @@ public class ProxyServer implements Runnable {
             final Pipe.Bucket upBucket = WeakNet.I.upBucket;
             final Pipe.Bucket downBucket = WeakNet.I.downBucket;
 
+            // EOF 收尾用 shutdownOutput 只关本方向（Java 里 close 输出流会连整个
+            // socket 一起关掉）。客户端「发完请求就 shutdown 写端」时，上行读到 EOF
+            // 不能把下行一起掐死——否则响应一个字节都出不去。
+            final Socket fUp = up;
+            final Socket fClient = client;
             Thread t1 = new Thread(new Runnable() {
                 public void run() {
-                    Pipe.run(cin, uout, upBucket, true, ctx);
+                    Pipe.run(cin, uout, upBucket, true, ctx, new Runnable() {
+                        public void run() {
+                            try { fUp.shutdownOutput(); }
+                            catch (Exception e) { try { fUp.close(); } catch (Exception e2) {} }
+                        }
+                    });
                 }
             }, "pipe-up");
             Thread t2 = new Thread(new Runnable() {
                 public void run() {
-                    Pipe.run(uin, cout, downBucket, false, ctx);
+                    Pipe.run(uin, cout, downBucket, false, ctx, new Runnable() {
+                        public void run() {
+                            try { fClient.shutdownOutput(); }
+                            catch (Exception e) { try { fClient.close(); } catch (Exception e2) {} }
+                        }
+                    });
                 }
             }, "pipe-down");
             t1.setDaemon(true);
@@ -224,7 +240,11 @@ public class ProxyServer implements Runnable {
             t1.start();
             t2.start();
             t1.join();
-            t2.join(2000);
+            // 必须等下行彻底跑完再收尾。原来这里是 t2.join(2000)：客户端一发完请求
+            // 就半关闭（curl / nc / 带 body 的 POST 都这样），慢档位下大响应要几十秒，
+            // 2s 后 cleanup() 直接掐断连接，响应尾部整段丢掉（下载总是差最后一段）。
+            // 下行会在上游 EOF 或 socket 出错时自然结束，300s 只是兜底。
+            t2.join(300000);
             ctx.cleanup();
         }
     }
