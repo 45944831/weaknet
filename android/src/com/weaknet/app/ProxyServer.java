@@ -124,7 +124,10 @@ public class ProxyServer implements Runnable {
                 WeakNet.I.log("config", "黑洞解除，恢复处理：" + Util.safe(target));
                 p = WeakNet.I.profile;
             }
-            if (p.dnsFailPct > 0 && Math.random() * 100 < p.dnsFailPct) {
+            // DNS 故障只影响「需要解析域名」的连接；IP 字面量（含 HTTPDNS / 固定 IP 的 App）
+            // 不经过 DNS，与 VpnNetService 路径（只对 UDP 53 生效）保持一致
+            if (p.dnsFailPct > 0 && !isIpLiteral(target)
+                    && Math.random() * 100 < p.dnsFailPct) {
                 Util.writeAscii(client, "HTTP/1.1 502 DNS resolution failed (simulated)\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
                 WeakNet.I.log("dns", "模拟 DNS 故障：" + Util.safe(target));
                 return;
@@ -247,5 +250,31 @@ public class ProxyServer implements Runnable {
             t2.join(300000);
             ctx.cleanup();
         }
+    }
+
+    /** 请求目标是否为 IP 字面量（v4/v6）。IP 直连不经过 DNS */
+    static boolean isIpLiteral(String target) {
+        String t = target == null ? "" : target;
+        int sl = t.indexOf("://");
+        if (sl >= 0) t = t.substring(sl + 3);
+        int sp = t.indexOf('/');
+        if (sp >= 0) t = t.substring(0, sp);
+        if (t.startsWith("[")) {                    // IPv6 [::1]:443
+            int e = t.indexOf(']');
+            return e > 1;
+        }
+        int c = t.lastIndexOf(':');
+        if (c > 0) t = t.substring(0, c);
+        if (t.length() == 0) return false;
+        boolean digits = true;
+        for (int i = 0; i < t.length(); i++) {
+            char ch = t.charAt(i);
+            if (!(Character.isDigit(ch) || ch == '.' || ch == ':' || (ch >= 'a' && ch <= 'f')
+                    || (ch >= 'A' && ch <= 'F'))) {
+                digits = false;
+                break;
+            }
+        }
+        return digits;
     }
 }

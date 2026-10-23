@@ -23,6 +23,7 @@ import argparse
 import asyncio
 import atexit
 import functools
+import ipaddress
 import json
 import os
 import random
@@ -1145,6 +1146,26 @@ async def run_tunnel(ctx, c_reader, s_writer, s_reader, c_writer, prof):
 UPSTREAM_502 = b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
 
 
+def _target_host(target):
+    """从请求目标里取出主机部分（兼容 CONNECT 的 host:port 与绝对 URI）"""
+    t = target
+    if "://" in t:
+        t = t.split("://", 1)[1]
+    t = t.split("/", 1)[0]
+    if t.startswith("["):                       # IPv6 字面量 [::1]:443
+        return t[1:].split("]", 1)[0]
+    return t.rsplit(":", 1)[0] if ":" in t else t
+
+
+def _is_ip_literal(host):
+    """是否 IP 字面量（v4/v6）。IP 直连不经过 DNS，DNS 故障档不应误伤它"""
+    try:
+        ipaddress.ip_address(host.strip("[]"))
+        return True
+    except ValueError:
+        return False
+
+
 async def handle_proxy(reader, writer):
     G.conns_total += 1
     G.conns_active += 1
@@ -1213,7 +1234,10 @@ async def handle_proxy(reader, writer):
                 return
             prof = G.profile
             log_event("config", "黑洞解除，恢复处理：" + target[:40])
-        if prof["dns_fail_pct"] and random.random() * 100 < prof["dns_fail_pct"]:
+        # DNS 故障只影响「需要解析域名」的连接；IP 字面量（含 HTTPDNS / 固定 IP 的 App）
+        # 不经过 DNS，与真机上的表现保持一致，不会被误判成完全断网
+        if (prof["dns_fail_pct"] and not _is_ip_literal(_target_host(target))
+                and random.random() * 100 < prof["dns_fail_pct"]):
             writer.write(b"HTTP/1.1 502 DNS resolution failed (simulated)"
                          b"\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
             await writer.drain()
@@ -1950,9 +1974,12 @@ async def handle_ctrl(reader, writer):
             # 限速总开关。GET 视为查询，POST {enable:true/false} 为切换。
             if method == "POST" and body:
                 try:
-                    enable = bool(json.loads(body).get("enable"))
+                    enable_raw = json.loads(body).get("enable")
                 except Exception:
-                    enable = None
+                    enable_raw = None
+                # 只认真正的布尔值：字符串 "false"、数字 1 等一律视为非法，
+                # 否则 bool("false") == True 会把「停止」误执行为「开启限速」
+                enable = enable_raw if isinstance(enable_raw, bool) else None
                 if enable is None:
                     send_response(writer, 400, JSON_CT, b'{"error":"bad request"}')
                 else:

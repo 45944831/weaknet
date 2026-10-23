@@ -411,6 +411,29 @@ public class CtrlServer implements Runnable {
                         .getBytes("UTF-8"));
                 return;
             }
+            // GET /api/run：查询当前开关状态（与 Windows 端同构，脚本/前端轮询用）
+            if ("/api/run".equals(path)) {
+                respond(200, JSON_CT, ("{\"ok\":true,\"limit_on\":" + WeakNet.I.limitOn + "}")
+                        .getBytes("UTF-8"));
+                return;
+            }
+            // 本机身份（与 Windows /api/me 同构）：Android 端用 /api/share 也能拿到同样信息
+            if ("/api/me".equals(path)) {
+                if (method.equals("POST") && body != null && body.length() > 0) {
+                    try {
+                        ShareNet.setUserName(new JSONObject(body).optString("name", ""));
+                    } catch (Exception e) {
+                        respond(400, JSON_CT, "{\"error\":\"bad request\"}".getBytes("UTF-8"));
+                        return;
+                    }
+                }
+                JSONObject o = new JSONObject();
+                o.put("name", ShareNet.getUserName());
+                o.put("id", ShareNet.getSelfId());
+                o.put("platform", "android");
+                respond(200, JSON_CT, o.toString().getBytes("UTF-8"));
+                return;
+            }
             // 不限方法：页面若以 GET 发出也要能停（前端漏带 body 时会走 GET，
             // 只认 POST 就会返回 404，表现为「停止按钮点了没反应」）
             if ("/api/stop".equals(path)) {
@@ -540,6 +563,23 @@ public class CtrlServer implements Runnable {
         }
 
         private JSONObject statusJson() throws Exception {
+            try {
+                return statusJsonInner();
+            } catch (Throwable t) {
+                // 曾经这里抛异常会被 run() 的 catch(Exception) 吞掉，客户端看到的是
+                // 「连接被关闭、0 字节」，排查无从下手。现在至少把根因落到日志和响应里。
+                try {
+                    android.util.Log.e("WeakNet", "statusJson error", t);
+                    WeakNet.I.log("error", "statusJson 异常：" + t);
+                } catch (Exception ignore) {
+                }
+                JSONObject o = new JSONObject();
+                o.put("error", String.valueOf(t));
+                return o;
+            }
+        }
+
+        private JSONObject statusJsonInner() throws Exception {
             JSONObject o = new JSONObject();
             o.put("profile", WeakNet.I.profile.toJson());
             o.put("preset_key", WeakNet.I.presetKey);

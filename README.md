@@ -9,22 +9,22 @@
 
 ---
 
-## 下载（Release v1.1.4）
+## 下载（Release v1.1.5）
 
 > Windows 端 `WeakNet.exe` 以 GUI 子系统打包，双击直接出界面，**不会弹出 DOS 黑框**；Android 端安装 `WeakNet.apk` 即可。
 
 | 文件 | 平台 | 大小 | SHA-256 |
 | --- | --- | --- | --- |
-| [`WeakNet.exe`](https://github.com/45944831/weaknet/releases/latest/download/WeakNet.exe) | Windows（GUI 版，免装 Python） | 10.1 MB | `586eeb7a…f00e` |
-| [`WeakNet.apk`](https://github.com/45944831/weaknet/releases/latest/download/WeakNet.apk) | Android 7.0+ | 97 KB | `c1c8cd40…6287` |
+| [`WeakNet.exe`](https://github.com/45944831/weaknet/releases/latest/download/WeakNet.exe) | Windows（GUI 版，免装 Python） | 10.2 MB | `03947224…03a8` |
+| [`WeakNet.apk`](https://github.com/45944831/weaknet/releases/latest/download/WeakNet.apk) | Android 7.0+ | 101 KB | `f5a0c5cd…3094` |
 
 发布页：https://github.com/45944831/weaknet/releases/latest
 
 完整校验值：
 
 ```
-586eeb7a58e2c95a5a8a7dd2a8903a5bcfb6f8dc09aca273b35d5edad188f00e  WeakNet.exe
-c1c8cd40794d0f5f5477c850987521f486abc010731656bb23a7370d447b6287  WeakNet.apk
+03947224b2d1b1ed5a69777990d3e5f2d62bdcc74f8937897d98f353ec1d03a8  WeakNet.exe
+f5a0c5cd51a3ca84cfad57bd792b0e0907fad771a0d730545acd915392ba3094  WeakNet.apk
 ```
 
 > 若 GitHub 下载慢或打不开，可在链接前加 `https://ghproxy.net/` 走镜像加速，例如
@@ -318,6 +318,11 @@ weaknet/
 | **并发带宽成倍超标（v1.1.3 修复）** | 令牌桶原建在每条连接里：8 条并发下载总吞吐 52855 kbps = 设定 20000 的 **2.64 倍**。改为全局共享桶后 1/2/4/8 并发实测 22052 / 20520 / 20547 / 20515（均 1.03~1.10x） |
 | **连接尾部数据丢失（v1.1.3 修复）** | 短连接（HTTP / curl / nc）响应尾部数据原先可能随连接一起被丢弃，现排空延迟队列后才返回，6/6 收满 |
 | **打包后冒烟（v1.1.3）** | 启动并监听、长连接延迟已进包（RTT 110/111/111/126/93）、4 并发带宽 20868 kbps（1.04x）、停止限速后恢复 957 Mbps |
+| **真机全量测试（v1.1.4）** | Android 真机深度测试：VPN 接管/还原、9 档场景矩阵、5 个极端场景、限速总开关、接管范围（74 个应用，仅 Chrome 时 shell 流量旁路）、自定义场景 API↔UI 双向即时刷新；APK 控制接口 16/16 通过 |
+| **DNS 故障误伤 IP 直连（v1.1.5 修复）** | 修复前 DNS 故障档把 IP 字面量连接也判失败（Windows 端 4/5 失败、Android ProxyServer 同样误判），与真机 VpnService 路径（只对 UDP 53 生效）行为不一致。修复后两端均按「是否需要解析域名」判定：域名连接 rc=1、IP 直连 5/5，不再被误判成完全断网 |
+| **`/api/run` 布尔解析（v1.1.5 修复）** | 修复前 `bool("false") == True`，传字符串 `"false"` 会把「停止限速」误执行为「开启」。修复后只认真正的布尔值，非法值原样拒绝，复测通过 |
+| **APK `/api/status` 无响应（v1.1.5 修复）** | 旧包 `/api/status` 稳定返回空响应且异常被 `run()` 的 catch 吞掉。已加兜底：异常落 logcat + 体现在响应 `error` 字段；同时补齐 GET `/api/run` 查询开关与 `/api/me` 身份接口（与 Windows 端契约一致），APK 控制接口复测 16/16 |
+| **v1.1.5 全量回归** | Windows 引擎 44 项（D1/D2 转通过、无回归）、真机极端场景（完全断网 / 黑洞 / DNS 故障）无回归、新 EXE 冒烟 + 4G 21.7 Mbps 全过；EXE 10.2 MB / APK 101 KB 重新打包 |
 
 ---
 
