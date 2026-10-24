@@ -46,6 +46,12 @@ public class DelayLine {
     private long lastBusy = System.currentTimeMillis();
     private volatile boolean closed = false;
     private volatile int pendingBytes = 0;
+    /** 已出队、job 还在锁外执行的数量。>0 时禁止内联快路径——
+     *  否则后发的包可能插到前面那个包的 job 之前写完（tun 写入顺序即乱序）。 */
+    private int inFlight = 0;
+    /** 已入队项的最大到期时间：新项的到期时间不得早于它，保证抖动不把包打乱。
+     *  （队列空且无在途 job 时重置——那时的到期时间都已过去，不该再压制新包） */
+    private long lastDue = 0;
 
     /** 空闲这么久就撤掉线程：手机上同时挂着的连接可能有上百条，
      *  每条都常驻一个投递线程太浪费 —— 反正闲着也是闲着，真有包进来再拉起来。 */
@@ -56,14 +62,16 @@ public class DelayLine {
         this.maxPending = maxPending;
     }
 
-    /** 延迟 delayMs 后执行 job。delayMs<=0 且队列为空时直接同步执行，省掉一次线程切换。 */
+    /** 延迟 delayMs 后执行 job。delayMs<=0 且无在途数据时直接同步执行，省掉一次线程切换。 */
     void post(long delayMs, Runnable job, int bytes) {
         if (delayMs <= 0) {
             // 不限延迟时直接同步跑：队列为空说明没有更早的包在等，不会打乱顺序。
             // 少了「入队 + 唤醒投递线程」这一来一回，直连档的吞吐能差出 30%。
             boolean inline = false;
             synchronized (lock) {
-                inline = q.isEmpty();
+                // inFlight>0 = 已出队的包 job 还在锁外跑，此时内联会让顺序颠倒，必须入队
+                inline = q.isEmpty() && inFlight == 0;
+                if (inline) lastDue = 0;
             }
             if (inline) {
                 // 必须出了锁再跑：job 里会去拿 TcpSession 的锁，而提交方是拿着
@@ -87,6 +95,11 @@ public class DelayLine {
                 }
                 if (closed) return;
             }
+            // 单调保序：新包不得早于已在队/在途的包到期（抖动是 ±jitter 的，
+            // 放任的话后发的包可能先到期，投递顺序乱了 TCP 会当成重传全丢掉）
+            if (q.isEmpty() && inFlight == 0) lastDue = 0;   // 基准已过去，重置
+            if (due < lastDue) due = lastDue;
+            lastDue = due;
             q.add(new Item(due, seqGen++, job, bytes));
             pendingBytes += bytes;
             if (worker == null || !worker.isAlive()) {
@@ -128,7 +141,7 @@ public class DelayLine {
                         return;
                     }
                     try {
-                        lock.wait(200);
+                        lock.wait(200);     // 空队列：保留轮询，承担空闲退线程的职责
                     } catch (InterruptedException e) {
                         return;
                     }
@@ -137,8 +150,10 @@ public class DelayLine {
                 it = q.peek();
                 long w = it.due - System.currentTimeMillis();
                 if (w > 0) {
+                    // 精确等到期：post/close 都会 notifyAll，不需要 200ms 轮询兜底
+                    // （原来每 200ms 醒一次，100 条延迟连接就是 500 次/秒空转，纯耗电）
                     try {
-                        lock.wait(Math.min(w, 200));
+                        lock.wait(w);
                     } catch (InterruptedException e) {
                         return;
                     }
@@ -146,6 +161,7 @@ public class DelayLine {
                 }
                 q.poll();
                 pendingBytes -= it.bytes;
+                inFlight++;
                 lastBusy = System.currentTimeMillis();
                 lock.notifyAll();
             }
@@ -154,6 +170,10 @@ public class DelayLine {
                     it.job.run();
                 } catch (Exception e) {
                     // ignore
+                }
+                synchronized (lock) {
+                    inFlight--;
+                    lock.notifyAll();
                 }
             }
         }

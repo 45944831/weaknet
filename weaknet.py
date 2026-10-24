@@ -30,6 +30,7 @@ import random
 import signal
 import socket
 import sys
+import threading
 import time
 import traceback
 import urllib.parse
@@ -49,16 +50,18 @@ FROZEN = getattr(sys, "frozen", False)   # True = 以 EXE 方式运行
 
 
 def log(*a):
-    """立刻可见的输出（同时写一份日志到 EXE 同目录的 weaknet.log）
+    """立刻可见的输出（同时进缓冲日志，由 _log_flush_loop / atexit 落盘）
     注意：GUI（--windowed）模式下 sys.stdout 为 None，print 会抛异常，必须吞掉。"""
     msg = " ".join(str(x) for x in a)
     try:
         print(msg, flush=True)
     except Exception:
         pass
+    global _LOG_SINK
     try:
-        with open(LOG_FILE, "a", encoding="utf-8") as f:
-            f.write(time.strftime("%H:%M:%S ") + msg + "\n")
+        if _LOG_SINK is None:
+            _LOG_SINK = _LogSink(LOG_FILE)
+        _LOG_SINK.write(msg)
     except Exception:
         pass
 
@@ -77,6 +80,76 @@ def _app_dir():
 
 
 LOG_FILE = _app_dir() / "weaknet.log"
+
+
+class _LogSink:
+    """缓冲日志：攒够一批再落盘（原来是每条一次 open/write/close），超限自动轮转。
+
+    log_event 也走这里。以前连接级事件（建连 / 模拟断连 / DNS 故障）只进内存
+    deque，日志文件里什么都没有 —— 事后想排查「哪条连接被掐了」只能重跑。
+    轮转只保留一份 .old：排查最近一次问题足够，又不让日志无限涨。
+    """
+    MAX_BYTES = 4 << 20      # 超过 4MB 轮转
+    BATCH = 64               # 攒够 64 条落一次盘
+    FLUSH_BYTES = 256 << 10  # 或攒够 256KB 就落
+
+    def __init__(self, path):
+        # 归一成 Path：轮转要用 with_suffix()，传 str 会 AttributeError，
+        # 而外层 except Exception: pass 会把它吞掉 —— 结果是日志静默不轮转。
+        self.path = path if isinstance(path, Path) else Path(path)
+        self.buf = []
+        self.pending_bytes = 0
+        self.lock = threading.Lock()
+
+    def write(self, msg):
+        line = time.strftime("%H:%M:%S ") + msg + "\n"
+        with self.lock:
+            self.buf.append(line)
+            self.pending_bytes += len(line)
+            if len(self.buf) >= self.BATCH or self.pending_bytes >= self.FLUSH_BYTES:
+                self._flush_locked()
+
+    def flush(self):
+        with self.lock:
+            self._flush_locked()
+
+    def _flush_locked(self):
+        if not self.buf:
+            return
+        try:
+            try:
+                if self.path.exists() and self.path.stat().st_size > self.MAX_BYTES:
+                    old = self.path.with_suffix(".old")
+                    if old.exists():
+                        old.unlink()
+                    self.path.replace(old)
+            except Exception:
+                pass
+            with open(self.path, "a", encoding="utf-8") as f:
+                f.writelines(self.buf)
+        except Exception:
+            pass
+        self.buf = []
+        self.pending_bytes = 0
+
+
+_LOG_SINK = None
+
+
+def flush_logs():
+    """把缓冲日志落盘（定时任务与 atexit 调用）；从未记过日志时是空操作"""
+    global _LOG_SINK
+    if _LOG_SINK is not None:
+        try:
+            _LOG_SINK.flush()
+        except Exception:
+            pass
+
+
+async def _log_flush_loop():
+    while True:
+        await asyncio.sleep(2)
+        flush_logs()
 
 
 def can_bind(port, host="127.0.0.1"):
@@ -293,24 +366,48 @@ def _lookup_proc_name(pid):
     return name
 
 
+_TCP_PID_MAP_CACHE = {"at": 0.0, "map": {}}   # (local_port, remote_port) -> pid
+_TCP_PID_MAP_TTL = 0.3          # 快照复用窗口：300ms 内的并发连接共享一次全表扫描
+
+
+def _tcp_pid_map(force=False):
+    """(local_port, remote_port) -> pid 的索引。
+
+    为什么要缓存：每条新代理连接都要反查「是谁连上来的」，原来的做法是每次
+    现扫全张 TCP 表（GetExtendedTcpTable 整表拷贝 + Python 逐行循环）——
+    忙时表里有上千行，浏览器开一个 50 资源的页面就是 50 次全表扫描。
+    300ms 内的连接共享一份快照；TTL 过期或强制刷新时才真扫。
+    扫描结果只影响「是否接管」的判定，短暂陈旧可接受：查不到就实时刷新。
+    """
+    now = time.monotonic()
+    c = _TCP_PID_MAP_CACHE
+    if not force and c["map"] and (now - c["at"]) < _TCP_PID_MAP_TTL:
+        return c["map"]
+    rows = _tcp_rows()
+    m = {}
+    for _la, lp, _ra, rp, pid in rows:
+        m[(lp, rp)] = pid
+    c["map"] = m
+    c["at"] = now
+    return m
+
+
 def proc_name_of_peer(peer_port, local_port):
     """反查：连到本代理 local_port 的、来自 peer_port 的连接属于哪个进程。
     返回 exe 名（小写）；查不到或非 Windows 返回 None。
 
     为什么要重试：连接刚被 accept 的瞬间，Windows 的 TCP 连接表偶尔还没登记这一行，
     查不到就会把该连接当「未识别」放行（名单内的程序反而没被接管）。
-    只在「表里压根找不到这行」时重试，找到行就立即返回，正常路径不增加任何延迟。
+    只在「表里压根找不到这行」时重试（重试强制刷新快照），找到行就立即返回，
+    正常路径不增加任何延迟。
     """
     if not IS_WIN:
         return None
     for attempt in range(_TCP_LOOKUP_RETRIES):
-        try:
-            for la, lp, _ra, rp, pid in _tcp_rows():
-                if lp == peer_port and rp == local_port:
-                    name = _lookup_proc_name(pid)
-                    return name.lower() if name else None
-        except Exception:
-            return None
+        pid = _tcp_pid_map(force=(attempt > 0)).get((peer_port, local_port))
+        if pid is not None:
+            name = _lookup_proc_name(pid)
+            return name.lower() if name else None
         if attempt + 1 < _TCP_LOOKUP_RETRIES:
             time.sleep(_TCP_LOOKUP_GAP)
     return None
@@ -646,6 +743,7 @@ class G:
     bytes_up = 0
     bytes_down = 0
     active = set()            # 在途 writer，整体断网时掐断
+    contexts = set()          # 在途连接上下文，空闲回收用（ConnCtx.register/cleanup 维护）
     flap_task = None
     proxy_server = None
     proxy_host = "127.0.0.1"
@@ -707,12 +805,24 @@ def set_scope(mode, names):
 
 
 def log_event(etype, msg):
+    """记一条事件：进内存 deque（GUI/接口实时看）+ 缓冲日志（落盘，事后排查用）"""
     G.events.append({"t": time.strftime("%H:%M:%S"), "type": etype, "msg": msg})
+    try:
+        if _LOG_SINK is None:
+            globals()["_LOG_SINK"] = _LogSink(LOG_FILE)
+        _LOG_SINK.write("[" + etype + "] " + msg)
+    except Exception:
+        pass
 
 
 async def nap(seconds, gen):
     """可被「切换场景 / 停止模拟」立即打断的 sleep。
-    返回 True 表示被参数切换打断（调用方应立即按新参数继续）。"""
+    返回 True 表示被参数切换打断（调用方应立即按新参数继续）。
+
+    这里等满 remain 而不是每 0.25s 轮询一次：唯一的 gen 递增点
+    （select_scene）紧接着就会 G.wake.set()，事件本身就把挂起的连接唤醒了，
+    轮询帽纯属空转 —— 100 个黑洞连接挂 600s 时，它每秒白醒 400 次。
+    """
     if G.gen != gen:
         return True
     end = time.monotonic() + max(0.0, seconds)
@@ -724,14 +834,14 @@ async def nap(seconds, gen):
             return False
         w = G.wake
         if w is None:                       # 服务尚未初始化，退化为普通 sleep
-            await asyncio.sleep(min(remain, 0.25))
+            await asyncio.sleep(remain)
             continue
         try:
-            await asyncio.wait_for(w.wait(), timeout=min(remain, 0.25))
+            await asyncio.wait_for(w.wait(), timeout=remain)
         except (asyncio.TimeoutError, TimeoutError):
             continue
         except Exception:
-            await asyncio.sleep(min(remain, 0.25))
+            await asyncio.sleep(remain)
 
 
 # --------------------------------------------------------------------------
@@ -863,14 +973,20 @@ class Bucket:
 
     async def consume(self, n):
         """按字节消耗令牌。注意：单次数据量可能远大于 1 秒的配额（例如 2G 下读取
-        64KB），必须分多次扣减，否则 'tokens >= n' 永不成立会死循环。"""
+        64KB），必须分多次扣减，否则 'tokens >= n' 永不成立会死循环。
+
+        睡眠必须在锁外：asyncio.Lock 不像 Java 监视器那样在等待时释放，
+        在锁里 sleep 会让其他连接的 consume 全部堵住（慢档位下尤其明显），
+        用户点「停止」时排队的连接也要等当前睡眠者醒来才能看到 rate == 0。
+        锁内只做「补 token + 预扣」，预扣语义保留 —— 并发总速率不超标靠的就是它。
+        """
         if not self.rate:
             return
-        async with self.lock:
-            remain = n
-            while remain > 0:
+        remain = n
+        while remain > 0:
+            async with self.lock:
                 if not self.rate:
-                    # 限速被取消（切换直连 / 停止模拟）：立刻放行，不能再用 rate 做除法
+                    # 限速被取消（切换直连 / 停止模拟）：立刻放行
                     self.tokens = 0.0
                     return
                 now = time.monotonic()
@@ -884,7 +1000,8 @@ class Bucket:
                     if remain <= 0:
                         return
                 # 还要等剩下的字节补齐，单次最多等 0.25s，避免长时间独占
-                await asyncio.sleep(min(max(remain / self.rate, 0.001), 0.25))
+                wait_s = remain / self.rate
+            await asyncio.sleep(min(max(wait_s, 0.001), 0.25))
 
 
 # --------------------------------------------------------------------------
@@ -912,15 +1029,26 @@ class ConnCtx:
         self.writers = []
         self.fixed = False     # True = 直通连接：参数固定，不随场景切换变化
         self.prof = None       # fixed 时使用的固定 profile（BYPASS_PROFILE）
+        self.last_active = time.monotonic()   # 最后一次有数据流动，供空闲回收
+        # 一出生就登记：否则「请求头读到一半就晾着」的连接在 register() 之前
+        # 不存在于 G.contexts，空闲回收看不见它，30s 头超时到了也不会被关掉。
+        G.contexts.add(self)
+
+    def touch(self):
+        self.last_active = time.monotonic()
 
     def register(self, w):
-        self.writers.append(w)
+        if w not in self.writers:      # 同一 writer 可能被客户端侧/上游侧各登记一次
+            self.writers.append(w)
         G.active.add(w)
+        G.contexts.add(self)
 
     def abort_all(self):
         for w in self.writers:
             G.active.discard(w)
             abort_writer(w)
+        # 已经拆了就别再占着回收集合：否则空闲回收会每 60s 反复 abort 同一批死连接
+        G.contexts.discard(self)
 
     def cleanup(self):
         for w in self.writers:
@@ -929,6 +1057,7 @@ class ConnCtx:
                 w.close()
             except Exception:
                 pass
+        G.contexts.discard(self)
 
 
 def _latency_delay(prof, direction):
@@ -1048,6 +1177,7 @@ async def pipe(reader, writer, prof, direction, ctx):
             if not data:
                 return
             n = len(data)
+            ctx.touch()                     # 有数据流动：刷新空闲计时
             if ctx.fixed:                          # 直通流量不计入弱网统计
                 G.bytes_bypass += n
             elif direction == "up":
@@ -1140,6 +1270,305 @@ async def run_tunnel(ctx, c_reader, s_writer, s_reader, c_writer, prof):
 
 
 # --------------------------------------------------------------------------
+# 明文 HTTP 的 keep-alive 转发
+# --------------------------------------------------------------------------
+
+def _rewrite_origin_request(method, path, headers):
+    """把代理格式请求改写成源站格式（去代理头，声明 keep-alive）"""
+    out = [f"{method} {path} HTTP/1.1".encode()]
+    for h in headers:
+        k = h.split(b":", 1)[0].strip().lower()
+        if k in (b"proxy-connection", b"connection", b"keep-alive"):
+            continue
+        out.append(h.rstrip(b"\r\n"))
+    out.append(b"Connection: keep-alive")
+    return b"\r\n".join(out) + b"\r\n\r\n"
+
+
+def _hdr_get(headers, name):
+    """取请求/响应头（bytes，小写比较）。多个同名取第一个。"""
+    for h in headers:
+        if h.split(b":", 1)[0].strip().lower() == name:
+            return h.split(b":", 1)[1].strip()
+    return None
+
+
+def _resp_frame(status, resp_headers, method):
+    """响应体怎么算读完。返回 (mode, length)：
+    mode: 'nobody' 无体 / 'cl' 定长 / 'chunked' 分块 / 'eof' 读到 EOF 为止。
+    只有边界明确才能复用上游连接 —— 'eof' 意味着这一响应读完上游就该关。"""
+    if method == "HEAD" or status in (204, 304) or 100 <= status < 200:
+        return "nobody", 0
+    te = (_hdr_get(resp_headers, b"transfer-encoding") or b"").lower()
+    if b"chunked" in te:
+        return "chunked", 0
+    cl = _hdr_get(resp_headers, b"content-length")
+    if cl is not None:
+        try:
+            return "cl", max(0, int(cl.split(b",")[0]))
+        except ValueError:
+            return "eof", 0
+    return "eof", 0
+
+
+def _resp_keepalive(status_line, resp_headers, mode):
+    """这个响应读完后，上游连接还能给下一个请求用吗"""
+    if mode == "eof":
+        return False
+    conn = (_hdr_get(resp_headers, b"connection") or b"").lower()
+    if b"close" in conn:
+        return False
+    if status_line.startswith(b"HTTP/1.0") and b"keep-alive" not in conn:
+        return False
+    return True
+
+
+def _client_keepalive(headers):
+    """客户端是否希望这条连接继续用（决定响应发完是否关客户端侧）。
+    HTTP/1.1 默认保持，除非显式 Connection: close；HTTP/1.0 默认不保持。"""
+    conn = (_hdr_get(headers, b"connection") or b"").lower()
+    if b"close" in conn:
+        return False
+    return True
+
+
+async def _read_msg_head(reader, timeout):
+    """读一条消息头（状态行/请求行 + 头行），返回原始行列表；超时/断开返回 None"""
+    lines = []
+    while True:
+        try:
+            h = await asyncio.wait_for(reader.readline(), timeout=timeout)
+        except (TimeoutError, ConnectionError, OSError):
+            return None
+        if not h:
+            return lines if lines else None
+        lines.append(h)
+        if h in (b"\r\n", b"\n"):
+            return lines
+
+
+async def http_keepalive_relay(ctx, c_reader, c_writer, s_reader, s_writer,
+                               prof, method, target, headers):
+    """明文 HTTP 的 keep-alive 转发。
+
+    原来的实现是「单请求短连接」：客户端每请求一个资源就重开一条上游 TCP，
+    浏览器开一个 50 资源的页面就是 50 次握手，每次还吃满连接延迟 ——
+    比真实网络更残，页面级测试的曲线整个失真。
+
+    这里在一条客户端连接上串行处理多个请求：响应边界明确
+    （Content-Length / chunked / 无体）就复用上游连接，否则这一请求
+    结束后关掉上游、下个请求重连。只接「无请求体的 GET/HEAD/DELETE」——
+    带体的 POST 请求体边界要另一个状态机，不冒险，继续走单请求路径。
+
+    延迟/限速/丢包的注入与 pipe() 同规则：请求头吃上行延迟，响应按块吃
+    下行延迟 + 下行带宽，切场景对已在途的连接立即生效（每块重读 G.profile）。
+    """
+    dl = DelayLine(c_writer, ctx.label).start()
+    gen = G.gen
+    cur_target = None
+
+    async def _reconnect(host, port):
+        """换一条上游连接（返回 False 表示失败、已回 502）"""
+        nonlocal s_reader, s_writer
+        try:
+            s_writer.close()
+        except Exception:
+            pass
+        try:
+            s_reader, s_writer = await asyncio.wait_for(
+                asyncio.open_connection(host, port), timeout=15)
+            ctx.register(s_writer)
+            log_event("connect", f"HTTP 代理 {host}:{port}（重连）")
+            return True
+        except Exception as e:
+            log_event("error", f"{host}:{port} 上游连接失败：{type(e).__name__}")
+            try:
+                c_writer.write(UPSTREAM_502)
+                await c_writer.drain()
+            except Exception:
+                pass
+            return False
+
+    async def _send_down(block):
+        """一块响应数据：下行带宽 + 下行延迟后投递给客户端（与 pipe() 同规则）"""
+        if ctx.fixed:
+            await dl.submit(block, 0, gen)
+            return
+        p = G.profile
+        bucket = G.bucket_down
+        if bucket is not None:
+            bucket.sync(p.get("down_kbps", 0))
+            await bucket.consume(len(block))
+        G.bytes_down += len(block)
+        await dl.submit(block, _latency_delay(p, "down"), gen)
+
+    try:
+        first = True
+        while True:
+            # ---------- 取一个请求（第一个由调用方读好传入） ----------
+            if first:
+                first = False
+                u = urllib.parse.urlsplit(target)
+                path = (u.path or "/") + (("?" + u.query) if u.query else "")
+                cur_target = (u.hostname or "", u.port or 80)
+            else:
+                head = await _read_msg_head(c_reader, 65)
+                if not head:
+                    return
+                ctx.touch()
+                try:
+                    method, target, _ver = head[0].decode("latin1").split()
+                except ValueError:
+                    return
+                method = method.upper()
+                u = urllib.parse.urlsplit(target)
+                if not u.scheme or not u.hostname:
+                    return
+                headers = [h for h in head[1:] if h.strip()]   # 去掉结尾空行
+                path = (u.path or "/") + (("?" + u.query) if u.query else "")
+                new_target = (u.hostname, u.port or (443 if u.scheme == "https" else 80))
+                if s_writer.is_closing() or new_target != cur_target:
+                    if not await _reconnect(new_target[0], new_target[1]):
+                        return
+                    cur_target = new_target
+                # 后续请求也要吃每请求的故障注入（拒连/黑洞/DNS）
+                p2 = ctx.prof if ctx.fixed else G.profile
+                if not ctx.fixed:
+                    if p2["reject_pct"] and random.random() * 100 < p2["reject_pct"]:
+                        c_writer.write(UPSTREAM_502)
+                        await c_writer.drain()
+                        return
+                    if p2["timeout_pct"] and random.random() * 100 < p2["timeout_pct"]:
+                        if not await nap(600, G.gen):
+                            return
+                    if (p2["dns_fail_pct"] and not _is_ip_literal(_target_host(target))
+                            and random.random() * 100 < p2["dns_fail_pct"]):
+                        c_writer.write(b"HTTP/1.1 502 DNS resolution failed (simulated)"
+                                       b"\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                        await c_writer.drain()
+                        return
+
+            ctx.label = f"{cur_target[0]}:{cur_target[1]}"
+
+            # ---------- 转发请求头（吃上行延迟） ----------
+            prof = ctx.prof if ctx.fixed else G.profile
+            hdr = _rewrite_origin_request(method, path, headers)
+            if not ctx.fixed:
+                d = _latency_delay(prof, "up")
+                while d > 0 and await nap(d, G.gen):
+                    prof = G.profile        # 期间切换了场景/停止：按新参数重算
+                    d = _latency_delay(prof, "up")
+
+            # ---------- 读响应头（上游可能在写后断开：幂等方法重试一次） ----------
+            head = None
+            for attempt in (0, 1):
+                try:
+                    s_writer.write(hdr)
+                    await s_writer.drain()
+                except (ConnectionError, OSError):
+                    if attempt == 0 and not ctx.fixed:
+                        continue               # 连接已死：重连后重试
+                    return
+                head = await _read_msg_head(s_reader, 60)
+                if head:
+                    break
+                # 服务端可能刚关掉这条空闲 keep-alive：GET/HEAD/DELETE 幂等，
+                # 重连后重试一次是安全的（这也正是复用上游必须处理的竞态）
+                if attempt == 0 and not ctx.fixed:
+                    if not await _reconnect(cur_target[0], cur_target[1]):
+                        return
+                    continue
+                return
+            log_event("connect", f"HTTP 代理 {cur_target[0]}:{cur_target[1]}{path[:60]}")
+
+            status = 0
+            try:
+                status = int(head[0].split(b" ", 2)[1])
+            except Exception:
+                pass
+            resp_headers = [h for h in head[1:] if h.strip()]
+            mode, length = _resp_frame(status, resp_headers, method)
+            upstream_keep = _resp_keepalive(head[0], resp_headers, mode)
+
+            # ---------- 转发响应体 ----------
+            if mode != "nobody":
+                # 响应头本身也走下行通道（和 pipe() 一致：每块都吃延迟）
+                await _send_down(b"".join(head))
+                if mode == "cl":
+                    remain = length
+                    while remain > 0:
+                        blk = await s_reader.read(min(65536, remain))
+                        if not blk:
+                            return
+                        remain -= len(blk)
+                        await _send_down(blk)
+                elif mode == "chunked":
+                    while True:
+                        line = await s_reader.readline()
+                        if not line:
+                            return
+                        await _send_down(line)
+                        try:
+                            sz = int(line.split(b";")[0].strip() or b"0", 16)
+                        except ValueError:
+                            return
+                        if sz == 0:
+                            # 最后一个 chunk：把 trailer 读到空行为止
+                            while True:
+                                t = await s_reader.readline()
+                                if not t:
+                                    return
+                                await _send_down(t)
+                                if t in (b"\r\n", b"\n"):
+                                    break
+                            break
+                        remain = sz
+                        while remain > 0:
+                            blk = await s_reader.read(min(65536, remain))
+                            if not blk:
+                                return
+                            remain -= len(blk)
+                            await _send_down(blk)
+                        crlf = await s_reader.readline()   # chunk 数据后的 CRLF
+                        if not crlf:
+                            return
+                        await _send_down(crlf)
+                else:  # eof：读到上游 EOF 为止，之后必须关上游
+                    while True:
+                        blk = await s_reader.read(65536)
+                        if not blk:
+                            break
+                        await _send_down(blk)
+                    upstream_keep = False
+
+            # ---------- 决定连接去向 ----------
+            if not upstream_keep:
+                try:
+                    s_writer.close()
+                except Exception:
+                    pass
+            if not _client_keepalive(headers):
+                return
+    except Abort:
+        dl.abort()
+        raise
+    except (ConnectionError, OSError):
+        return
+    finally:
+        # 排空延迟队列再收尾，否则响应尾部的最后几块会被丢（与 pipe() 同规则）
+        rate_kbps = 0 if ctx.fixed else G.profile.get("down_kbps", 0)
+        if rate_kbps and dl.pending:
+            need = dl.pending * 8.0 / (rate_kbps * 1000.0) + 30.0
+        else:
+            need = 30.0
+        await dl.aclose(timeout=max(30.0, min(need, 600.0)))
+        try:
+            s_writer.close()
+        except Exception:
+            pass
+
+
+# --------------------------------------------------------------------------
 # 代理协议处理（CONNECT 隧道 + 普通 HTTP 转发）
 # --------------------------------------------------------------------------
 
@@ -1170,6 +1599,11 @@ async def handle_proxy(reader, writer):
     G.conns_total += 1
     G.conns_active += 1
     ctx = ConnCtx("?")
+    # 客户端侧的 writer 立刻登记：这样 finally 里的 ctx.cleanup() 在任何
+    # 返回路径上都能把客户端 socket 关掉。以前只有走到 register() 之后才登记，
+    # 「请求头读到一半超时」这类早退路径会把客户端连接漏掉 —— 连接一直挂着，
+    # 客户端要等自己的超时，服务端这边则一直占着 fd。
+    ctx.register(writer)
     try:
         # ---- 识别来源进程，决定这条连接是否被接管 ----
         pname = None
@@ -1207,13 +1641,19 @@ async def handle_proxy(reader, writer):
             return
         method = method.upper()
 
-        # 读完请求头
-        headers = []
-        while True:
-            h = await reader.readline()
-            if not h or h in (b"\r\n", b"\n"):
-                break
-            headers.append(h)
+        # 读完请求头（整体 30s 超时）。原来逐行裸 readline：客户端发个请求行就
+        # 晾着的话，连接会无限期挂起，占着 ctx/writer/G.active 条目。
+        async def _read_headers():
+            hs = []
+            while True:
+                h = await reader.readline()
+                if not h or h in (b"\r\n", b"\n"):
+                    return hs
+                hs.append(h)
+        try:
+            headers = await asyncio.wait_for(_read_headers(), timeout=30)
+        except (TimeoutError, ConnectionError, OSError):
+            return
 
         # 直通连接用固定全零参数：不注入任何弱网效果，也不随场景切换而变化
         prof = ctx.prof if ctx.fixed else G.profile
@@ -1294,6 +1734,22 @@ async def handle_proxy(reader, writer):
                 return
             ctx.register(writer)
             ctx.register(s_writer)
+            # 无请求体的 GET/HEAD/DELETE 走 keep-alive 转发（一条客户端连接
+            # 串行多个请求，上游能复用就复用）；带体的请求走单请求短连接 ——
+            # 请求体边界是另一个状态机，不在这条路径上冒险。
+            req_has_body = False
+            cl = _hdr_get(headers, b"content-length")
+            if cl is not None:
+                try:
+                    req_has_body = int(cl.split(b",")[0]) > 0
+                except ValueError:
+                    req_has_body = True
+            if _hdr_get(headers, b"transfer-encoding") is not None:
+                req_has_body = True
+            if method in ("GET", "HEAD", "DELETE") and not req_has_body:
+                await http_keepalive_relay(ctx, reader, writer, s_reader,
+                                           s_writer, prof, method, target, headers)
+                return
             log_event("connect", f"HTTP 代理 {label}{path[:60]}")
             # 重写为源站请求，去代理头，单请求短连接（简单可靠）
             out = [f"{method} {path} HTTP/1.1".encode()]
@@ -1345,6 +1801,37 @@ async def flap_loop():
     except asyncio.CancelledError:
         G.gate_open = True
         raise
+
+
+# --------------------------------------------------------------------------
+# 空闲连接回收
+# --------------------------------------------------------------------------
+
+# 超过这么久没有任何数据流动的连接就拆掉。要远大于正常 keep-alive 空闲
+# （浏览器一般 <60s），免得误杀长轮询 / WebSocket / 挂起下载。
+TUNNEL_IDLE_SEC = 600
+# 多久扫一次。和 TUNNEL_IDLE_SEC 分开：扫描本身很便宜（遍历一个 dict），
+# 但真拆连接的时机精度由它决定，测试里把它压到 1s 才能快速观测回收行为。
+IDLE_REAP_INTERVAL = 60
+
+
+async def idle_reap_loop():
+    """定期回收「双方都不说话」的连接。
+
+    没有这个机制时：客户端发个请求行就晾着（请求头读取无超时），或 CONNECT 隧道
+    建好后双方都不发数据 —— 这些连接会一直挂着，占 ctx/writer/G.active 条目，
+    Android 端有 300s cleanup，Windows 端原来没有对应物。
+    """
+    while True:
+        await asyncio.sleep(IDLE_REAP_INTERVAL)
+        now = time.monotonic()
+        for ctx in list(G.contexts):
+            try:
+                if now - ctx.last_active > TUNNEL_IDLE_SEC:
+                    log_event("idle", f"空闲超时，断开：{ctx.label}")
+                    ctx.abort_all()
+            except Exception:
+                pass
 
 
 async def set_profile(prof, key):
@@ -2140,6 +2627,8 @@ async def serve(host, proxy_port, ctrl_port):
     G.proxy_host = host
     G.proxy_port = proxy_port
     G.proxy_server = proxy
+    asyncio.get_running_loop().create_task(idle_reap_loop())   # 空闲连接回收
+    asyncio.get_running_loop().create_task(_log_flush_loop())  # 缓冲日志定期落盘
     try:
         await start_sharing()         # 共享端口 + 局域网发现（失败不影响弱网本身）
     except Exception as e:
@@ -2161,6 +2650,7 @@ async def main():
 
     # 退出（含 Ctrl+C、被终止）时自动解除系统代理接管
     atexit.register(_auto_release_sysproxy)
+    atexit.register(flush_logs)          # 把缓冲里还没落盘的事件写下去
 
     # ---- 端口冲突处理：避免双击 EXE 时因为端口被占而直接崩溃退出 ----
     ctrl_port = args.ctrl_port

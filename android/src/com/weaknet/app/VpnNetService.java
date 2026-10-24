@@ -49,8 +49,40 @@ public class VpnNetService extends VpnService {
             new ConcurrentHashMap<String, TcpSession>();
     private final ConcurrentHashMap<String, UdpSession> udpSessions =
             new ConcurrentHashMap<String, UdpSession>();
+    /**
+     * 端口对直接映射缓存：端口对 -> 会话。
+     * 每个包都要查会话表，原来为此把 IP 转成字符串再拼 key（每包十几次分配）。
+     * 端口对相同但 IP 不同的流会抢同一个槽，命中后用 sameFlow() 核对 IP——
+     * 核不上就回落字符串 key 的慢路径，正确性不受影响。
+     * 两个数组共 512KB 引用，换热路径零分配，划算。
+     */
+    private final TcpSession[] tcpFast = new TcpSession[65536];
+    private final UdpSession[] udpFast = new UdpSession[65536];
     private ExecutorService exec;
     private Thread cleanThread;
+
+    /** 会话关闭时清槽。身份校验：槽位可能已被同端口对的新流占用，不能误清。 */
+    void clearTcpFast(int idx, TcpSession s) {
+        synchronized (tcpFast) {
+            if (tcpFast[idx] == s) tcpFast[idx] = null;
+        }
+    }
+
+    void clearUdpFast(int idx, UdpSession s) {
+        synchronized (udpFast) {
+            if (udpFast[idx] == s) udpFast[idx] = null;
+        }
+    }
+
+    /** 把任务投到共享线程池（下游读循环用：省每连接建线程，顺序天然保持） */
+    public void runOnPool(Runnable r, String name) {
+        ExecutorService e = exec;
+        if (e == null || e.isShutdown()) {
+            r.run();
+            return;
+        }
+        e.execute(r);
+    }
 
     public void onCreate() {
         super.onCreate();
@@ -257,6 +289,7 @@ public class VpnNetService extends VpnService {
         }, "tun-read");
         readThread.setDaemon(true);
         readThread.start();
+        dlog("readLoop thread started, tunIn=" + tunIn);
 
         cleanThread = new Thread(new Runnable() {
             public void run() {
@@ -297,53 +330,115 @@ public class VpnNetService extends VpnService {
         WeakNet.I.log("config", "VPN 接管已停止，流量恢复正常");
     }
 
+    /**
+     * 诊断开关：定位 tun 路径丢包问题时置 true，日志 tag=WeakNetDiag（logcat -s WeakNetDiag:I）。
+     * 正式包保持 false —— 每个进隧道的包会打 2-3 条日志，高频场景下既拖性能又刷爆日志缓冲。
+     * 排障时改为 true 重新构建即可，无需其他改动。
+     */
+    static final boolean DIAG = false;
+    private static final int DIAG_MAX = 100000;
+    private static final java.util.concurrent.atomic.AtomicInteger diagCount =
+            new java.util.concurrent.atomic.AtomicInteger();
+    private static void dlog(String s) {
+        if (!DIAG) return;
+        if (diagCount.incrementAndGet() > DIAG_MAX) return;
+        android.util.Log.i("WeakNetDiag", s);
+    }
+
     private void readLoop() {
         byte[] buf = new byte[32767];
         while (running) {
             try {
                 int n = tunIn.read(buf);
-                if (n <= 0) continue;
-                final byte[] pkt = Arrays.copyOf(buf, n);
-                handlePacket(pkt, n);
+                if (n <= 0) { dlog("readLoop: read returned " + n); continue; }
+                dlog("readLoop: read " + n + " bytes, first=0x"
+                        + Integer.toHexString(buf[0] & 0xFF));
+                // 直接传 buf：handlePacket 是同步调用，返回前 buf 不会被覆写；
+                // 需要跨线程保留的负载它在内部各自拷贝（TCP/UDP payload）。
+                // 原来外层先 Arrays.copyOf 一整包再处理，那份拷贝没有任何消费者。
+                handlePacket(buf, n);
             } catch (Exception e) {
+                dlog("readLoop: EXC " + e);
                 if (!running) break;
             }
         }
+        dlog("readLoop: EXIT running=" + running);
+    }
+
+    private TcpSession tcpFastGet(int idx) {
+        synchronized (tcpFast) {
+            return tcpFast[idx];
+        }
+    }
+
+    private void tcpFastSet(int idx, TcpSession s) {
+        synchronized (tcpFast) {
+            tcpFast[idx] = s;
+        }
+    }
+
+    private UdpSession udpFastGet(int idx) {
+        synchronized (udpFast) {
+            return udpFast[idx];
+        }
+    }
+
+    private void udpFastSet(int idx, UdpSession s) {
+        synchronized (udpFast) {
+            udpFast[idx] = s;
+        }
+    }
+
+    /** 从会话表摘除（仅当表里还是它自己，避免把同 4 元组的新会话误删） */
+    private void removeTcp(TcpSession s) {
+        TcpSession cur = tcpSessions.get(s.key);
+        if (cur == s) tcpSessions.remove(s.key);
     }
 
     private void handlePacket(final byte[] pkt, int len) {
         try {
-            if ((pkt[0] >> 4) != 4) return;                     // 仅处理 IPv4
+            if ((pkt[0] >> 4) != 4) { dlog("hp: not ipv4, first=0x" + Integer.toHexString(pkt[0] & 0xFF)); return; }  // 仅处理 IPv4
             int ihl = (pkt[0] & 0xF) * 4;
             int totalLen = IpUtil.u16(pkt, 2);
-            if (totalLen > len || totalLen <= ihl) return;
+            if (totalLen > len || totalLen <= ihl) { dlog("hp: bad totalLen=" + totalLen + " len=" + len + " ihl=" + ihl); return; }
             int frag = IpUtil.u16(pkt, 6);
-            if ((frag & 0x1FFF) != 0) return;                   // 分片包：丢弃
+            if ((frag & 0x1FFF) != 0) { dlog("hp: frag=0x" + Integer.toHexString(frag)); return; }     // 分片包：丢弃
             int proto = pkt[9] & 0xFF;
-            final String src = IpUtil.ipToString(pkt, 12);
-            final String dst = IpUtil.ipToString(pkt, 16);
+            dlog("hp: len=" + len + " totalLen=" + totalLen + " proto=" + proto);
 
             if (proto == 6) {
                 int off = ihl;
-                if (off + 20 > totalLen) return;
+                if (off + 20 > totalLen) { dlog("hp: tcp off+20>totalLen"); return; }
                 int srcPort = IpUtil.u16(pkt, off);
                 int dstPort = IpUtil.u16(pkt, off + 2);
                 long seq = IpUtil.u32(pkt, off + 4);
                 long ack = IpUtil.u32(pkt, off + 8);
                 int dataOff = ((pkt[off + 12] & 0xFF) >> 4) * 4;
-                if (dataOff < 20) return;
+                if (dataOff < 20) { dlog("hp: tcp dataOff=" + dataOff); return; }
                 int flags = pkt[off + 13] & 0x3F;
                 int window = IpUtil.u16(pkt, off + 14);
                 int payloadLen = totalLen - ihl - dataOff;
+                dlog("hp: TCP " + IpUtil.ipToString(pkt, 12) + ":" + srcPort + ">"
+                        + IpUtil.ipToString(pkt, 16) + ":" + dstPort
+                        + " flags=0x" + Integer.toHexString(flags) + " payloadLen=" + payloadLen);
                 byte[] payload = null;
                 if (payloadLen > 0) {
                     payload = new byte[payloadLen];
                     System.arraycopy(pkt, ihl + dataOff, payload, 0, payloadLen);
                 }
-                final String key = src + ":" + srcPort + ">" + dst + ":" + dstPort;
                 boolean syn = (flags & IpUtil.SYN) != 0;
                 boolean ackFlag = (flags & IpUtil.ACK) != 0;
-                TcpSession s = tcpSessions.get(key);
+                // 快路径：端口对直接映射，命中且 IP 核对得上就零分配拿到会话；
+                // 只有未命中才走「IP 字符串化 + 拼 key + 查 map」的慢路径
+                int idx = PortIdx.of(srcPort, dstPort);
+                TcpSession s = tcpFastGet(idx);
+                if (s == null || !s.sameFlow(pkt)) {
+                    String src = IpUtil.ipToString(pkt, 12);
+                    String dst = IpUtil.ipToString(pkt, 16);
+                    String key = src + ":" + srcPort + ">" + dst + ":" + dstPort;
+                    s = tcpSessions.get(key);
+                    if (s != null) tcpFastSet(idx, s);
+                }
                 if (s == null) {
                     if (syn && !ackFlag) {
                         int mss = 1460;
@@ -356,20 +451,29 @@ public class VpnNetService extends VpnService {
                             if (kind == 2 && optLen == 4) mss = IpUtil.u16(pkt, i + 2);
                             i += optLen;
                         }
+                        String src = IpUtil.ipToString(pkt, 12);
+                        String dst = IpUtil.ipToString(pkt, 16);
                         final TcpSession ns = new TcpSession(this, src, srcPort, dst, dstPort,
-                                key, seq, mss);
-                        tcpSessions.put(key, ns);
+                                src + ":" + srcPort + ">" + dst + ":" + dstPort, seq, mss);
+                        tcpSessions.put(ns.key, ns);
+                        tcpFastSet(idx, ns);
                         WeakNet.I.connTotal.incrementAndGet();
+                        dlog("hp: NEW TCP SESSION " + ns.key + " total=" + WeakNet.I.connTotal.get());
                         // 必须走会话自己的串行队列：保证 start() 先于后续数据包执行，
                         // 否则首批数据包会在上游连好之前到达，被当成「上游未就绪」全部丢弃。
                         ns.submit(new Runnable() {
                             public void run() {
                                 ns.start();
-                                if (ns.isClosed()) tcpSessions.remove(key);
+                                if (ns.isClosed()) removeTcp(ns);
                             }
                         });
                     } else {
                         // 未知会话：回 RST
+                        dlog("hp: RST unknown " + IpUtil.ipToString(pkt, 12) + ":" + srcPort + ">"
+                                + IpUtil.ipToString(pkt, 16) + ":" + dstPort
+                                + " flags=0x" + Integer.toHexString(flags));
+                        String src = IpUtil.ipToString(pkt, 12);
+                        String dst = IpUtil.ipToString(pkt, 16);
                         write(IpUtil.buildTcp(dst, dstPort, src, srcPort,
                                 0, (seq + 1) & 0xFFFFFFFFL, IpUtil.RST | IpUtil.ACK,
                                 null, 0, 0, null));
@@ -388,13 +492,12 @@ public class VpnNetService extends VpnService {
                 fs.submit(new Runnable() {
                     public void run() {
                         fs.onClientPacket(ff, fseq, lack, fp, fpl, fw);
-                        if (fs.isClosed()) tcpSessions.remove(key);
-                        else if ((ff & IpUtil.RST) != 0) tcpSessions.remove(key);
+                        if (fs.isClosed() || (ff & IpUtil.RST) != 0) removeTcp(fs);
                     }
                 });
             } else if (proto == 17) {
                 int off = ihl;
-                if (off + 8 > totalLen) return;
+                if (off + 8 > totalLen) { dlog("hp: udp off+8>totalLen"); return; }
                 int srcPort = IpUtil.u16(pkt, off);
                 int dstPort = IpUtil.u16(pkt, off + 2);
                 int ulen = IpUtil.u16(pkt, off + 4);
@@ -402,12 +505,20 @@ public class VpnNetService extends VpnService {
                 if (payloadLen < 0 || off + ulen > totalLen) return;
                 byte[] payload = new byte[payloadLen];
                 System.arraycopy(pkt, off + 8, payload, 0, payloadLen);
-                final String key = src + ":" + srcPort + ">" + dst + ":" + dstPort;
-                UdpSession us = udpSessions.get(key);
-                if (us == null) {
-                    us = new UdpSession(this, src, srcPort, dst, dstPort, key);
-                    udpSessions.put(key, us);
-                    WeakNet.I.connTotal.incrementAndGet();
+                int idx = PortIdx.of(srcPort, dstPort);
+                UdpSession us = udpFastGet(idx);
+                if (us == null || !us.sameFlow(pkt)) {
+                    String src = IpUtil.ipToString(pkt, 12);
+                    String dst = IpUtil.ipToString(pkt, 16);
+                    String key = src + ":" + srcPort + ">" + dst + ":" + dstPort;
+                    us = udpSessions.get(key);
+                    if (us == null) {
+                        UdpSession nus = new UdpSession(this, src, srcPort, dst, dstPort, key);
+                        UdpSession exist = udpSessions.putIfAbsent(key, nus);
+                        us = exist != null ? exist : nus;
+                        if (exist == null) WeakNet.I.connTotal.incrementAndGet();
+                    }
+                    udpFastSet(idx, us);
                 }
                 final UdpSession fus = us;
                 final byte[] fp = payload;
@@ -418,6 +529,7 @@ public class VpnNetService extends VpnService {
                 });
             }
         } catch (Exception e) {
+            dlog("hp: EXC " + e);
             // ignore
         }
     }
@@ -438,12 +550,18 @@ public class VpnNetService extends VpnService {
         }
         synchronized (writeLock) {
             try {
+                dlog("write: " + packet.length + "B proto=" + (packet[9] & 0xFF)
+                        + " dst=" + IpUtil.ipToString(packet, 16)
+                        + ":" + IpUtil.u16(packet, ihlOf(packet) + 2));
                 tunOut.write(packet);
             } catch (Exception e) {
+                dlog("write: EXC " + e);
                 // ignore
             }
         }
     }
+
+    private static int ihlOf(byte[] p) { return (p[0] & 0xF) * 4; }
 
     private static int payloadLength(byte[] packet) {
         try {

@@ -54,16 +54,28 @@ public class IpUtil {
         return (int) (~sum & 0xFFFF);
     }
 
-    /** 构造 IPv4 + TCP 报文 */
+    /** 构造 IPv4 + TCP 报文（IP 用字符串，供低频路径：会话建立、RST 等） */
     public static byte[] buildTcp(String src, int srcPort, String dst, int dstPort,
+                                  long seq, long ack, int flags,
+                                  byte[] payload, int payloadLen,
+                                  int window, Integer mss) {
+        return buildTcp(ipToBytes(src), srcPort, ipToBytes(dst), dstPort,
+                seq, ack, flags, payload, payloadLen, window, mss);
+    }
+
+    /**
+     * 构造 IPv4 + TCP 报文（IP 用字节数组）。
+     * 每个下行数据包、每个 ACK 都要构造报文，而一条连接的 IP 是固定的 ——
+     * 若走字符串版，每包都要 split + parseInt（约 10 个临时对象/包）。
+     * 热路径（TcpSession / UdpSession）一律缓存 byte[] 后调这个重载。
+     */
+    public static byte[] buildTcp(byte[] s, int srcPort, byte[] d, int dstPort,
                                   long seq, long ack, int flags,
                                   byte[] payload, int payloadLen,
                                   int window, Integer mss) {
         int tcpHeaderLen = 20 + (mss != null ? 4 : 0);
         int total = 20 + tcpHeaderLen + payloadLen;
         byte[] pkt = new byte[total];
-        byte[] s = ipToBytes(src);
-        byte[] d = ipToBytes(dst);
 
         pkt[0] = 0x45;
         pkt[1] = 0x00;
@@ -104,13 +116,17 @@ public class IpUtil {
         return pkt;
     }
 
-    /** 构造 IPv4 + UDP 报文（UDP 校验和置 0，IPv4 下合法） */
+    /** 构造 IPv4 + UDP 报文（IP 用字符串，供低频路径） */
     public static byte[] buildUdp(String src, int srcPort, String dst, int dstPort,
+                                  byte[] payload, int payloadLen) {
+        return buildUdp(ipToBytes(src), srcPort, ipToBytes(dst), dstPort, payload, payloadLen);
+    }
+
+    /** 构造 IPv4 + UDP 报文（IP 用字节数组；UDP 校验和置 0，IPv4 下合法） */
+    public static byte[] buildUdp(byte[] s, int srcPort, byte[] d, int dstPort,
                                   byte[] payload, int payloadLen) {
         int total = 20 + 8 + payloadLen;
         byte[] pkt = new byte[total];
-        byte[] s = ipToBytes(src);
-        byte[] d = ipToBytes(dst);
 
         pkt[0] = 0x45;
         pkt[1] = 0x00;

@@ -32,6 +32,15 @@ public class TcpSession {
     private OutputStream sout;
     private InputStream sin;
 
+    /** IP 的字节形式：每条连接的 IP 固定，构造时算一次，
+     *  免得每个下行包/每个 ACK 都 split + parseInt（IpUtil 的字符串重载） */
+    private final byte[] clientIpB;
+    private final byte[] remoteIpB;
+
+    /** 端口对直接映射缓存的下标（见 VpnNetService.tcpFast）。
+     *  关会话时按它清槽，避免持有已关闭会话的引用。 */
+    private final int fastIdx;
+
     /**
      * 本会话专属的**单线程串行**执行器。
      *
@@ -62,11 +71,24 @@ public class TcpSession {
         this.key = key;
         this.clientSeq = (clientIsn + 1) & 0xFFFFFFFFL;
         this.clientMss = Math.max(536, Math.min(mss, 1400));
+        this.clientIpB = IpUtil.ipToBytes(clientIp);
+        this.remoteIpB = IpUtil.ipToBytes(remoteIp);
+        this.fastIdx = PortIdx.of(clientPort, remotePort);
         ThreadPoolExecutor e = new ThreadPoolExecutor(
                 1, 1, 30L, TimeUnit.SECONDS, new LinkedBlockingQueue<Runnable>());
         e.allowCoreThreadTimeOut(true);
         this.serial = e;
         this.delay = new DelayLine("tcp-delay", 1 << 20);   // 积压超过 1MB 就回压
+    }
+
+    /**
+     * 这个包是否属于本会话（供端口对直接映射缓存校验）。
+     * 端口对折叠进 16 位槽位后，同 dstPort 的新连接会撞上残留会话，
+     * 所以 IP 和端口都必须核对得上才算数 —— 早期版本只核对 IP，
+     * 结果旧会话把新 SYN 当重传吞掉，客户端永远等不到 SYN-ACK。
+     */
+    boolean sameFlow(byte[] pkt) {
+        return FlowMatch.same(pkt, clientPort, remotePort, clientIpB, remoteIpB);
     }
 
     /**
@@ -143,7 +165,7 @@ public class TcpSession {
         long isn = (long) (Math.random() * 0xFFFFFFF) & 0xFFFFFFFFL;
         synchronized (this) {
             mySeq = (isn + 1) & 0xFFFFFFFFL;
-            vpn.write(IpUtil.buildTcp(remoteIp, remotePort, clientIp, clientPort,
+            vpn.write(IpUtil.buildTcp(remoteIpB, remotePort, clientIpB, clientPort,
                     isn, clientSeq, IpUtil.SYN | IpUtil.ACK, null, 0, 65535, clientMss));
         }
         ready = true;
@@ -227,67 +249,73 @@ public class TcpSession {
 
     /** 上游 → App：注入下行限速/卡顿后写回 tun */
     private void startDownstream() {
-        Thread t = new Thread(new Runnable() {
+        // 读循环放到服务的共享线程池：每条连接的读循环本来就是「一个任务跑到 EOF」，
+        // 放共享池不破坏每连接顺序，还能省掉每连接一次的线程创建（短连接密集时差距明显）。
+        // 空闲 keep-alive 连接仍会占住一个池线程（阻塞在读上），这是阻塞式 IO 的固有代价，
+        // 由 cleanup() 的 300s 空闲回收兜底。
+        vpn.runOnPool(new Runnable() {
             public void run() {
-                byte[] buf = new byte[1400];
-                try {
-                    while (!closed) {
-                        int n = sin.read(buf);
-                        if (n < 0) break;
-                        lastActive = System.currentTimeMillis();
-                        Profile p = WeakNet.I.profile;
-                        if (p.lossPct > 0 && Math.random() * 100 < p.lossPct) {
-                            sleep((long) (p.stallMs * (0.5 + Math.random())));
-                        }
-                        if (p.disconnectPct > 0 && Math.random() * 100 < p.disconnectPct) {
-                            WeakNet.I.log("disconnect", "模拟断连：" + remoteIp + ":" + remotePort);
-                            sendRst();
-                            close();
-                            return;
-                        }
-                        final byte[] data = new byte[n];
-                        System.arraycopy(buf, 0, data, 0, n);
-                        final long d = dueDelay(false);
-                        final long seqAt;
-                        synchronized (TcpSession.this) {
-                            if (closed) break;
-                            seqAt = mySeq;
-                            mySeq = (mySeq + n) & 0xFFFFFFFFL;
-                        }
-                        // 延迟到期后再写回 tun；队列积压时 post 会阻塞，
-                        // 于是这里停止读上游，背压自然传导到服务器，不会把内存撑爆
-                        delay.post(d, new Runnable() {
-                            public void run() {
-                                synchronized (TcpSession.this) {
-                                    if (closed) return;
-                                    vpn.write(IpUtil.buildTcp(remoteIp, remotePort, clientIp, clientPort,
-                                            seqAt, clientSeq, IpUtil.PSH | IpUtil.ACK,
-                                            data, data.length, 65535, null));
-                                }
-                            }
-                        }, n);
-                    }
-                } catch (Exception e) {
-                    // ignore
-                }
-                // FIN 同样要排在下行数据之后：上游关了之后，队列里可能还有数据没送达。
-                // 直接发 FIN 再 close() 会把这些数据连同队列一起清掉，客户端收不全。
-                delay.post(dueDelay(false), new Runnable() {
-                    public void run() {
-                        synchronized (TcpSession.this) {
-                            if (!closed) {
-                                vpn.write(IpUtil.buildTcp(remoteIp, remotePort, clientIp, clientPort,
-                                        mySeq, clientSeq, IpUtil.FIN | IpUtil.ACK, null, 0, 65535, null));
-                                mySeq = (mySeq + 1) & 0xFFFFFFFFL;
-                            }
-                        }
-                        close();
-                    }
-                }, 0);
+                downstreamLoop();
             }
         }, "tcp-down");
-        t.setDaemon(true);
-        t.start();
+    }
+
+    private void downstreamLoop() {
+        byte[] buf = new byte[1400];
+        try {
+            while (!closed) {
+                int n = sin.read(buf);
+                if (n < 0) break;
+                lastActive = System.currentTimeMillis();
+                Profile p = WeakNet.I.profile;
+                if (p.lossPct > 0 && Math.random() * 100 < p.lossPct) {
+                    sleep((long) (p.stallMs * (0.5 + Math.random())));
+                }
+                if (p.disconnectPct > 0 && Math.random() * 100 < p.disconnectPct) {
+                    WeakNet.I.log("disconnect", "模拟断连：" + remoteIp + ":" + remotePort);
+                    sendRst();
+                    close();
+                    return;
+                }
+                final byte[] data = new byte[n];
+                System.arraycopy(buf, 0, data, 0, n);
+                final long d = dueDelay(false);
+                final long seqAt;
+                synchronized (TcpSession.this) {
+                    if (closed) break;
+                    seqAt = mySeq;
+                    mySeq = (mySeq + n) & 0xFFFFFFFFL;
+                }
+                // 延迟到期后再写回 tun；队列积压时 post 会阻塞，
+                // 于是这里停止读上游，背压自然传导到服务器，不会把内存撑爆
+                delay.post(d, new Runnable() {
+                    public void run() {
+                        synchronized (TcpSession.this) {
+                            if (closed) return;
+                            vpn.write(IpUtil.buildTcp(remoteIpB, remotePort, clientIpB, clientPort,
+                                    seqAt, clientSeq, IpUtil.PSH | IpUtil.ACK,
+                                    data, data.length, 65535, null));
+                        }
+                    }
+                }, n);
+            }
+        } catch (Exception e) {
+            // ignore
+        }
+        // FIN 同样要排在下行数据之后：上游关了之后，队列里可能还有数据没送达。
+        // 直接发 FIN 再 close() 会把这些数据连同队列一起清掉，客户端收不全。
+        delay.post(dueDelay(false), new Runnable() {
+            public void run() {
+                synchronized (TcpSession.this) {
+                    if (!closed) {
+                        vpn.write(IpUtil.buildTcp(remoteIpB, remotePort, clientIpB, clientPort,
+                                mySeq, clientSeq, IpUtil.FIN | IpUtil.ACK, null, 0, 65535, null));
+                        mySeq = (mySeq + 1) & 0xFFFFFFFFL;
+                    }
+                }
+                close();
+            }
+        }, 0);
     }
 
     /**
@@ -300,7 +328,7 @@ public class TcpSession {
             public void run() {
                 synchronized (TcpSession.this) {
                     if (closed) return;
-                    vpn.write(IpUtil.buildTcp(remoteIp, remotePort, clientIp, clientPort,
+                    vpn.write(IpUtil.buildTcp(remoteIpB, remotePort, clientIpB, clientPort,
                             mySeq, ackSeq, IpUtil.ACK, null, 0, 65535, null));
                 }
             }
@@ -310,7 +338,7 @@ public class TcpSession {
     private void sendRst() {
         synchronized (this) {
             if (closed) return;
-            vpn.write(IpUtil.buildTcp(remoteIp, remotePort, clientIp, clientPort,
+            vpn.write(IpUtil.buildTcp(remoteIpB, remotePort, clientIpB, clientPort,
                     mySeq, clientSeq, IpUtil.RST | IpUtil.ACK, null, 0, 0, null));
         }
     }
@@ -323,6 +351,7 @@ public class TcpSession {
     void close() {
         if (closed) return;
         closed = true;
+        vpn.clearTcpFast(fastIdx, this);   // 清掉端口对快路径槽位（身份校验，不会误清后来者）
         closeSocket();
         // 停掉串行队列：丢弃排队的上行包，并唤醒正在等令牌/延迟的线程
         try {

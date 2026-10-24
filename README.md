@@ -9,22 +9,22 @@
 
 ---
 
-## 下载（Release v1.1.5）
+## 下载（Release v1.1.6）
 
 > Windows 端 `WeakNet.exe` 以 GUI 子系统打包，双击直接出界面，**不会弹出 DOS 黑框**；Android 端安装 `WeakNet.apk` 即可。
 
 | 文件 | 平台 | 大小 | SHA-256 |
 | --- | --- | --- | --- |
-| [`WeakNet.exe`](https://github.com/45944831/weaknet/releases/latest/download/WeakNet.exe) | Windows（GUI 版，免装 Python） | 10.2 MB | `03947224…03a8` |
-| [`WeakNet.apk`](https://github.com/45944831/weaknet/releases/latest/download/WeakNet.apk) | Android 7.0+ | 101 KB | `f5a0c5cd…3094` |
+| [`WeakNet.exe`](https://github.com/45944831/weaknet/releases/latest/download/WeakNet.exe) | Windows（GUI 版，免装 Python） | 10.26 MB | `43f478ae…abb13` |
+| [`WeakNet.apk`](https://github.com/45944831/weaknet/releases/latest/download/WeakNet.apk) | Android 7.0+ | 101 KB | `9169e0be…1de05` |
 
 发布页：https://github.com/45944831/weaknet/releases/latest
 
 完整校验值：
 
 ```
-03947224b2d1b1ed5a69777990d3e5f2d62bdcc74f8937897d98f353ec1d03a8  WeakNet.exe
-f5a0c5cd51a3ca84cfad57bd792b0e0907fad771a0d730545acd915392ba3094  WeakNet.apk
+43f478ae4316e5b777578982bcfedca644edd08ef40e909e10c6dbb6a8eabb13  WeakNet.exe
+9169e0bedbe41d2f7797d9b418ddbd187a836052696efe4c0490aeb17cc1de05  WeakNet.apk
 ```
 
 > 若 GitHub 下载慢或打不开，可在链接前加 `https://ghproxy.net/` 走镜像加速，例如
@@ -323,6 +323,10 @@ weaknet/
 | **`/api/run` 布尔解析（v1.1.5 修复）** | 修复前 `bool("false") == True`，传字符串 `"false"` 会把「停止限速」误执行为「开启」。修复后只认真正的布尔值，非法值原样拒绝，复测通过 |
 | **APK `/api/status` 无响应（v1.1.5 修复）** | 旧包 `/api/status` 稳定返回空响应且异常被 `run()` 的 catch 吞掉。已加兜底：异常落 logcat + 体现在响应 `error` 字段；同时补齐 GET `/api/run` 查询开关与 `/api/me` 身份接口（与 Windows 端契约一致），APK 控制接口复测 16/16 |
 | **v1.1.5 全量回归** | Windows 引擎 44 项（D1/D2 转通过、无回归）、真机极端场景（完全断网 / 黑洞 / DNS 故障）无回归、新 EXE 冒烟 + 4G 21.7 Mbps 全过；EXE 10.2 MB / APK 101 KB 重新打包 |
+| **数据面性能优化（v1.1.6）** | 13 项热路径优化全部落地：Android 端每包 IP 字符串解析/冗余拷贝/会话 key 拼接归零、DelayLine 空转唤醒消除、CtrlServer 固定线程池；Windows 端令牌桶睡眠移出锁（停止响应 142ms）、nap 等满 remain、PID 快照缓存、HTTP keep-alive 中继、请求头 30s 超时 + 空闲回收、日志 4MB 轮转。弱网语义零变化 |
+| **tun 路径两个回退缺陷（v1.1.6 修复）** | 优化引入的 `portIdx()` 下标越界（异常被 catch 吞掉，SYN 全丢）与 `sameFlow()` 漏核端口（新连接撞残留会话挂死），真机测试发现并修复；配套 1717 万组端口组合 + 363 例四元组穷举单测 |
+| **Windows 引擎两个真实缺陷（v1.1.6 修复）** | `_LogSink` 传 str 路径时日志静默不轮转（AttributeError 被吞）；半截请求头的连接永不回收关闭（ConnCtx 登记时序），修复后 3.0s 回收 |
+| **v1.1.6 全量回归** | 单测 21 + APK 接口 16 + ProxyServer 数据面 11 + tun 数据面 6 + USB 代理路径 7 = **61 项全过**，全部跑在本次构建包上（真机 OnePlus PEYM00 / Android 13）；EXE 冒烟 5/5、内嵌引擎与源码逐代码对象比对一致 |
 
 ---
 

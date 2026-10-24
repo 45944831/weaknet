@@ -70,8 +70,18 @@ mkdir -p build/classes build/dex
 
 echo "==> 1. javac"
 rm -rf build/classes && mkdir -p build/classes
+# 注意：不能把 javac 直接管到 head——javac 的告警输出含非 UTF-8 字节时 head 会判定
+# 「二进制输入」而整段跳过，PIPESTATUS 才是真实退出码；早期版本因此把编译失败的
+# 缺类 dex 打进了 APK，装到机器上必崩（ClassNotFoundException）。
 "$JAVAC" -encoding UTF-8 -source 8 -target 8 \
-  -bootclasspath "$ANDROID_JAR" -d build/classes src/com/weaknet/app/*.java 2>&1 | head -30
+  -bootclasspath "$ANDROID_JAR" -d build/classes src/com/weaknet/app/*.java > build/javac.log 2>&1
+javac_rc=$?
+iconv -f UTF-8 -t UTF-8 -c build/javac.log 2>/dev/null | head -30 || head -30 build/javac.log
+[ "$javac_rc" -eq 0 ] || { echo "错误：javac 失败 (rc=$javac_rc)，详见 build/javac.log"; exit 1; }
+# 关键类缺一个就退出，杜绝「缺类 dex 打进 APK」
+for c in WeakNet VpnNetService TcpSession UdpSession ProxyServer CtrlServer MainActivity; do
+  [ -f "build/classes/com/weaknet/app/$c.class" ] || { echo "错误：缺少 $c.class"; exit 1; }
+done
 
 echo "==> 2. d8 -> dex"
 rm -rf build/dex && mkdir -p build/dex

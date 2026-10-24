@@ -11,6 +11,7 @@ import java.net.ServerSocket;
 import java.net.Socket;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.Executors;
 
 /** 控制 HTTP 服务：只提供 /api/*（界面改为 App 原生 MainActivity） */
 public class CtrlServer implements Runnable {
@@ -21,6 +22,16 @@ public class CtrlServer implements Runnable {
     private final android.content.Context ctx;
     private ServerSocket server;
     private volatile boolean stopped = false;
+    /** 控制请求处理池：GUI 每 500ms poll 一次 /api/status，来一个请求建一个线程
+     *  纯属浪费；控制接口都是低频小请求，4 个线程足够（多客户端同时 poll 也不堵） */
+    private final java.util.concurrent.ExecutorService pool =
+            Executors.newFixedThreadPool(4, new java.util.concurrent.ThreadFactory() {
+                public Thread newThread(Runnable r) {
+                    Thread t = new Thread(r, "ctrl-req");
+                    t.setDaemon(true);
+                    return t;
+                }
+            });
 
     public CtrlServer(int port, ProxyServer proxy, android.content.Context ctx) {
         this.port = port;
@@ -43,9 +54,7 @@ public class CtrlServer implements Runnable {
         while (!stopped) {
             try {
                 Socket c = server.accept();
-                Thread t = new Thread(new Handler(c), "ctrl-req");
-                t.setDaemon(true);
-                t.start();
+                pool.execute(new Handler(c));
             } catch (IOException e) {
                 if (stopped) break;
             }
@@ -59,6 +68,7 @@ public class CtrlServer implements Runnable {
         } catch (Exception e) {
             // ignore
         }
+        pool.shutdownNow();
     }
 
     class Handler implements Runnable {
