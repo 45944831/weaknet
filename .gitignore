@@ -2,7 +2,10 @@
 android/build/
 android/_cm/
 android/_cm_check/
-android/_jw/
+# _jw/ 只有 out/ 是编译产物；com/ 下是手写回归单测（拦过 PortIdx 越界、
+# FlowMatch 漏核端口两个上线级缺陷），必须入库，不能当中间产物忽略掉
+android/_jw/out/
+android/_jw/out2/
 android/_tmpcls/
 android/_tmpdex/
 _build*/
