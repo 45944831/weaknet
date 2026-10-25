@@ -410,6 +410,13 @@ public class CtrlServer implements Runnable {
                 Profile restore = null;
                 if (enable) {
                     restore = buildKeyProfile(WeakNet.I.presetKey);   // 内置 / 自定义场景
+                    // presetKey 为 "custom" 时 buildKeyProfile 认不出来（它不是内置 key，
+                    // 也不是 u:<id>），此时当前 profile 就是用户刚设的那份参数，必须原样
+                    // 保留。若回落到 lastProfile，用户把参数全调成 0（或只调了 stall 这类
+                    // 不算 limits 的字段）再点开启，参数会被上一次的场景整个覆盖回去。
+                    if (restore == null && "custom".equals(WeakNet.I.presetKey)) {
+                        restore = WeakNet.I.profile;
+                    }
                     if (restore == null) restore = WeakNet.I.lastProfile;
                     if (restore == null) restore = new Profile();
                 }

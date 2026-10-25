@@ -144,14 +144,23 @@ public class Pipe {
             if (rate <= 0) return;
             refill();
             tokens -= n;                    // 预扣（允许为负）
-            while (tokens < 0) {
-                if (rate <= 0) {            // 限速被取消：立刻放行，避免除零与永久等待
-                    tokens = 0;
-                    return;
+            try {
+                while (tokens < 0) {
+                    if (rate <= 0) {        // 限速被取消：立刻放行，避免除零与永久等待
+                        tokens = 0;
+                        return;
+                    }
+                    long ms = (long) Math.ceil((-tokens) / rate * 1000);
+                    wait(Math.max(1, Math.min(ms, 250)));
+                    refill();
                 }
-                long ms = (long) Math.ceil((-tokens) / rate * 1000);
-                wait(Math.max(1, Math.min(ms, 250)));
-                refill();
+            } catch (InterruptedException ie) {
+                // 补偿预扣：本次没等到令牌就放行了，这笔账不能留在桶里。
+                // 否则会话关闭打断 worker 线程时，每次中断都留下一笔"幽灵欠债"，
+                // 并发连接多、中断多，欠债会累积到远超实际流量的规模 ——
+                // 实测 8 并发后单连接 256KB 卡 90s 以上、要几分钟才自然还清。
+                tokens = Math.min(tokens + n, rate);
+                throw ie;
             }
         }
 

@@ -410,7 +410,12 @@ public class MainActivity extends Activity {
     /** 施加限速：按当前 presetKey 复原场景；没有就用最后一次生效的场景 */
     private void applyLimitOn() {
         Profile restore = profileOf(WeakNet.I.presetKey);
-        if (restore == null || !restore.hasLimits()) {
+        if (restore == null && "custom".equals(WeakNet.I.presetKey)) {
+            // 自定义参数：当前 profile 就是用户刚拖出来的那份，原样保留。
+            // 不能走下面的 lastProfile 回落——参数全 0（或只有 stall 之类不算 limits
+            // 的字段）时 hasLimits() 为 false，会把用户刚设的参数整个换成上次的场景。
+            restore = WeakNet.I.profile;
+        } else if (restore == null || !restore.hasLimits()) {
             if (WeakNet.I.lastProfile != null) restore = WeakNet.I.lastProfile;
         }
         if (restore == null) {
