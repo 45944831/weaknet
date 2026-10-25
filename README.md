@@ -9,14 +9,14 @@
 
 ---
 
-## 下载（Release v1.1.6）
+## 下载（Release v1.1.7）
 
 > Windows 端 `WeakNet.exe` 以 GUI 子系统打包，双击直接出界面，**不会弹出 DOS 黑框**；Android 端安装 `WeakNet.apk` 即可。
 
 | 文件 | 平台 | 大小 | SHA-256 |
 | --- | --- | --- | --- |
 | [`WeakNet.exe`](https://github.com/45944831/weaknet/releases/latest/download/WeakNet.exe) | Windows（GUI 版，免装 Python） | 10.26 MB | `43f478ae…abb13` |
-| [`WeakNet.apk`](https://github.com/45944831/weaknet/releases/latest/download/WeakNet.apk) | Android 7.0+ | 101 KB | `9169e0be…1de05` |
+| [`WeakNet.apk`](https://github.com/45944831/weaknet/releases/latest/download/WeakNet.apk) | Android 7.0+ | 101 KB | `7cffe649…6f0928` |
 
 发布页：https://github.com/45944831/weaknet/releases/latest
 
@@ -24,8 +24,10 @@
 
 ```
 43f478ae4316e5b777578982bcfedca644edd08ef40e909e10c6dbb6a8eabb13  WeakNet.exe
-9169e0bedbe41d2f7797d9b418ddbd187a836052696efe4c0490aeb17cc1de05  WeakNet.apk
+7cffe6492c2142066661ebda3bda2b3fc3752d3976a6362de757bdc5e56f0928  WeakNet.apk
 ```
+
+> v1.1.7 的修复全在 Android 端，`WeakNet.exe` 与 v1.1.6 二进制完全相同（SHA-256 一致），Windows 用户无需重新下载。
 
 > 若 GitHub 下载慢或打不开，可在链接前加 `https://ghproxy.net/` 走镜像加速，例如
 > `https://ghproxy.net/https://github.com/45944831/weaknet/releases/latest/download/WeakNet.exe`
@@ -327,6 +329,10 @@ weaknet/
 | **tun 路径两个回退缺陷（v1.1.6 修复）** | 优化引入的 `portIdx()` 下标越界（异常被 catch 吞掉，SYN 全丢）与 `sameFlow()` 漏核端口（新连接撞残留会话挂死），真机测试发现并修复；配套 1717 万组端口组合 + 363 例四元组穷举单测 |
 | **Windows 引擎两个真实缺陷（v1.1.6 修复）** | `_LogSink` 传 str 路径时日志静默不轮转（AttributeError 被吞）；半截请求头的连接永不回收关闭（ConnCtx 登记时序），修复后 3.0s 回收 |
 | **v1.1.6 全量回归** | 单测 21 + APK 接口 16 + ProxyServer 数据面 11 + tun 数据面 6 + USB 代理路径 7 = **61 项全过**，全部跑在本次构建包上（真机 OnePlus PEYM00 / Android 13）；EXE 冒烟 5/5、内嵌引擎与源码逐代码对象比对一致 |
+| **并发后连接长时间卡死（v1.1.7 修复）** | `Pipe.Bucket.consume()` 先预扣令牌再等待，会话关闭时 `worker.interrupt()` 打断等待，被 `catch (Exception)` 吞掉但**预扣的令牌没归还**——每中断一次留一笔"幽灵欠债"。8 并发后欠债累积到远超实际流量，单连接 256KB 卡 90s+。修复：`catch (InterruptedException)` 中补偿预扣（上限不超过桶容量）后原样抛出。实测同一负载下 256KB **2.87s** 完成 |
+| **自定义参数被上次场景覆盖（v1.1.7 修复）** | `hasLimits()` 对全 0 参数返回 false → `lastProfile` 不更新；`presetKey="custom"` 时 `buildKeyProfile()`/`profileOf()` 认不出该 key 而回落 `lastProfile`，把用户刚设的参数整个换掉（参数全 0 或只调 stall 这类非 limits 字段时触发）。修复：`custom` 时当前 profile 原样保留，`CtrlServer` 与 `MainActivity` 两处同源缺陷一并修 |
+| **v1.1.7 全量回归** | 真机深度测试 **149 项全过**：APK 接口 16 + 边界健壮性 20 + tun 数据面 13 + USB 代理深度 8 + 并发切换长稳 11 + Windows 引擎 44 + EXE 冒烟功能 12 + Python 单测 13 + Java 单测 12。精度：tun 延迟 1490/1400、830/800ms，限速 523/512、24094/20000、270/256kbps；USB 延迟 1220/1200ms，限速 509/512、2005/2000、252/256kbps |
+| **v1.1.7 已知偏差** | 并发总带宽偏高：设定 2000kbps 时单连接 1.06~1.13x（精确）、4 并发 1.15x、8 并发 1.29x，根因未定位；控制接口不校验 HTTP 方法（`DELETE /api/status` 返回 200 而非 405）。均不影响功能正确性 |
 
 ---
 
