@@ -139,7 +139,11 @@ class App:
         sw, sh = root.winfo_screenwidth(), root.winfo_screenheight()
         wh = min(860, sh - 90)
         root.geometry(f"880x{wh}+{max(0, (sw - 880) // 2)}+{max(0, (sh - 60 - wh) // 2)}")
-        root.minsize(820, min(780, sh - 120))
+        # 最小高度不再卡在 780：左栏现在能滚动，窗口做矮一点也能把参数全部翻到。
+        # 但也不能压太低 —— 右栏是「USB 卡（约 220px，不可压缩）+ 日志（吃剩余）」，
+        # 窗口矮到 620 时 body 只剩 281px，日志会被挤成 1px 完全看不见。
+        # 700 是让日志至少还剩 4~5 行的下限。
+        root.minsize(820, min(700, sh - 120))
 
         self._build_header()
         # 接管范围通栏放在最顶部：它是「这次测谁」的开关，范围不对下面所有参数都白调，
@@ -149,8 +153,29 @@ class App:
         # 右栏固定宽度：日志按行显示，太宽反而每行都剩一大截空白。
         body = tk.Frame(root, bg=BG)
         body.pack(fill="both", expand=True)
-        self.col_left = tk.Frame(body, bg=BG)
-        self.col_left.pack(side="left", fill="both", expand=True)
+        # 左栏放进可滚动容器。预设 + 自定义参数两张卡叠起来约 780px 高，而窗口
+        # 在小屏上留给 body 的只有 400 出头 —— 原来这里是裸 Frame，没有滚动条，
+        # 底部几个参数（断网间隔 / 断网时长 / 保存栏）被窗口下边缘直接裁掉，
+        # 滚轮和拖拽都翻不出来，用户看到的就是「参数显示不全、没法下滑」。
+        left_wrap = tk.Frame(body, bg=BG)
+        left_wrap.pack(side="left", fill="both", expand=True)
+        self._left_sb_busy = False
+        self.left_canvas = tk.Canvas(left_wrap, bg=BG, bd=0, highlightthickness=0,
+                                     takefocus=0, yscrollincrement=1)
+        self.left_sb = tk.Scrollbar(left_wrap, orient="vertical", width=12,
+                                    command=self.left_canvas.yview)
+        self.left_canvas.configure(yscrollcommand=self._left_scroll_set)
+        self.left_canvas.pack(side="left", fill="both", expand=True)
+        self.left_sb.pack(side="right", fill="y")
+        self.col_left = tk.Frame(self.left_canvas, bg=BG)
+        self.left_win = self.left_canvas.create_window((0, 0), window=self.col_left,
+                                                       anchor="nw")
+        self.col_left.bind("<Configure>", self._left_inner_resize)
+        self.left_canvas.bind("<Configure>", self._left_canvas_resize)
+        # 滚轮：用 bind_all 是因为左栏里的控件是动态生成的（预设按钮、自定义场景
+        # 每次刷新都重画），逐个绑定会漏。bind_all 在控件自身的绑定之后才触发，
+        # 处理前先看事件源是不是左栏的后代，右栏日志和范围列表的滚动不受影响。
+        self.left_canvas.bind_all("<MouseWheel>", self._left_wheel, add="+")
         self.col_right = tk.Frame(body, bg=BG, width=340)
         self.col_right.pack(side="left", fill="y")
         self.col_right.pack_propagate(False)      # 锁住宽度，窗口变宽时只让左栏长
@@ -177,6 +202,141 @@ class App:
         inner = tk.Frame(card, bg=CARD)
         inner.pack(fill="both", expand=True, padx=12, pady=10)
         return inner
+
+    # ---------------- 左栏滚动 ----------------
+    #
+    # 左栏是 Canvas + 内嵌 Frame 的可滚动区。三个必须处理的点：
+    #   1. 内容尺寸变了要重算 scrollregion，否则折叠/展开卡片后范围还是旧的；
+    #   2. 窗口变宽时内层要跟着变宽，否则卡片右侧留一条空白；
+    #   3. 内容装得下就把滚动条收起来，装不下才出现（常驻滚动条在小屏上很扎眼）。
+
+    def _left_scroll_set(self, first, last):
+        """滚动条位置 + 按需显隐。显隐本身会触发一次 Configure，
+        所以用一个重入标记挡住，避免自己调自己。"""
+        try:
+            self.left_sb.set(first, last)
+        except Exception:
+            return
+        if self._left_sb_busy:
+            return
+        need = not (float(first) <= 0.001 and float(last) >= 0.999)
+        shown = bool(self.left_sb.winfo_manager())
+        if need == shown:
+            return
+        self._left_sb_busy = True
+        try:
+            if need:
+                self.left_sb.pack(side="right", fill="y")
+            else:
+                # 只收起滚动条，不主动 yview_moveto(0)：内容缩到装得下时
+                # Tk 本来就会把视图夹回顶部，这里再拉一次反而危险 ——
+                # 内容高度短暂波动（按钮重画）会让视图被莫名甩回开头。
+                self.left_sb.pack_forget()
+        except Exception:
+            pass
+        finally:
+            self._left_sb_busy = False
+
+    def _left_inner_resize(self, _event=None):
+        """内容尺寸变化 → 更新可滚动范围（折叠卡片、增删自定义场景都会触发）"""
+        try:
+            self.left_canvas.configure(scrollregion=self.left_canvas.bbox("all"))
+        except Exception:
+            pass
+
+    def _left_canvas_resize(self, event):
+        """可视区变宽 → 内层同步变宽，卡片横向撑满"""
+        try:
+            self.left_canvas.itemconfigure(self.left_win, width=event.width)
+        except Exception:
+            pass
+
+    def _left_hit(self, w, allow_canvas=True):
+        """w 是否属于左栏滚动区。
+
+        按「控件是不是左栏的后代」判断，而不是比对屏幕坐标：
+        坐标法在弹窗盖住主窗口时会误判，而且测试里没法模拟指针位置。
+        """
+        try:
+            while w is not None:
+                if w is self.col_left:
+                    return True
+                if allow_canvas and w is self.left_canvas:
+                    return True
+                w = w.master
+        except Exception:
+            return False
+        return False
+
+    def _left_wheel(self, event):
+        """滚轮翻左栏。
+
+        只有指针真的落在左栏才处理：右栏的日志（Text）和接管范围列表
+        （Listbox）都有各自的滚动，被这里抢走就没法滚了。
+        """
+        if not self._left_hit(getattr(event, "widget", None)):
+            return
+        try:
+            if not self.left_canvas.winfo_ismapped():
+                return
+        except Exception:
+            return
+        delta = getattr(event, "delta", 0) or 0
+        # Windows 一格 120；触控板 / 高精度滚轮会给更小的值，按比例折算成像素
+        # （canvas 的 yscrollincrement 设成 1，"units" 就等于像素）
+        step = int(-delta / 120.0 * 60)
+        if not step:
+            return
+        try:
+            self.left_canvas.yview_scroll(step, "units")
+        except Exception:
+            pass
+
+    def _left_wheel_break(self, event):
+        """给数字框用：滚轮落在 Spinbox 上时不要改数值，改成翻页。
+
+        ttk.Spinbox 自带「滚轮 ±1」的类绑定，翻页时手一滑就把参数改了，
+        而且改完没提示 —— 这类静默改参数比翻不动页更难受。
+        """
+        self._left_wheel(event)
+        return "break"
+
+    def _in_left_col(self, w):
+        """w 是否在左栏内容里（不含 canvas 本身）—— 只有它们才需要滚进可视区"""
+        return self._left_hit(w, allow_canvas=False)
+
+    def _left_ensure_visible(self, w):
+        """把左栏里的某个控件滚进可视区。
+
+        展开「自定义参数」时内容是在折叠条下方长出来的，如果正好贴着窗口
+        下边缘，点完看起来毫无反应 —— 所以展开后把它整块带进视野。
+        """
+        if not self._in_left_col(w):
+            return
+        try:
+            self.left_canvas.update_idletasks()
+            top = w.winfo_rooty() - self.col_left.winfo_rooty()
+            bottom = top + w.winfo_height()
+            view_h = self.left_canvas.winfo_height()
+            total = self.col_left.winfo_height()
+            if total <= view_h or view_h <= 1:
+                return
+            first, last = self.left_canvas.yview()
+            cur_top, cur_bottom = first * total, last * total
+            if top >= cur_top and bottom <= cur_bottom:
+                return                              # 已经整块可见
+            if bottom - top > view_h:
+                # 比可视区还高（展开后的自定义参数就是这种）：对齐顶部，
+                # 让用户从第一行参数开始看，而不是一展开就跳到最底下的保存栏
+                target = top
+            elif bottom > cur_bottom:
+                target = bottom - view_h
+            else:
+                target = top
+            target = max(0, min(target, total - view_h))
+            self.left_canvas.yview_moveto(target / float(total))
+        except Exception:
+            pass
 
     def _card_fold(self, parent, title, collapsed=True):
         """可折叠卡片：标题行放在卡片里，收起时是一张只有标题的卡片（标准折叠条样式）。
@@ -212,6 +372,9 @@ class App:
                 inner.pack(fill="both", expand=True, padx=12, pady=(0, 10))
                 arrow.config(text="▾")
                 hint.config(text="（点击收起）")
+                # 展开后的内容是在折叠条下方长出来的，贴着窗口下边缘时点完
+                # 看不出任何变化 —— 等布局算完再把它整块滚进视野
+                self.root.after(20, lambda: self._left_ensure_visible(card))
 
         for w in [head] + list(head.winfo_children()):
             w.bind("<Button-1>", toggle)
@@ -336,6 +499,9 @@ class App:
             sp = ttk.Spinbox(cell, from_=0, to=top, width=8, textvariable=v,
                              font=FONT, format="%.1f")
             sp.pack(side="left")
+            # 滚轮落在数字框上时翻页而不是改数值：ttk.Spinbox 默认滚轮 ±1，
+            # 翻页时手一滑就把参数静默改了，比翻不动更坑
+            sp.bind("<MouseWheel>", self._left_wheel_break)
             tk.Label(cell, text=unit, font=FONT, bg=CARD, fg=MUTED).pack(side="left", padx=(4, 0))
             self.vars[key] = v
 
