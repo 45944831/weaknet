@@ -166,6 +166,9 @@ class App:
         self.notes_win = None                 # 场景说明二级窗口
         self.notes_txt = None                 # 场景说明的正文控件（切场景时重画）
         self._notes_key = None                # 上次画的时候选中的场景
+        self.param_win = None                 # 单个参数的「！」说明小窗
+        self._param_key = None                # 小窗当前讲的是哪个参数
+        self.param_btns = {}                  # 参数 key -> 「！」按钮
         # USB 手机弱网：adb 命令最长 20 秒，一律丢后台线程，
         # 结果经这个队列回到主线程（tkinter 不是线程安全的，绝不能在子线程里直接碰控件）
         self.usb_q = queue.Queue()
@@ -394,9 +397,12 @@ class App:
         except Exception:
             pass
 
-    def _card_fold(self, parent, title, collapsed=True):
+    def _card_fold(self, parent, title, collapsed=True, on_toggle=None):
         """可折叠卡片：标题行放在卡片里，收起时是一张只有标题的卡片（标准折叠条样式）。
         返回内容容器（与 _card 一致）。
+
+        on_toggle：展开 / 收起时先回调一次。给「参数说明」小窗用 —— 卡片一收起，
+        里面那些「！」按钮就跟着消失，飘在外面的说明窗得一起关掉。
 
         注意：tkinter 的事件不会自动冒泡到父控件（bindtags 里没有父 widget），
         所以 head 和它每个子控件都要各自绑定一次；但也绝不能重复绑定同一控件，
@@ -418,6 +424,11 @@ class App:
         inner = tk.Frame(card, bg=CARD)
 
         def toggle(_event=None):
+            if on_toggle is not None:
+                try:
+                    on_toggle()
+                except Exception:
+                    pass
             # 用 winfo_manager() 而不是 winfo_ismapped()：前者只反映「有没有被 pack」，
             # 不受窗口当前是否可见影响，判断更准确（自检时窗口可能尚未显示）
             if inner.winfo_manager():
@@ -541,30 +552,39 @@ class App:
 
     def _build_custom(self):
         # 预设场景已覆盖绝大多数用例，自定义参数默认收起，需要细调时点标题展开
+        # on_toggle：卡片收起时把「参数说明」小窗一起关掉 —— 说明的对象都看不见了，
+        # 还留一个窗口飘在旁边没有意义
         box = self._card_fold(self.col_left,
                               "自定义参数（默认收起 · 点「应用」生效 · 0 表示不限制/关闭）",
-                              collapsed=True)
+                              collapsed=True, on_toggle=self.close_param_note)
         # 记下卡片本体，便于自检与外部展开/收起
         self.custom_card = self.root.nametowidget(box.winfo_parent())
         self.custom_toggle = self._last_fold_toggle
 
         grid = tk.Frame(box, bg=CARD)
         grid.pack(fill="x")
-        # 两列：卡片进左栏后宽度只有一半，三列会顶出卡片外
+        # 两列：卡片进左栏后宽度只有一半，三列会顶出卡片外。
+        # 标签宽度从 12 收到 8、列间距从 18 收到 10：最长的标签也只占 4 个字
+        # （「断网间隔」），多出来的宽度全是浪费。原来那套在窗口缩到最小宽度
+        # 820 时两列合计 444px 而可用只有 414px，右侧单位（kbps / 秒）被裁掉；
+        # 现在每行还要塞一个「！」，不收窄就必然溢出。
         for i, (key, label, unit, top) in enumerate(FIELDS):
             r, c = i // 2, i % 2
             cell = tk.Frame(grid, bg=CARD)
-            cell.grid(row=r, column=c, sticky="w", padx=(0, 18), pady=1)
-            tk.Label(cell, text=label, font=FONT, bg=CARD, fg=TEXT, width=12,
+            cell.grid(row=r, column=c, sticky="w", padx=(0, 10), pady=1)
+            tk.Label(cell, text=label, font=FONT, bg=CARD, fg=TEXT, width=8,
                      anchor="w").pack(side="left")
             v = tk.StringVar(value="0")
-            sp = ttk.Spinbox(cell, from_=0, to=top, width=8, textvariable=v,
+            # 宽度 7：够放最大的 1000000（kbps 上限），再加「！」后两列才装得下
+            sp = ttk.Spinbox(cell, from_=0, to=top, width=7, textvariable=v,
                              font=FONT, format="%.1f")
             sp.pack(side="left")
             # 滚轮落在数字框上时翻页而不是改数值：ttk.Spinbox 默认滚轮 ±1，
             # 翻页时手一滑就把参数静默改了，比翻不动更坑
             sp.bind("<MouseWheel>", self._left_wheel_break)
             tk.Label(cell, text=unit, font=FONT, bg=CARD, fg=MUTED).pack(side="left", padx=(4, 0))
+            # 每个参数右侧一个「！」：点开是这个参数的作用与坑（见 open_param_note）
+            self.param_btns[key] = self._param_help_btn(cell, key)
             self.vars[key] = v
 
         bar = tk.Frame(box, bg=CARD)
@@ -749,6 +769,127 @@ class App:
             pass
         self.notes_win = None
         self.notes_txt = None
+
+    # ---------------- 参数说明（每个参数自己的「！」） ----------------
+
+    def _param_help_btn(self, parent, key):
+        """参数行末尾的「！」小按钮。
+
+        用 Button 而不是可点的 Label：Button 自带手型光标之外的按下反馈，
+        而且不会被 _card_fold 那套标题行点击绑定误伤（它只绑标题行）。
+        takefocus=0 是为了不让 Tab 顺序被 13 个「！」打断 —— 用户调参数时
+        按 Tab 应该直接跳到下一个数字框。
+        """
+        b = tk.Button(parent, text="！", font=("Microsoft YaHei UI", 8, "bold"),
+                      bg="#eef2f7", fg=ACCENT, relief="flat", bd=0, width=2,
+                      padx=2, pady=0, cursor="hand2", takefocus=0,
+                      activebackground="#e2e9f6", activeforeground=ACCENT,
+                      highlightthickness=1, highlightbackground=LINE,
+                      command=lambda k=key: self.open_param_note(k))
+        b.pack(side="left", padx=(3, 0))
+        return b
+
+    def open_param_note(self, key):
+        """点参数右侧的「！」→ 弹出这个参数的说明。
+
+        再点同一个「！」就收起：小窗口飘在参数旁边，没有明显的关闭路径时
+        用户会以为点不掉。换一个参数则直接换成那一个，不会叠出第二个窗口。
+        """
+        if self.param_win is not None and self._param_key == key:
+            self.close_param_note()
+            return
+        meta = next((f for f in FIELDS if f[0] == key), None)
+        if meta is None:
+            return
+        _k, label, unit, top = meta
+        note = W.PARAM_NOTES.get(key, "")
+        self.close_param_note()
+
+        win = tk.Toplevel(self.root)
+        win.withdraw()                        # 先藏起来，摆好位置再显示，免得闪一下
+        win.title("参数说明 · " + label)
+        win.configure(bg=BG)
+        win.resizable(False, False)
+        try:
+            win.transient(self.root)          # 跟着主窗口走，不占任务栏
+        except Exception:
+            pass
+
+        card = tk.Frame(win, bg=CARD, highlightbackground=LINE, highlightthickness=1)
+        card.pack(fill="both", expand=True, padx=10, pady=10)
+
+        head = tk.Frame(card, bg=CARD)
+        head.pack(fill="x", padx=12, pady=(9, 0))
+        tk.Label(head, text="！", font=("Microsoft YaHei UI", 10, "bold"),
+                 bg=CARD, fg=ACCENT).pack(side="left")
+        tk.Label(head, text=label, font=FONT_B, bg=CARD, fg=TEXT).pack(
+            side="left", padx=(5, 0))
+        tk.Button(head, text="✕", font=FONT, bg=CARD, fg=MUTED, relief="flat",
+                  bd=0, padx=4, pady=0, cursor="hand2", takefocus=0,
+                  activebackground=CARD, activeforeground=TEXT,
+                  command=self.close_param_note).pack(side="right")
+
+        # 单位与取值范围从 FIELDS 现算，不写死在文案里 —— 改上限时说明自动跟着变
+        if unit:
+            meta_line = "单位 %s · 取值范围 0 ~ %s" % (unit, top)
+        else:
+            meta_line = "取值范围 0 ~ %s" % top
+        tk.Label(card, text=meta_line, font=FONT, bg=CARD, fg=MUTED,
+                 anchor="w").pack(fill="x", padx=12, pady=(2, 0))
+        tk.Frame(card, bg=LINE, height=1).pack(fill="x", padx=12, pady=(7, 0))
+        tk.Label(card, text=note or "（暂无说明）", font=FONT, bg=CARD, fg=TEXT,
+                 anchor="w", justify="left", wraplength=330).pack(
+            fill="x", padx=12, pady=(9, 0))
+        tk.Button(card, text="知道了", font=FONT, bg="#eef2f7", fg=TEXT,
+                  relief="flat", padx=14, pady=4, cursor="hand2", takefocus=0,
+                  bd=0, highlightthickness=1, highlightbackground=LINE,
+                  command=self.close_param_note).pack(anchor="e", padx=12,
+                                                      pady=(11, 11))
+
+        self.param_win = win
+        self._param_key = key
+        win.protocol("WM_DELETE_WINDOW", self.close_param_note)
+        win.bind("<Escape>", lambda _e: self.close_param_note())
+        self._place_param_note(win, key)
+        win.deiconify()
+
+    def _place_param_note(self, win, key):
+        """贴在被点的「！」旁边：右边放不下就翻到左边，最后夹在屏幕内。
+
+        不挂在鼠标坐标上：键盘 / 脚本触发时没有鼠标位置，取按钮自己的位置更稳。
+        """
+        try:
+            win.update_idletasks()
+            w, h = win.winfo_reqwidth(), win.winfo_reqheight()
+            btn = self.param_btns.get(key)
+            if btn is not None and btn.winfo_ismapped():
+                bx, by = btn.winfo_rootx(), btn.winfo_rooty()
+                bw, bh = btn.winfo_width(), btn.winfo_height()
+            else:
+                bx = self.root.winfo_rootx() + 60
+                by = self.root.winfo_rooty() + 60
+                bw = bh = 0
+            sw, sh = win.winfo_screenwidth(), win.winfo_screenheight()
+            x = bx + bw + 6
+            if x + w > sw - 8:                # 右边装不下 → 翻到按钮左侧
+                x = bx - w - 6
+            y = by - 6
+            if y + h > sh - 48:               # 48 给任务栏留位置
+                y = sh - 48 - h
+            win.geometry("%dx%d+%d+%d" % (w, h, max(8, x), max(8, y)))
+        except Exception:
+            pass
+
+    def close_param_note(self):
+        if self.param_win is None:
+            self._param_key = None
+            return
+        try:
+            self.param_win.destroy()
+        except Exception:
+            pass
+        self.param_win = None
+        self._param_key = None
 
     # ---------------- 自定义栏 ----------------
 
@@ -1846,6 +1987,7 @@ class App:
         self._closing = True
         self.close_share()          # 先关二级窗口：它上面挂着定时刷新，别等主窗销毁才取消
         self.close_preset_notes()   # 场景说明只是只读参考，直接关掉即可
+        self.close_param_note()     # 单个参数的「！」小窗同理
         # 手机上还挂着代理就退出 = 手机直接断网，用户根本想不到是这边造成的。
         # 必须同步做完（wait=True）：主线程马上就要销毁窗口，等不到后台回调
         if getattr(self, "usb_on", False):

@@ -75,6 +75,7 @@ public class MainPanels {
 
     private ShareSheet share;
     private NotesSheet notes;
+    private ParamSheet param;
     private String sceneSig = null;
     private String logSig = "";
 
@@ -96,6 +97,7 @@ public class MainPanels {
     void close() {
         if (share != null) share.close();
         if (notes != null) notes.close();
+        if (param != null) param.close();
         if (editorDlg != null) {
             try {
                 editorDlg.dismiss();
@@ -612,6 +614,23 @@ public class MainPanels {
         if (notes != null) notes.close();
     }
 
+    // ---------------------------------------------------------------- 参数说明
+
+    /** 点参数行末尾的「！」→ 弹出这一个参数的说明 */
+    private void openParamNote(String key) {
+        if (param == null) param = new ParamSheet(a);
+        param.show(key);
+    }
+
+    /** 参数说明浮层是否开着（返回键兜底用，见 MainActivity.onBackPressed） */
+    boolean paramShowing() {
+        return param != null && param.isShowing();
+    }
+
+    void closeParam() {
+        if (param != null) param.close();
+    }
+
     // ---------------------------------------------------------------- 环境共享
 
     private void openShare() {
@@ -622,7 +641,13 @@ public class MainPanels {
     // ---------------------------------------------------------------- 自定义场景编辑器
 
     /** 13 项参数：key / 中文标签 / 默认值（与桌面版自定义面板一致） */
-    private static final String[][] FIELDS = {
+    /**
+     * 参数编辑界面的行定义：{key, 显示名（含单位）, 默认值}。
+     *
+     * 包可见而不是 private：_ParamNotesTest 要拿它跟 {@link Profile#noteOfParam}
+     * 做一致性校验（每个参数行都必须有对应的注释，否则「！」点开是空白）。
+     */
+    static final String[][] FIELDS = {
             {"down_kbps", "下行带宽 (kbps)", "0"},
             {"up_kbps", "上行带宽 (kbps)", "0"},
             {"latency_up_ms", "上行延迟 (ms)", "0"},
@@ -738,6 +763,31 @@ public class MainPanels {
             lb.setTextSize(12);
             lb.setTextColor(0xFF5A6472);
             row.addView(lb, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+
+            // 每行末尾一个「！」：点开是这个参数的作用与坑（见 ParamSheet）。
+            // 用 TextView 而不是 Button —— Button 自带 48dp 最小尺寸，会把
+            // 右边的输入框挤掉；TextView 加背景框就够了，也不需要按压态。
+            final String fk = f[0];
+            final String fl = f[1];
+            TextView help = new TextView(a);
+            help.setText("！");
+            help.setTextSize(12);
+            help.setTextColor(0xFF2F6FED);
+            help.setTypeface(null, Typeface.BOLD);
+            help.setGravity(Gravity.CENTER);
+            help.setBackground(box(0xFFF1F4FA, 0xFFD7DEEA, 8));
+            help.setPadding(dp(6), dp(1), dp(6), dp(1));
+            help.setContentDescription("查看「" + fl + "」的说明");
+            help.setOnClickListener(new View.OnClickListener() {
+                public void onClick(View v) {
+                    openParamNote(fk);
+                }
+            });
+            LinearLayout.LayoutParams hp = new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+            hp.setMargins(dp(6), 0, dp(6), 0);
+            row.addView(help, hp);
+
             EditText ed = new EditText(a);
             ed.setTextSize(13);
             ed.setSingleLine(true);

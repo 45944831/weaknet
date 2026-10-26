@@ -95,7 +95,7 @@ public class Profile {
         NOTES.put("congestion",
                 "晚高峰 / 多人共享带宽：延迟翻倍、下行被压到 512kbps。复现「点一下要转半天圈」。");
         NOTES.put("satellite",
-                "往返 700ms、带宽 2Mbps。典型表现是「每个请求都要等好几秒才回来」，"
+                "单程 700ms（一次往返约 1.4 秒）、带宽 2Mbps。典型表现是「每个请求都要等好几秒才回来」，"
                         + "用来验证加载态、超时与重试。");
         NOTES.put("high_loss",
                 "带宽看着够（能起连、能握手），但每三个包丢一个。典型症状：视频卡成 PPT、"
@@ -125,6 +125,69 @@ public class Profile {
     /** 档位注释；没有注释时返回空串（界面据此跳过这一行） */
     public static String noteOf(String key) {
         String s = key == null ? null : NOTES.get(key);
+        return s == null ? "" : s;
+    }
+
+    /**
+     * 每个参数的注释：参数编辑界面上每行末尾的「！」把它们显示出来。
+     *
+     * 为什么需要：13 个参数里有一半光看名字猜不出行为 —— 「丢包率」填 30 到底会让
+     * 请求报错还是变慢？「黑洞率」和「拒连率」都是连不上，差别在哪？「卡顿时长」
+     * 单独填为什么没效果？这些都得翻引擎源码才能确定，写在这里让用户点一下就看到。
+     * 文案与桌面版 weaknet.py 的 PARAM_NOTES 保持一致（由 _t_param_notes.py 逐条比对）。
+     */
+    private static final Map<String, String> PARAM_NOTES = new HashMap<String, String>();
+
+    static {
+        PARAM_NOTES.put("latency_down_ms",
+                "给「服务器 → 本机」方向每块数据加的固定延迟，用来拉长响应回来的时间。\n"
+                        + "每块数据都会加，不是只在建连时加一次 —— 否则 keep-alive / WebSocket 这类长连接里"
+                        + "只有第一个请求慢，后面的全是零延迟。一次往返 ≈ 上行延迟 + 下行延迟。");
+        PARAM_NOTES.put("latency_up_ms",
+                "给「本机 → 服务器」方向加的固定延迟，影响请求发出去要多久才到服务器。\n"
+                        + "「点了按钮迟迟不发请求」看这项，「请求回来了但界面不刷新」看下行延迟。"
+                        + "一次往返 ≈ 上行 + 下行，所以两项都填 400 时 RTT 是 800ms。");
+        PARAM_NOTES.put("jitter_ms",
+                "每个数据块的延迟在基础值上随机浮动 ±N 毫秒，让延迟忽快忽慢。\n"
+                        + "实际延迟 = 基础延迟 + (-N ~ +N) 的随机值，最小夹到 0。抖动主要影响实时音视频、"
+                        + "游戏、VoIP；纯下载几乎感觉不到。");
+        PARAM_NOTES.put("down_kbps",
+                "下行总带宽上限，单位 kbps（1 Mbps = 1000 kbps，1000 kbps ≈ 125 KB/s）。0 = 不限。\n"
+                        + "注意是全局共享的一份带宽：同时开 5 条连接是 5 条一起分摊，不是每条各拿一份。");
+        PARAM_NOTES.put("up_kbps",
+                "上行总带宽上限（本机 → 服务器），单位 kbps。0 = 不限。\n"
+                        + "上传大文件、发图片、提交大请求体时先卡在这里；只测「页面加载慢」时通常不用改它。");
+        PARAM_NOTES.put("loss_pct",
+                "每块数据按这个概率「丢掉」，表现不是报错，而是一段停顿（模拟 TCP 等重传）。\n"
+                        + "停多久由下面的「卡顿时长」决定，丢包率本身不决定停多久。填 100 会表现为完全传不动。");
+        PARAM_NOTES.put("stall_ms",
+                "每次「丢包」命中后停顿多久，实际会在 0.5~1.5 倍之间随机。\n"
+                        + "只在丢包率 > 0 时生效 —— 丢包率为 0 时这项填什么都不影响结果。默认 600。");
+        PARAM_NOTES.put("disconnect_pct",
+                "每块数据按概率直接掐断整条连接（两侧 RST/FIN），App 看到的是「连接被重置」。\n"
+                        + "和丢包的区别：丢包是慢，断连是断，必须重连才能继续。只影响已建立的连接；"
+                        + "能不能建连由「拒连率」管。");
+        PARAM_NOTES.put("timeout_pct",
+                "新连接按概率「发出去没有回应」，先挂住不返回，过一会儿才继续处理。\n"
+                        + "最容易触发「请求卡死、转圈不停」。和「拒连率」的区别：这个是挂住等，那个是立刻失败。");
+        PARAM_NOTES.put("dns_fail_pct",
+                "按概率让域名解析失败（返回 502 DNS resolution failed）。\n"
+                        + "只拦「需要解析域名」的连接：用 IP 直连的（HTTPDNS、写死 IP 的 App）不受影响 —— "
+                        + "所以填 100% 也可能看到部分请求正常。");
+        PARAM_NOTES.put("reject_pct",
+                "新连接按概率立刻被拒绝（直接返回 502），是「马上失败」而不是挂住。\n"
+                        + "模拟飞行模式 / 完全没网，用来验证 App 的快速失败与降级路径。");
+        PARAM_NOTES.put("flap_sec",
+                "每隔 N 秒把当前所有连接全部掐断，持续「断网时长」后恢复。0 = 关闭。\n"
+                        + "这是周期性的整体断网，跟「断连率」随机掐单条不是一回事；两项可以叠加。");
+        PARAM_NOTES.put("flap_blackout_sec",
+                "每次周期断网持续多久，到点自动恢复。\n"
+                        + "只在「断网间隔」> 0 时生效，单独填没有作用。");
+    }
+
+    /** 单个参数的说明；未知 key 返回空串（界面据此不显示「！」） */
+    public static String noteOfParam(String key) {
+        String s = key == null ? null : PARAM_NOTES.get(key);
         return s == null ? "" : s;
     }
 

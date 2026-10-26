@@ -507,6 +507,11 @@ public class MainActivity extends Activity {
             panels.closeNotes();
             return;
         }
+        // 参数说明浮层叠在参数编辑浮层上面，先收最上面那一层
+        if (panels != null && panels.paramShowing()) {
+            panels.closeParam();
+            return;
+        }
         if (panels != null && panels.shareShowing()) {
             panels.closeShare();            // 共享浮层开着时，返回先收起它
             return;

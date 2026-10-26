@@ -26,6 +26,12 @@ if [ -z "$AJAR" ]; then
   echo "或设置 ANDROID_HOME 指向含 platforms 的 SDK。SDK 体积大，不入仓库。"
   exit 2
 fi
+# Git Bash 下 java 不认 /c/... 形式的绝对路径（javac 认，java 不认），
+# 不转的话 -cp 里的 android.jar 会被静默忽略：测试类一碰到 android.* 就
+# NoClassDefFoundError，看着像代码坏了。Linux/macOS 没有 cygpath，原样使用。
+if command -v cygpath >/dev/null 2>&1; then
+  AJAR=$(cygpath -w "$AJAR")
+fi
 echo "使用 android.jar: $AJAR"
 OUT="_jw/out"
 SRCPATH="src"
@@ -42,7 +48,7 @@ javac -encoding UTF-8 -nowarn \
       _jw/com/weaknet/app/_*Test.java
 
 FAIL=0
-for T in _PortIdxTest _FlowMatchTest _ScopeTest _BucketConcTest _PresetNotesTest; do
+for T in _PortIdxTest _FlowMatchTest _ScopeTest _BucketConcTest _PresetNotesTest _ParamNotesTest; do
   echo ""
   echo "== $T =="
   if java -cp "$OUT;$AJAR" "com.weaknet.app.$T"; then
