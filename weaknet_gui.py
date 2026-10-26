@@ -18,7 +18,7 @@ import sys
 import threading
 import time
 import tkinter as tk
-from tkinter import filedialog, messagebox, simpledialog, ttk
+from tkinter import filedialog, font as tkfont, messagebox, simpledialog, ttk
 
 # 以 --windowed 打包时没有控制台，sys.stdout / sys.stderr 为 None。
 # 必须给它们一个去处，否则任何 print / traceback 输出都会异常导致闪退。
@@ -564,16 +564,25 @@ class App:
         grid = tk.Frame(box, bg=CARD)
         grid.pack(fill="x")
         # 两列：卡片进左栏后宽度只有一半，三列会顶出卡片外。
-        # 标签宽度从 12 收到 8、列间距从 18 收到 10：最长的标签也只占 4 个字
-        # （「断网间隔」），多出来的宽度全是浪费。原来那套在窗口缩到最小宽度
-        # 820 时两列合计 444px 而可用只有 414px，右侧单位（kbps / 秒）被裁掉；
-        # 现在每行还要塞一个「！」，不收窄就必然溢出。
+        # 名字列收窄到 56px（最长的「断网间隔」只占 4 个字）、列间距从 18 收到 10：
+        # 原来那套在窗口缩到最小宽度 820 时两列合计 444px 而可用只有 414px，
+        # 右侧单位（kbps / 秒）被裁掉；现在每行还要塞一个「！」，不收窄就必然溢出。
+        #
+        # 「！」要紧跟在参数名后面（挂在单位后面读起来像是数字框的附属品），
+        # 但各行的数字框又必须对齐 —— 两个要求冲突时，把空白留在「！」右边：
+        # 名字按实际宽度排，按钮紧跟其后，右侧补足到统一列宽。
+        # 列宽与每行的空白都用字体实测宽度算，不写死：改字体 / 改文案时不会错位。
+        f_name = tkfont.Font(font=FONT)
+        btn_w = f_name.measure("！") + 2      # 左右各 1px padding
+        name_col = max(f_name.measure(lb) + 2 for _k, lb, _u, _t in FIELDS) + 1 + btn_w + 2
         for i, (key, label, unit, top) in enumerate(FIELDS):
             r, c = i // 2, i % 2
             cell = tk.Frame(grid, bg=CARD)
             cell.grid(row=r, column=c, sticky="w", padx=(0, 10), pady=1)
-            tk.Label(cell, text=label, font=FONT, bg=CARD, fg=TEXT, width=8,
+            tk.Label(cell, text=label, font=FONT, bg=CARD, fg=TEXT,
                      anchor="w").pack(side="left")
+            gap = name_col - (f_name.measure(label) + 2) - 1 - btn_w
+            self.param_btns[key] = self._param_help_btn(cell, key, gap)
             v = tk.StringVar(value="0")
             # 宽度 7：够放最大的 1000000（kbps 上限），再加「！」后两列才装得下
             sp = ttk.Spinbox(cell, from_=0, to=top, width=7, textvariable=v,
@@ -583,8 +592,6 @@ class App:
             # 翻页时手一滑就把参数静默改了，比翻不动更坑
             sp.bind("<MouseWheel>", self._left_wheel_break)
             tk.Label(cell, text=unit, font=FONT, bg=CARD, fg=MUTED).pack(side="left", padx=(4, 0))
-            # 每个参数右侧一个「！」：点开是这个参数的作用与坑（见 open_param_note）
-            self.param_btns[key] = self._param_help_btn(cell, key)
             self.vars[key] = v
 
         bar = tk.Frame(box, bg=CARD)
@@ -772,21 +779,28 @@ class App:
 
     # ---------------- 参数说明（每个参数自己的「！」） ----------------
 
-    def _param_help_btn(self, parent, key):
-        """参数行末尾的「！」小按钮。
+    def _param_help_btn(self, parent, key, gap=2):
+        """参数名后面的「！」小入口。
 
-        用 Button 而不是可点的 Label：Button 自带手型光标之外的按下反馈，
-        而且不会被 _card_fold 那套标题行点击绑定误伤（它只绑标题行）。
-        takefocus=0 是为了不让 Tab 顺序被 13 个「！」打断 —— 用户调参数时
-        按 Tab 应该直接跳到下一个数字框。
+        刻意做得不显眼：无边框、无底色（和卡片同色）、灰色字，只有鼠标移上去
+        才变蓝。参数区本来就密，13 个带边框的按钮会把参数名淹掉；但也不能
+        做成「只有悬停才出现」—— 那样用键盘或第一次用的人根本不知道有这东西。
+
+        gap：按钮右侧补的空白，由调用方按名字实际宽度算，用来把各行的数字框
+        顶到同一列（见 _build_custom）。
+
+        用 Button 而不是可点的 Label：Button 自带按下反馈。takefocus=0 是为了
+        不让 Tab 顺序被 13 个「！」打断（调参数时按 Tab 应该直接跳下一个数字框）。
         """
-        b = tk.Button(parent, text="！", font=("Microsoft YaHei UI", 8, "bold"),
-                      bg="#eef2f7", fg=ACCENT, relief="flat", bd=0, width=2,
-                      padx=2, pady=0, cursor="hand2", takefocus=0,
-                      activebackground="#e2e9f6", activeforeground=ACCENT,
-                      highlightthickness=1, highlightbackground=LINE,
+        b = tk.Button(parent, text="！", font=FONT,
+                      bg=CARD, fg=MUTED, relief="flat", bd=0,
+                      highlightthickness=0, padx=1, pady=0, cursor="hand2",
+                      takefocus=0, activebackground=CARD, activeforeground=ACCENT,
                       command=lambda k=key: self.open_param_note(k))
-        b.pack(side="left", padx=(3, 0))
+        b.pack(side="left", padx=(1, gap))
+        # 悬停才变蓝：既是反馈，也让人确认这东西能点
+        b.bind("<Enter>", lambda _e, w=b: w.configure(fg=ACCENT))
+        b.bind("<Leave>", lambda _e, w=b: w.configure(fg=MUTED))
         return b
 
     def open_param_note(self, key):

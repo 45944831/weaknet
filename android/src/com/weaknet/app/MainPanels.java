@@ -762,31 +762,34 @@ public class MainPanels {
             lb.setText(f[1]);
             lb.setTextSize(12);
             lb.setTextColor(0xFF5A6472);
-            row.addView(lb, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+            // 名字按内容宽度排，不能给 weight=1 —— 那样名字会占满整行，
+            // 把「！」顶到最右边，看着像输入框的前缀而不是「这个参数的说明」
+            row.addView(lb, new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
-            // 每行末尾一个「！」：点开是这个参数的作用与坑（见 ParamSheet）。
+            // 名字后面紧跟一个「！」：点开是这个参数的作用与坑（见 ParamSheet）。
             // 用 TextView 而不是 Button —— Button 自带 48dp 最小尺寸，会把
-            // 右边的输入框挤掉；TextView 加背景框就够了，也不需要按压态。
+            // 右边的输入框挤掉；也不加背景框、只用灰字，13 个蓝框按钮会把参数名淹掉。
             final String fk = f[0];
             final String fl = f[1];
             TextView help = new TextView(a);
             help.setText("！");
-            help.setTextSize(12);
-            help.setTextColor(0xFF2F6FED);
-            help.setTypeface(null, Typeface.BOLD);
+            help.setTextSize(11);
+            help.setTextColor(0xFF9AA4B2);
             help.setGravity(Gravity.CENTER);
-            help.setBackground(box(0xFFF1F4FA, 0xFFD7DEEA, 8));
-            help.setPadding(dp(6), dp(1), dp(6), dp(1));
+            help.setPadding(dp(5), dp(1), dp(5), dp(1));
             help.setContentDescription("查看「" + fl + "」的说明");
             help.setOnClickListener(new View.OnClickListener() {
                 public void onClick(View v) {
                     openParamNote(fk);
                 }
             });
-            LinearLayout.LayoutParams hp = new LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-            hp.setMargins(dp(6), 0, dp(6), 0);
-            row.addView(help, hp);
+            row.addView(help, new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+
+            // 弹性空白：把输入框顶到右边，各行的输入框才能对齐
+            View spacer = new View(a);
+            row.addView(spacer, new LinearLayout.LayoutParams(0, dp(1), 1f));
 
             EditText ed = new EditText(a);
             ed.setTextSize(13);
