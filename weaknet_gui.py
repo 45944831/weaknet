@@ -116,6 +116,40 @@ def summarize(prof):
     return " · ".join(bits) or "（不限制）"
 
 
+def detail(prof):
+    """参数全量摘要（含抖动 / 卡顿 / 周期断网），给「场景说明」窗口用。
+
+    与 summarize 分开：那个是列表里的一行简述，越长越挤；这里是详情页，
+    用户点进来就是想搞清「这支档位到底设了什么」，宁可全一点。
+    """
+    bits = []
+    if prof.get("down_kbps") or prof.get("up_kbps"):
+        bits.append("下行 %s / 上行 %s kbps" % (prof.get("down_kbps") or "∞",
+                                               prof.get("up_kbps") or "∞"))
+    if prof.get("latency_down_ms") or prof.get("latency_up_ms"):
+        bits.append("延迟 %s/%s ms（下/上）" % (prof.get("latency_down_ms", 0),
+                                              prof.get("latency_up_ms", 0)))
+    if prof.get("jitter_ms"):
+        bits.append("抖动 ±%g ms" % prof["jitter_ms"])
+    if prof.get("loss_pct"):
+        bits.append("丢包 %g%%" % prof["loss_pct"])
+        # 卡顿时长只在丢包后生效（模拟 TCP 重传等待），单独列出来没意义
+        if prof.get("stall_ms"):
+            bits.append("丢包后停顿 %g ms" % prof["stall_ms"])
+    if prof.get("disconnect_pct"):
+        bits.append("随机断连 %g%%" % prof["disconnect_pct"])
+    if prof.get("timeout_pct"):
+        bits.append("黑洞 %g%%" % prof["timeout_pct"])
+    if prof.get("dns_fail_pct"):
+        bits.append("DNS 故障 %g%%" % prof["dns_fail_pct"])
+    if prof.get("reject_pct"):
+        bits.append("拒连 %g%%" % prof["reject_pct"])
+    if prof.get("flap_sec"):
+        bits.append("每 %gs 断网 %gs" % (prof["flap_sec"],
+                                        prof.get("flap_blackout_sec", 2)))
+    return " · ".join(bits) or "（不限制：所有流量原样直通）"
+
+
 class App:
     def __init__(self, root, loop, ctrl_port):
         self.root = root
@@ -129,6 +163,9 @@ class App:
         self._closing = False
         self.share_win = None                 # 环境共享二级窗口，None = 当前未打开
         self.share_after = None               # 窗口内的定时刷新（关闭时要取消）
+        self.notes_win = None                 # 场景说明二级窗口
+        self.notes_txt = None                 # 场景说明的正文控件（切场景时重画）
+        self._notes_key = None                # 上次画的时候选中的场景
         # USB 手机弱网：adb 命令最长 20 秒，一律丢后台线程，
         # 结果经这个队列回到主线程（tkinter 不是线程安全的，绝不能在子线程里直接碰控件）
         self.usb_q = queue.Queue()
@@ -193,15 +230,34 @@ class App:
     # ---------------- 界面搭建 ----------------
 
     def _card(self, parent, title, expand=False):
+        return self._card_x(parent, title, expand=expand)[0]
+
+    def _card_x(self, parent, title, expand=False, action=None):
+        """卡片骨架。返回 (内容容器, 标题行右侧的动作按钮或 None)。
+
+        action=(文案, 回调)：有些卡片标题行需要一个附属入口（比如场景预设的「！」），
+        单独拉一行按钮会白占高度，放在标题右侧最省地方。
+        """
         outer = tk.Frame(parent, bg=BG)
         outer.pack(fill="both" if expand else "x", padx=14, pady=(0, 10))
-        tk.Label(outer, text=title, font=FONT_B, bg=BG, fg=TEXT).pack(anchor="w", pady=(0, 4))
+        head = tk.Frame(outer, bg=BG)
+        head.pack(fill="x", pady=(0, 4))
+        tk.Label(head, text=title, font=FONT_B, bg=BG, fg=TEXT).pack(side="left")
+        btn = None
+        if action is not None:
+            text, cmd = action
+            btn = tk.Button(head, text=text, font=FONT_B, bg="#eef2f7", fg=ACCENT,
+                            relief="flat", padx=8, pady=0, cursor="hand2",
+                            activebackground="#e2e9f6", activeforeground=ACCENT,
+                            bd=0, highlightthickness=1, highlightbackground=LINE,
+                            command=cmd)
+            btn.pack(side="right")
         card = tk.Frame(outer, bg=CARD, highlightbackground=LINE,
                         highlightthickness=1, bd=0)
         card.pack(fill="both", expand=True)
         inner = tk.Frame(card, bg=CARD)
         inner.pack(fill="both", expand=True, padx=12, pady=10)
-        return inner
+        return inner, btn
 
     # ---------------- 左栏滚动 ----------------
     #
@@ -450,7 +506,13 @@ class App:
     def _build_presets(self):
         # 挂在左栏：接管范围已升到顶部通栏，预设留在左栏与自定义参数同侧，
         # 右栏整列留给日志，两栏高度才不至于一边空一大块
-        box = self._card(self.col_left, "场景预设（点击即生效）")
+        # 标题右侧的「！」：17 支档位光看名字分不清差别（4G 弱网 vs 弱 Wi-Fi 差在哪），
+        # 点开是每支的场景说明 + 参数摘要，不占卡片高度
+        box, self.preset_help_btn = self._card_x(
+            self.col_left, "场景预设（点击即生效）",
+            action=("！", self.open_preset_notes))
+        self.preset_help_btn.configure(text="！", width=2,
+                                       font=("Microsoft YaHei UI", 10, "bold"))
         cats = {}
         for key, (name, cat, _extra) in W.PRESETS.items():
             cats.setdefault(cat, []).append((key, name))
@@ -572,6 +634,121 @@ class App:
                                  anchor="w", justify="left", wraplength=430)
         self.lab_mine.pack(fill="x", pady=(6, 0))
         self.reload_mine()
+
+    # ---------------- 场景说明（二级窗口） ----------------
+
+    def open_preset_notes(self):
+        """场景说明：按分类列出每支内置档位的参数与适用症状。
+
+        入口是「场景预设」标题右侧的「！」。17 支档位里有一半光看名字分不清
+        ——「4G 弱网」和「弱 Wi-Fi」都是低速+丢包，「黑洞」和「完全断网」都是连不上
+        但机制完全不同（挂住 vs 立刻失败）。这里把「模拟的什么现场 + 典型症状」
+        和实际参数一起摊开，省得每次都去翻源码。
+        """
+        if self.notes_win is not None:
+            try:                              # 已经开着就提到前台，不重复建
+                self.notes_win.deiconify()
+                self.notes_win.lift()
+                return
+            except Exception:
+                self.notes_win = None
+
+        win = tk.Toplevel(self.root)
+        win.title("场景说明")
+        # 高度按屏幕夹一下：小屏上 660 加上标题栏会顶出屏幕底部
+        sh = win.winfo_screenheight()
+        nh = min(660, max(360, sh - 120))
+        win.geometry("580x%d" % nh)
+        win.configure(bg=BG)
+        try:
+            win.transient(self.root)
+        except Exception:
+            pass
+        # 居中到主窗口上（不指定位置时系统会随便放，经常跑到屏幕角落）
+        try:
+            self.root.update_idletasks()
+            rx, ry = self.root.winfo_rootx(), self.root.winfo_rooty()
+            rw, rh = self.root.winfo_width(), self.root.winfo_height()
+            win.geometry("+%d+%d" % (max(0, rx + (rw - 580) // 2),
+                                     max(0, ry + (rh - nh) // 2)))
+        except Exception:
+            pass
+        self.notes_win = win
+
+        head = tk.Frame(win, bg=CARD, highlightbackground=LINE, highlightthickness=1)
+        head.pack(fill="x", padx=12, pady=12)
+        tk.Button(head, text="← 返回", font=FONT, bg="#eef2f7", fg=TEXT,
+                  relief="flat", padx=12, pady=5, cursor="hand2",
+                  command=self.close_preset_notes).pack(side="left")
+        tk.Label(head, text="场景说明", font=FONT_T, bg=CARD, fg=TEXT).pack(
+            side="left", padx=(12, 0))
+        tk.Label(head, text="共 %d 支" % len(W.PRESETS), font=FONT, bg=CARD,
+                 fg=MUTED).pack(side="right")
+
+        wrap = tk.Frame(win, bg=BG)
+        wrap.pack(fill="both", expand=True, padx=12, pady=(0, 12))
+        txt = tk.Text(wrap, font=FONT, bg=CARD, fg=TEXT, relief="flat",
+                      highlightthickness=1, highlightbackground=LINE, bd=0,
+                      wrap="char",          # 中文没有空格，按字符换行才不会溢出
+                      padx=14, pady=12, spacing1=1, spacing3=3,
+                      takefocus=0, cursor="arrow")
+        sb = tk.Scrollbar(wrap, command=txt.yview)
+        txt.configure(yscrollcommand=sb.set)
+        txt.pack(side="left", fill="both", expand=True)
+        sb.pack(side="right", fill="y")
+
+        txt.tag_configure("cat", font=FONT_B, foreground=ACCENT,
+                          spacing1=12, spacing3=3)
+        txt.tag_configure("name", font=FONT_B, foreground=TEXT, spacing1=7)
+        txt.tag_configure("param", font=FONT, foreground=MUTED,
+                          lmargin1=14, lmargin2=14, spacing3=2)
+        txt.tag_configure("note", font=FONT, foreground=TEXT,
+                          lmargin1=14, lmargin2=14, spacing3=6)
+
+        self.notes_txt = txt
+        self._fill_preset_notes()
+        win.bind("<Escape>", lambda _e: self.close_preset_notes())
+        win.protocol("WM_DELETE_WINDOW", lambda: self.close_preset_notes())
+
+    def _fill_preset_notes(self):
+        """按当前选中的场景重画说明正文（切换场景时刷新「当前选中」标记）"""
+        txt = getattr(self, "notes_txt", None)
+        if txt is None:
+            return
+        cur = W.G.preset_key
+        cats = {}
+        for key, (name, cat, _extra) in W.PRESETS.items():
+            cats.setdefault(cat, []).append((key, name))
+        txt.configure(state="normal")
+        txt.delete("1.0", "end")
+        for cat in ("常规网络", "弱网环境", "极端环境"):
+            items = cats.get(cat) or []
+            if not items:
+                continue
+            txt.insert("end", cat + "\n", "cat")
+            for key, name in items:
+                try:
+                    prof = W.build_preset_profile(key)
+                except Exception:
+                    prof = {}
+                mark = "　　← 当前选中" if key == cur else ""
+                txt.insert("end", name + mark + "\n", "name")
+                txt.insert("end", detail(prof) + "\n", "param")
+                note = W.PRESET_NOTES.get(key, "")
+                if note:
+                    txt.insert("end", note + "\n", "note")
+        txt.configure(state="disabled")
+        self._notes_key = cur
+
+    def close_preset_notes(self):
+        if self.notes_win is None:
+            return
+        try:
+            self.notes_win.destroy()
+        except Exception:
+            pass
+        self.notes_win = None
+        self.notes_txt = None
 
     # ---------------- 自定义栏 ----------------
 
@@ -1668,6 +1845,7 @@ class App:
             return
         self._closing = True
         self.close_share()          # 先关二级窗口：它上面挂着定时刷新，别等主窗销毁才取消
+        self.close_preset_notes()   # 场景说明只是只读参考，直接关掉即可
         # 手机上还挂着代理就退出 = 手机直接断网，用户根本想不到是这边造成的。
         # 必须同步做完（wait=True）：主线程马上就要销毁窗口，等不到后台回调
         if getattr(self, "usb_on", False):
@@ -1759,6 +1937,13 @@ class App:
         for key, btn in getattr(self, "mine_btns", {}).items():
             btn.config(bg=ACCENT if key == g.preset_key else "#eef2f7",
                        fg="white" if key == g.preset_key else TEXT)
+        # 场景说明窗口开着时，切场景要同步正文里的「当前选中」标记，
+        # 否则窗口里标的是打开那一刻的档位，跟界面上的高亮对不上
+        try:
+            if self.notes_win is not None and self._notes_key != g.preset_key:
+                self._fill_preset_notes()
+        except Exception:
+            pass
 
         # 接管范围可能被 Web 控制台那一端改过，提示行同步显示最新的生效值
         try:

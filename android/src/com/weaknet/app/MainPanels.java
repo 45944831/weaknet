@@ -74,6 +74,7 @@ public class MainPanels {
     private Dialog editorDlg;
 
     private ShareSheet share;
+    private NotesSheet notes;
     private String sceneSig = null;
     private String logSig = "";
 
@@ -94,6 +95,7 @@ public class MainPanels {
     /** 关窗口：共享浮层要在 Activity 销毁前收起 */
     void close() {
         if (share != null) share.close();
+        if (notes != null) notes.close();
         if (editorDlg != null) {
             try {
                 editorDlg.dismiss();
@@ -131,7 +133,37 @@ public class MainPanels {
 
     private LinearLayout builtinCard() {
         LinearLayout card = cardShell();
-        card.addView(title("🎯 测试环境（点一下即生效）"));
+
+        // 标题行：「！」贴在最右。17 支档位光看名字分不清差别（「4G 弱网」vs「弱 Wi-Fi」、
+        // 「黑洞」vs「完全断网」），点开是每支的场景说明 + 参数摘要。
+        // 单独占一行按钮会白占高度，跟标题同行最省地方。
+        LinearLayout head = new LinearLayout(a);
+        head.setOrientation(LinearLayout.HORIZONTAL);
+        head.setGravity(Gravity.CENTER_VERTICAL);
+        head.addView(title("🎯 测试环境（点一下即生效）"),
+                new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        Button btnHelp = new Button(a);
+        btnHelp.setAllCaps(false);
+        btnHelp.setTextSize(13);
+        btnHelp.setText("！");
+        btnHelp.setTextColor(0xFF2F6FED);
+        btnHelp.setBackground(box(0xFFF1F4FA, 0xFFD7DEEA, 8));
+        btnHelp.setPadding(dp(12), dp(1), dp(12), dp(1));
+        // Button 默认带 48dp 的最小尺寸，不压掉会撑成一个大方块，把标题挤走
+        btnHelp.setMinWidth(0);
+        btnHelp.setMinimumWidth(0);
+        btnHelp.setMinHeight(0);
+        btnHelp.setMinimumHeight(0);
+        btnHelp.setContentDescription("查看所有测试环境的说明");
+        btnHelp.setOnClickListener(new View.OnClickListener() {
+            public void onClick(View v) {
+                openNotes();
+            }
+        });
+        head.addView(btnHelp, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        card.addView(head);
+
         builtinGrid = new LinearLayout(a);
         builtinGrid.setOrientation(LinearLayout.VERTICAL);
         card.addView(builtinGrid, full(0, 0, 0, 2));
@@ -562,6 +594,22 @@ public class MainPanels {
         syncHighlight();
         syncSceneBtns();
         a.updateStatus();
+    }
+
+    // ---------------------------------------------------------------- 场景说明
+
+    /** 「！」入口：列出全部档位的注释与参数摘要（只读参考，点里面的条目不会切换场景） */
+    private void openNotes() {
+        if (notes == null) notes = new NotesSheet(a);
+        notes.show();
+    }
+
+    boolean notesShowing() {
+        return notes != null && notes.isShowing();
+    }
+
+    void closeNotes() {
+        if (notes != null) notes.close();
     }
 
     // ---------------------------------------------------------------- 环境共享

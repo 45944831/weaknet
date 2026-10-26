@@ -42,7 +42,7 @@ javac -encoding UTF-8 -nowarn \
       _jw/com/weaknet/app/_*Test.java
 
 FAIL=0
-for T in _PortIdxTest _FlowMatchTest _ScopeTest _BucketConcTest; do
+for T in _PortIdxTest _FlowMatchTest _ScopeTest _BucketConcTest _PresetNotesTest; do
   echo ""
   echo "== $T =="
   if java -cp "$OUT;$AJAR" "com.weaknet.app.$T"; then

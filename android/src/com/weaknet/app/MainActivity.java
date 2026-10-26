@@ -501,6 +501,12 @@ public class MainActivity extends Activity {
     }
 
     public void onBackPressed() {
+        // 说明浮层是 Dialog，正常会自己吃掉返回键；这里兜一道底，
+        // 免得将来改成不可取消时，返回键直接把整个界面退到后台
+        if (panels != null && panels.notesShowing()) {
+            panels.closeNotes();
+            return;
+        }
         if (panels != null && panels.shareShowing()) {
             panels.closeShare();            // 共享浮层开着时，返回先收起它
             return;

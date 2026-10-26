@@ -1,6 +1,8 @@
 package com.weaknet.app;
 
+import java.util.HashMap;
 import java.util.Locale;
+import java.util.Map;
 
 import org.json.JSONObject;
 
@@ -59,6 +61,71 @@ public class Profile {
                 || "congestion".equals(key) || "satellite".equals(key)
                 || "high_loss".equals(key) || "high_latency".equals(key)) return "弱网环境";
         return "极端环境";
+    }
+
+    /**
+     * 每支内置档位的注释：界面上的「！」入口把它们列出来（见 NotesSheet）。
+     *
+     * 为什么不复用参数值自动生成：光看数字（延迟 110ms / 3Mbps / 丢包 4%）分不清
+     * 「4G 弱网」和「弱 Wi-Fi」到底差在哪，也看不出该用哪一支去复现某个 bug。
+     * 这里写的是「模拟的什么现场 + 典型症状」，参数摘要由 {@link #detail()} 现算。
+     * 文案与桌面版 weaknet.py 的 PRESET_NOTES 保持一致，两端别各说一套。
+     */
+    private static final Map<String, String> NOTES = new HashMap<String, String>();
+
+    static {
+        NOTES.put("direct",
+                "不做任何处理，流量原样直通。用来确认「接管本身没问题」，也是跟其它场景对比的基线。");
+        NOTES.put("wifi",
+                "家用 / 办公 Wi-Fi 的典型值：延迟几十毫秒、带宽几十 Mbps。功能验证和性能对比的基准环境。");
+        NOTES.put("4g",
+                "移动网络常规体验：RTT 40~60ms、下行 20Mbps。模拟户外 / 地铁里信号正常的 4G。");
+        NOTES.put("5g",
+                "空口延迟比 4G 低一个量级（RTT 10~20ms），下行 100Mbps。能触发「秒开」级体验，"
+                        + "也够跑满多数 App 的预加载。");
+        NOTES.put("4g_weak",
+                "地下车库 / 城中村 / 演唱会现场这类「有 4G 图标但速率塌了」的现场。"
+                        + "速率比 5G 弱覆盖再低一档，丢包与偶发断流更明显 —— 4G 的重传比 5G 慢。");
+        NOTES.put("5g_weak",
+                "室内深处 / 小区边缘 / 地铁口：还能驻留，但速率塌到几 Mbps，伴随少量丢包与偶发断流。"
+                        + "比弱 Wi-Fi 更容易出现「看着有信号、实际传不动」。");
+        NOTES.put("wifi_weak",
+                "隔墙 / 离路由器远：信号还在，但速率与稳定性一起掉，抖动明显（±60ms）。"
+                        + "适合复现「Wi-Fi 满格却一直转圈」。");
+        NOTES.put("congestion",
+                "晚高峰 / 多人共享带宽：延迟翻倍、下行被压到 512kbps。复现「点一下要转半天圈」。");
+        NOTES.put("satellite",
+                "往返 700ms、带宽 2Mbps。典型表现是「每个请求都要等好几秒才回来」，"
+                        + "用来验证加载态、超时与重试。");
+        NOTES.put("high_loss",
+                "带宽看着够（能起连、能握手），但每三个包丢一个。典型症状：视频卡成 PPT、"
+                        + "图片加载一半、长连接反复重试。");
+        NOTES.put("high_latency",
+                "带宽正常、也不丢包，纯粹往返慢（跨境链路、卫星回传、代理中转）。"
+                        + "复现的是「慢但有结果」，不是「传不动」。");
+        NOTES.put("highspeed_rail",
+                "高速移动下频繁切换基站：抖动极大（±150ms）、偶发断流、带宽低。"
+                        + "适合验证重连与断点续传。");
+        NOTES.put("elevator",
+                "信号极差：延迟接近秒级、20% 丢包、10% 断连，常伴超时。"
+                        + "最容易触发「请求卡死」的一档。");
+        NOTES.put("flapping",
+                "每 8 秒断网 3 秒，模拟网络反复切换 / 弱信号掉线。"
+                        + "专门用来验证重连、重试与断线提示逻辑。");
+        NOTES.put("blackhole",
+                "请求发出去没有任何响应，连接挂住不返回 —— 不是报错，是一直等。"
+                        + "用来验证超时、取消与兜底 UI。");
+        NOTES.put("dns_fail",
+                "域名解析全部失败，但直接用 IP 的连接仍然通 —— 只拦 DNS 查询，不拦已建立的数据通道。");
+        NOTES.put("airplane",
+                "所有新连接立即被拒绝（是立刻失败，不是挂住）。模拟飞行模式 / 完全无网络，"
+                        + "验证快速失败与降级路径。");
+    }
+
+    /** 档位注释；没有注释时返回空串（界面据此跳过这一行） */
+    public static String noteOf(String key) {
+        String s = key == null ? null : NOTES.get(key);
+        return s == null ? "" : s;
     }
 
     public static Profile build(String key) {
@@ -223,5 +290,45 @@ public class Profile {
                 latencyUpMs, latencyDownMs,
                 downKbps == 0 ? "∞" : String.valueOf(downKbps),
                 upKbps == 0 ? "∞" : String.valueOf(upKbps), lossPct);
+    }
+
+    /**
+     * 参数全量摘要（含抖动 / 卡顿 / 周期断网），给「场景说明」用。
+     *
+     * 与 {@link #summary()} 分开：那个是列表里的一行简述，越长越挤；这里是详情页，
+     * 用户点进来就是想搞清「这支档位到底设了什么」，宁可全一点。
+     */
+    public String detail() {
+        StringBuilder sb = new StringBuilder();
+        if (downKbps != 0 || upKbps != 0) {
+            add(sb, "下行 " + (downKbps == 0 ? "∞" : String.valueOf(downKbps))
+                    + " / 上行 " + (upKbps == 0 ? "∞" : String.valueOf(upKbps)) + " kbps");
+        }
+        if (latencyDownMs != 0 || latencyUpMs != 0) {
+            add(sb, "延迟 " + latencyDownMs + "/" + latencyUpMs + " ms（下/上）");
+        }
+        if (jitterMs != 0) add(sb, "抖动 ±" + jitterMs + " ms");
+        if (lossPct > 0) {
+            add(sb, "丢包 " + pctText(lossPct) + "%");
+            // 卡顿时长只在丢包后生效（模拟 TCP 重传等待），单独列出来没意义
+            if (stallMs > 0) add(sb, "丢包后停顿 " + stallMs + " ms");
+        }
+        if (disconnectPct > 0) add(sb, "随机断连 " + pctText(disconnectPct) + "%");
+        if (timeoutPct > 0) add(sb, "黑洞 " + pctText(timeoutPct) + "%");
+        if (dnsFailPct > 0) add(sb, "DNS 故障 " + pctText(dnsFailPct) + "%");
+        if (rejectPct > 0) add(sb, "拒连 " + pctText(rejectPct) + "%");
+        if (flapSec > 0) add(sb, "每 " + flapSec + "s 断网 " + flapBlackoutSec + "s");
+        return sb.length() == 0 ? "（不限制：所有流量原样直通）" : sb.toString();
+    }
+
+    private static void add(StringBuilder sb, String part) {
+        if (sb.length() > 0) sb.append(" · ");
+        sb.append(part);
+    }
+
+    /** 百分比去掉多余的小数位：4.0 → "4"，0.5 → "0.5" */
+    private static String pctText(double v) {
+        if (v == Math.rint(v)) return String.valueOf((int) v);
+        return String.valueOf(Math.round(v * 10) / 10.0);
     }
 }
