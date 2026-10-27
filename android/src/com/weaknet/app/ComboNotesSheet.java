@@ -19,9 +19,11 @@ import android.widget.TextView;
 /**
  * 弱网组合说明（悬浮二级界面）
  *
- * 入口是「🔀 我的弱网组合」标题右侧的「！」。组合是把几支场景按时间排队播，
+ * 入口在「新建 / 编辑组合」界面的标题右侧。组合是把几支场景按时间排队播，
  * 按钮上只写着「通勤」「抢购」这类名字，猜不出它到底模拟了什么 ——
  * 这里把机制、我保存的组合、推荐例子摊开，省得每次都去翻源码。
+ * 只有真正动手排组合的人才需要看这些，所以入口跟着编辑器走，
+ * 不摆在组合列表顶上（那样看着像跟每一支组合都有关）。
  *
  * 内容全部来自 {@link Profile#comboDocParts()}，本类只管排版，
  * 不维护任何文案 —— 文案在引擎里，Windows 端读的是同一份。
@@ -33,13 +35,27 @@ public class ComboNotesSheet {
     private Dialog dlg;
     private LinearLayout body;
 
+    /**
+     * 本弹窗是不是自己收起了限速飘窗。
+     *
+     * 飘窗是系统悬浮窗，会盖在弹窗上方把点击吃掉，所以弹窗期间要收起它。
+     * 但浮窗的收起/恢复是个布尔标记，不是计数器：
+     * 从组合编辑器里打开说明页时，编辑器已经收起过一次了，这时候说明页
+     * 若再恢复，飘窗就会跑回来盖住还开着的编辑器。
+     * 所以只有「自己收起的」才由自己放回去。
+     */
+    private boolean suspendedByMe = false;
+
     ComboNotesSheet(MainActivity a) {
         this.a = a;
     }
 
     public void show() {
         if (a == null || a.isFinishing()) return;
-        a.suspendFloat();          // 飘窗会盖住弹窗上半部分并吃掉点击
+        if (!suspendedByMe && FloatWindow.isShown()) {
+            a.suspendFloat();      // 飘窗会盖住弹窗上半部分并吃掉点击
+            suspendedByMe = true;
+        }
         if (dlg == null) build();
         render();
         if (dlg != null && !dlg.isShowing()) dlg.show();
@@ -54,6 +70,14 @@ public class ComboNotesSheet {
             }
             dlg = null;
         }
+        releaseFloat();
+    }
+
+    /** 放回飘窗：只放回自己收起的那个 */
+    private void releaseFloat() {
+        if (!suspendedByMe) return;
+        suspendedByMe = false;
+        a.restoreFloat();
     }
 
     public boolean isShowing() {
@@ -67,6 +91,13 @@ public class ComboNotesSheet {
         dlg.requestWindowFeature(Window.FEATURE_NO_TITLE);
         dlg.setCancelable(true);
         dlg.setCanceledOnTouchOutside(true);
+        // 点弹窗外部或按返回键关闭时不会走 close()，飘窗就再也放不回来了。
+        // 挂个 OnDismiss 兜底：不管怎么关的，都要把飘窗放回原位
+        dlg.setOnDismissListener(new DialogInterface.OnDismissListener() {
+            public void onDismiss(DialogInterface d) {
+                releaseFloat();
+            }
+        });
 
         ScrollView sv = new ScrollView(a);
         sv.setBackgroundColor(Color.TRANSPARENT);

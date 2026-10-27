@@ -1170,12 +1170,16 @@ class App:
 
     # ---------------- 弱网组合 ----------------
 
-    def open_combo_notes(self):
+    def open_combo_notes(self, parent=None):
         """组合说明：组合怎么播 + 每支的段序 + 几个能照抄的例子。
 
-        入口是「我的弱网组合」标题右侧的「！」。组合是把几支场景按时间排队播，
-        按钮上只写着「通勤」「抢购」这类名字，猜不出它到底模拟了什么 ——
-        这里把机制、当前各支的段序和推荐例子摊开，省得每次都去翻源码。
+        入口在「新建 / 编辑组合」界面里（标题右侧的「！」）。组合是把几支场景
+        按时间排队播，按钮上只写着「通勤」「抢购」这类名字，猜不出它到底模拟了
+        什么 —— 真正要动手排组合的时候才需要知道这些，所以入口跟着编辑器走。
+
+        parent 给了就把说明窗挂在它下面（transient）：从编辑器里点开的说明窗
+        应当压在编辑器上面，编辑器一关它也跟着消失，不会剩个孤儿窗口飘在主
+        界面上。
         """
         if self.combo_notes_win is not None:
             try:                              # 已经开着就提到前台，不重复建
@@ -1192,13 +1196,16 @@ class App:
         win.geometry("600x%d" % nh)
         win.configure(bg=BG)
         try:
-            win.transient(self.root)
+            win.transient(parent if parent is not None else self.root)
         except Exception:
             pass
+        # 居中：跟着 parent 走（从编辑器里打开就该压在编辑器中间），
+        # 没有 parent 就居中到主窗口
         try:
-            self.root.update_idletasks()
-            rx, ry = self.root.winfo_rootx(), self.root.winfo_rooty()
-            rw, rh = self.root.winfo_width(), self.root.winfo_height()
+            anchor = parent if parent is not None else self.root
+            anchor.update_idletasks()
+            rx, ry = anchor.winfo_rootx(), anchor.winfo_rooty()
+            rw, rh = anchor.winfo_width(), anchor.winfo_height()
             win.geometry("+%d+%d" % (max(0, rx + (rw - 600) // 2),
                                      max(0, ry + (rh - nh) // 2)))
         except Exception:
@@ -1305,21 +1312,14 @@ class App:
 
     def _build_combo(self, page):
         """弱网组合区：把几支场景排队自动播放，按钮样式与上面两组保持一致"""
-        # 动作行：「＋ 新建组合」排一支，「！」看组合说明（放右侧贴着行尾）
+        # 动作行：只有「＋ 新建组合」。
+        # 组合说明的「！」挪进了编辑器（标题右侧）——说明是给「要动手排组合的人」
+        # 看的，摆在组合列表顶上反而像跟哪支组合都有关似的
         head = tk.Frame(page, bg=CARD)
         head.pack(fill="x")
         tk.Button(head, text="＋ 新建组合", font=FONT, bg="#eef2f7", fg=ACCENT,
                   relief="flat", padx=10, pady=3, cursor="hand2",
                   command=lambda: self.open_combo_editor()).pack(side="left")
-        # 「！」：组合怎么播 + 推荐例子。光看「通勤」「抢购」这类名字猜不出
-        # 它到底模拟了什么，点开才知道
-        cb = tk.Button(head, text="！", font=("Microsoft YaHei UI", 10, "bold"),
-                       bg=CARD, fg=MUTED, relief="flat", bd=0, padx=3, pady=0,
-                       cursor="hand2", takefocus=0, activebackground=CARD,
-                       activeforeground=ACCENT, command=self.open_combo_notes)
-        cb.pack(side="right")
-        cb.bind("<Enter>", lambda _e, w=cb: w.configure(fg=ACCENT))
-        cb.bind("<Leave>", lambda _e, w=cb: w.configure(fg=MUTED))
         self.combo_grid = tk.Frame(page, bg=CARD)
         self.combo_grid.pack(fill="x", pady=(6, 0))
         self.combo_btns = {}
@@ -1454,13 +1454,13 @@ class App:
                 except Exception:
                     self.combo_win = None
             else:
+                # 换看别的组合：旧编辑器要整个重建（界面上还填着上一支的内容）。
+                # 走 close_combo_editor 而不是直接 destroy —— 它会顺带把从旧
+                # 编辑器里点开的组合说明窗也关掉，否则会剩一个孤儿窗口
                 try:
-                    self.combo_win.destroy()
+                    self.close_combo_editor()
                 except Exception:
                     pass
-                self.combo_win = None
-                self._combo_editing = None
-                self._combo_rows = []
         combo = W.find_combo(cid) if cid else None
         win = tk.Toplevel(self.root)
         win.title("编辑弱网组合" if combo else "新建弱网组合")
@@ -1487,6 +1487,23 @@ class App:
         card.pack(fill="both", expand=True, padx=12, pady=12)
         inner = tk.Frame(card, bg=CARD)
         inner.pack(fill="both", expand=True, padx=12, pady=10)
+
+        # 标题行：左边写清现在是新建还是编辑，右边挂「组合说明」入口。
+        # 说明入口跟着编辑器走：组合怎么播、有哪些例子，只有真正动手排组合的
+        # 时候才需要知道，摆在组合列表顶上反倒像跟每一支组合都有关
+        thead = tk.Frame(inner, bg=CARD)
+        thead.pack(fill="x", pady=(0, 8))
+        self.lab_combo_editor_title = tk.Label(
+            thead, text="编辑弱网组合" if combo else "新建弱网组合",
+            font=("Microsoft YaHei UI", 11, "bold"), bg=CARD, fg=TEXT)
+        self.lab_combo_editor_title.pack(side="left")
+        cb = tk.Button(thead, text="！", font=("Microsoft YaHei UI", 10, "bold"),
+                       bg=CARD, fg=MUTED, relief="flat", bd=0, padx=3, pady=0,
+                       cursor="hand2", takefocus=0, activebackground=CARD,
+                       activeforeground=ACCENT, command=self._combo_open_notes)
+        cb.pack(side="right")
+        cb.bind("<Enter>", lambda _e, w=cb: w.configure(fg=ACCENT))
+        cb.bind("<Leave>", lambda _e, w=cb: w.configure(fg=MUTED))
 
         row0 = tk.Frame(inner, bg=CARD)
         row0.pack(fill="x")
@@ -1558,6 +1575,17 @@ class App:
                              "上限 %d 段。保存后可以接着排下一支，不用关窗。" % W.MAX_COMBO_STEPS,
                  font=FONT, bg=CARD, fg=MUTED, anchor="w", justify="left",
                  wraplength=430).pack(fill="x", pady=(6, 0))
+
+    def _combo_open_notes(self):
+        """编辑器里的「！」：打开组合说明，挂在编辑器下面。
+
+        传 parent=self.combo_win，说明窗就压在编辑器之上；编辑器一关，
+        说明窗跟着消失（Tk 的 transient 关系），不会剩个孤儿窗口。
+        """
+        try:
+            self.open_combo_notes(self.combo_win)
+        except Exception:
+            self.open_combo_notes()
 
     def _combo_add_row(self, st=None):
         """编辑器里的一行：场景 + 分 + 秒 + 删除本行"""
@@ -1690,6 +1718,12 @@ class App:
             self.combo_win.title("新建弱网组合")
         except Exception:
             pass
+        # 编辑器内部的标题行也要跟着改：保存后它会切成「新建」模式，
+        # 只改窗口标题栏的话，界面里那行大字会一直写着「编辑弱网组合」
+        try:
+            self.lab_combo_editor_title.config(text="新建弱网组合")
+        except Exception:
+            pass
         # 删除按钮只对「已有组合」有意义，新建模式下收起来
         try:
             self.btn_combo_del_in.pack_forget()
@@ -1709,6 +1743,13 @@ class App:
             self.close_combo_editor()
 
     def close_combo_editor(self):
+        # 说明窗是从编辑器里点开的（transient 挂在编辑器下面）。
+        # Tk 不保证父窗口销毁时连带销毁 transient 子窗口，这里显式关一次，
+        # 否则关掉编辑器后会剩一个孤儿说明窗飘在主界面上
+        try:
+            self.close_combo_notes()
+        except Exception:
+            pass
         try:
             self.combo_win.destroy()
         except Exception:

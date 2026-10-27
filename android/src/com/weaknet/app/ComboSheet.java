@@ -72,7 +72,9 @@ public class ComboSheet {
         LinearLayout page = new LinearLayout(a);
         page.setOrientation(LinearLayout.VERTICAL);
 
-        // 动作行：「＋ 新建组合」排一支，「！」看组合说明（放右侧贴着行尾）
+        // 动作行：只有「＋ 新建组合」。
+        // 组合说明的「！」挪进了编辑器（标题右侧）——说明是给「要动手排组合的人」
+        // 看的，摆在组合列表顶上反而像跟哪支组合都有关似的
         LinearLayout head = new LinearLayout(a);
         head.setOrientation(LinearLayout.HORIZONTAL);
         head.setGravity(Gravity.CENTER_VERTICAL);
@@ -91,28 +93,6 @@ public class ComboSheet {
             }
         });
         head.addView(bNew);
-
-        // 用一个占位的 spacer 把「！」推到行尾：新建按钮在左、说明入口在右，
-        // 两端（Windows / APK）读起来一致
-        View spacer = new View(a);
-        head.addView(spacer, new LinearLayout.LayoutParams(
-                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
-
-        // 「！」：组合怎么播 + 推荐例子。光看「通勤」「抢购」这类名字猜不出
-        // 它到底模拟了什么，点开才知道
-        TextView bHelp = new TextView(a);
-        bHelp.setText("！");
-        bHelp.setTextSize(14);
-        bHelp.setTextColor(0xFF8A94A6);
-        bHelp.setGravity(Gravity.CENTER);
-        bHelp.setPadding(dp(6), 0, dp(6), 0);
-        bHelp.setContentDescription("弱网组合说明");
-        bHelp.setOnClickListener(new View.OnClickListener() {
-            public void onClick(View v) {
-                openNotes();
-            }
-        });
-        head.addView(bHelp);
         page.addView(head, full(0, 2, 0, 2));
 
         grid = new LinearLayout(a);
@@ -304,15 +284,26 @@ public class ComboSheet {
 
     // ------------------------------------------------------------------ 组合说明
 
-    /** 「！」：打开组合说明二级界面（机制 + 我保存的组合 + 推荐例子） */
+    /** 「！」：打开组合说明二级界面（机制 + 我保存的组合 + 推荐例子）
+     *
+     * 入口在组合编辑器的标题右侧。
+     *
+     * 浮窗的收起/恢复由 ComboNotesSheet 自己管（它知道是不是自己收起的）：
+     * 从编辑器里打开时编辑器已经收起过飘窗了，这时若再恢复，飘窗就会跑回来
+     * 盖住还开着的编辑器 —— 所以这里不能再无条件 restoreFloat。
+     */
     void openNotes() {
         if (notes == null) notes = new ComboNotesSheet(a);
         if (notes.isShowing()) {
             notes.close();
-            a.restoreFloat();
             return;
         }
         notes.show();
+    }
+
+    /** 关掉组合说明页（编辑器重建 / 关闭时调用，免得留个孤儿页浮在上面） */
+    private void closeNotes() {
+        if (notes != null) notes.close();
     }
 
     void openEditor(String id) {
@@ -332,6 +323,9 @@ public class ComboSheet {
                 }
                 return;
             }
+            // 换看别的组合 → 旧编辑器要重建。说明页是从旧编辑器里点开的，
+            // 不关掉的话它会孤零零浮在新编辑器上面（还压着飘窗的恢复时机）
+            closeNotes();
             try {
                 dlg.dismiss();
             } catch (Exception e) {
@@ -348,6 +342,7 @@ public class ComboSheet {
         dlg.setCanceledOnTouchOutside(true);
         dlg.setOnDismissListener(new DialogInterface.OnDismissListener() {
             public void onDismiss(DialogInterface d) {
+                closeNotes();               // 说明页是从编辑器里点开的，别留孤儿页
                 a.restoreFloat();
                 refresh(true);
                 a.updateStatus();
@@ -362,13 +357,36 @@ public class ComboSheet {
         card.setBackground(box(0xFFFFFFFF, 0xFFDDE3EC, 14));
         card.setPadding(dp(14), dp(12), dp(14), dp(14));
 
+        // 标题行：左边写清现在是新建还是编辑，右边挂「组合说明」入口。
+        // 说明入口跟着编辑器走：组合怎么播、有哪些例子，只有真正动手排组合的
+        // 时候才需要知道，摆在组合列表顶上反倒像跟每一支组合都有关
+        LinearLayout thead = new LinearLayout(a);
+        thead.setOrientation(LinearLayout.HORIZONTAL);
+        thead.setGravity(Gravity.CENTER_VERTICAL);
+
         TextView t = new TextView(a);
         t.setText(cur == null ? "新建弱网组合" : "编辑弱网组合");
         t.setTextSize(15);
         t.setTextColor(0xFF1F2430);
         t.setTypeface(null, Typeface.BOLD);
-        card.addView(t, full(0, 0, 0, 8));
+        thead.addView(t, new LinearLayout.LayoutParams(0,
+                ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
         tvTitle = t;
+
+        TextView bHelp = new TextView(a);
+        bHelp.setText("！");
+        bHelp.setTextSize(15);
+        bHelp.setTextColor(0xFF8A94A6);
+        bHelp.setGravity(Gravity.CENTER);
+        bHelp.setPadding(dp(8), dp(2), dp(2), dp(2));
+        bHelp.setContentDescription("弱网组合说明");
+        bHelp.setOnClickListener(new View.OnClickListener() {
+            public void onClick(View v) {
+                openNotes();
+            }
+        });
+        thead.addView(bHelp);
+        card.addView(thead, full(0, 0, 0, 8));
 
         edName = new EditText(a);
         edName.setHint("组合名称");
