@@ -830,11 +830,10 @@ class App:
 
         head = tk.Frame(win, bg=CARD, highlightbackground=LINE, highlightthickness=1)
         head.pack(fill="x", padx=12, pady=12)
-        tk.Button(head, text="← 返回", font=FONT, bg="#eef2f7", fg=TEXT,
-                  relief="flat", padx=12, pady=5, cursor="hand2",
-                  command=self.close_preset_notes).pack(side="left")
+        # 不放「返回」按钮：标题栏右上角的 ✕ 就能关这扇窗，
+        # 两个入口干的是同一件事，看的人只会犯迷糊
         tk.Label(head, text="场景说明", font=FONT_T, bg=CARD, fg=TEXT).pack(
-            side="left", padx=(12, 0))
+            side="left")
         tk.Label(head, text="共 %d 支" % len(W.PRESETS), font=FONT, bg=CARD,
                  fg=MUTED).pack(side="right")
 
@@ -1214,11 +1213,10 @@ class App:
 
         head = tk.Frame(win, bg=CARD, highlightbackground=LINE, highlightthickness=1)
         head.pack(fill="x", padx=12, pady=12)
-        tk.Button(head, text="← 返回", font=FONT, bg="#eef2f7", fg=TEXT,
-                  relief="flat", padx=12, pady=5, cursor="hand2",
-                  command=self.close_combo_notes).pack(side="left")
+        # 不放「返回」按钮：标题栏右上角的 ✕ 就能关这扇窗，
+        # 两个入口干的是同一件事，看的人只会犯迷糊
         tk.Label(head, text="弱网组合说明", font=FONT_T, bg=CARD, fg=TEXT).pack(
-            side="left", padx=(12, 0))
+            side="left")
         tk.Label(head, text="共 %d 支" % len(W.get_combos()), font=FONT, bg=CARD,
                  fg=MUTED).pack(side="right")
 
@@ -1563,9 +1561,8 @@ class App:
                                            bg="#eef2f7", fg="#c0392b", relief="flat",
                                            padx=12, pady=5, cursor="hand2",
                                            command=self._combo_delete_in_editor)
-        tk.Button(bar, text="取消", font=FONT, bg="#eef2f7", fg=TEXT,
-                  relief="flat", padx=12, pady=5, cursor="hand2",
-                  command=self.close_combo_editor).pack(side="left", padx=(8, 0))
+        # 不放「取消」按钮：标题栏右上角的 ✕ 干的是同一件事（都是不保存直接关），
+        # 两个入口摆在一起只会让人犹豫该点哪个
         if combo:
             self.btn_combo_del_in.pack(side="left", padx=(8, 0))
         self.lab_combo_tip = tk.Label(inner, text="", font=FONT, bg=CARD, fg=MUTED,
@@ -1851,11 +1848,10 @@ class App:
 
         head = tk.Frame(win, bg=CARD, highlightbackground=LINE, highlightthickness=1)
         head.pack(fill="x", padx=12, pady=12)
-        tk.Button(head, text="← 返回", font=FONT, bg="#eef2f7", fg=TEXT,
-                  relief="flat", padx=12, pady=5, cursor="hand2",
-                  command=lambda: self.close_scope()).pack(side="left")
+        # 不放「返回」按钮：标题栏右上角的 ✕ 就能关这扇窗，
+        # 两个入口干的是同一件事，看的人只会犯迷糊
         tk.Label(head, text="接管范围", font=FONT_T, bg=CARD, fg=TEXT).pack(
-            side="left", padx=(12, 0))
+            side="left")
         self.lab_scope_count = tk.Label(head, text="", font=FONT, bg=CARD, fg=MUTED)
         self.lab_scope_count.pack(side="right")
 
@@ -1905,13 +1901,11 @@ class App:
 
         foot = tk.Frame(win, bg=BG)
         foot.pack(fill="x", padx=12, pady=10)
+        # 底部只留「保存」。取消用标题栏的 ✕ —— 它走的是同一条关闭逻辑
+        # （未保存还会先问一句「放弃改动？」），摆两个入口纯属重复
         tk.Button(foot, text="保存", font=FONT_B, bg=ACCENT, fg="white", relief="flat",
                   padx=20, pady=7, cursor="hand2",
                   command=self.apply_scope).pack(side="left", expand=True, fill="x")
-        tk.Button(foot, text="返回", font=FONT, bg="#eef2f7", fg=TEXT, relief="flat",
-                  padx=20, pady=7, cursor="hand2",
-                  command=lambda: self.close_scope()).pack(side="left", expand=True,
-                                                           fill="x", padx=(10, 0))
         win.protocol("WM_DELETE_WINDOW", lambda: self.close_scope())
         win.bind("<Escape>", lambda _e: self.close_scope())
 
@@ -2074,11 +2068,10 @@ class App:
 
         head = tk.Frame(win, bg=CARD, highlightbackground=LINE, highlightthickness=1)
         head.pack(fill="x", padx=12, pady=12)
-        tk.Button(head, text="← 返回", font=FONT, bg="#eef2f7", fg=TEXT,
-                  relief="flat", padx=12, pady=5, cursor="hand2",
-                  command=lambda: self.close_share()).pack(side="left")
+        # 不放「返回」按钮：标题栏右上角的 ✕ 就能关这扇窗，
+        # 两个入口干的是同一件事，看的人只会犯迷糊
         tk.Label(head, text="环境共享", font=FONT_T, bg=CARD, fg=TEXT).pack(
-            side="left", padx=(12, 0))
+            side="left")
         self.lab_share_me = tk.Label(head, text="", font=FONT, bg=CARD, fg=MUTED)
         self.lab_share_me.pack(side="right")
 
@@ -2144,11 +2137,9 @@ class App:
                                       anchor="w", justify="left", wraplength=560)
         self.lab_share_tip.pack(fill="x", padx=14, pady=(8, 0))
 
-        foot = tk.Frame(win, bg=BG)
-        foot.pack(fill="x", padx=12, pady=10)
-        tk.Button(foot, text="返回", font=FONT, bg="#eef2f7", fg=TEXT, relief="flat",
-                  padx=20, pady=7, cursor="hand2",
-                  command=lambda: self.close_share()).pack(fill="x")
+        # 底部原本只有一个「返回」，跟标题栏的 ✕ 是同一个功能。
+        # 去掉以后这排按钮就没内容了，整个 foot 框一起删掉，
+        # 免得在窗底留一条空白横杠
         win.protocol("WM_DELETE_WINDOW", lambda: self.close_share())
         win.bind("<Escape>", lambda _e: self.close_share())
 

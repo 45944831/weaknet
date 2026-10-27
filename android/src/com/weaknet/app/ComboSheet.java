@@ -306,6 +306,15 @@ public class ComboSheet {
         if (notes != null) notes.close();
     }
 
+    /** 关掉编辑器：标题栏的 ✕ 走这条路径。 */
+    private void dismissEditor() {
+        try {
+            if (dlg != null) dlg.dismiss();
+        } catch (Exception e) {
+            // ignore
+        }
+    }
+
     void openEditor(String id) {
         // 编辑器已经开着时再点一次：
         //   - 还是新建模式 → 复用这扇窗，把界面上填了一半的内容清掉。
@@ -386,6 +395,23 @@ public class ComboSheet {
             }
         });
         thead.addView(bHelp);
+
+        // 标题行右侧的 ✕：底部原本挂着一个「取消」，两者干的是同一件事
+        // （都是不保存直接关）。两个入口摆在一起只会让人犹豫该点哪个，
+        // 所以把关闭统一收到 ✕ 上
+        TextView close = new TextView(a);
+        close.setText("✕");
+        close.setTextSize(17);
+        close.setTextColor(0xFF8A94A6);
+        close.setPadding(dp(10), dp(2), dp(4), dp(2));
+        close.setContentDescription("关闭组合编辑器");
+        close.setOnClickListener(new View.OnClickListener() {
+            public void onClick(View v) {
+                dismissEditor();
+            }
+        });
+        thead.addView(close);
+
         card.addView(thead, full(0, 0, 0, 8));
 
         edName = new EditText(a);
@@ -472,22 +498,6 @@ public class ComboSheet {
             }
         });
         bar.addView(save, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
-        Button cancel = new Button(a);
-        cancel.setAllCaps(false);
-        cancel.setTextSize(14);
-        cancel.setText("取消");
-        cancel.setTextColor(0xFF2F3F52);
-        cancel.setBackground(box(0xFFFFFFFF, 0xFFD7DEEA, 8));
-        cancel.setPadding(dp(16), dp(9), dp(16), dp(9));
-        cancel.setOnClickListener(new View.OnClickListener() {
-            public void onClick(View v) {
-                dlg.dismiss();
-            }
-        });
-        LinearLayout.LayoutParams clp = new LinearLayout.LayoutParams(
-                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
-        clp.setMargins(dp(8), 0, 0, 0);
-        bar.addView(cancel, clp);
         card.addView(bar, full(0, 4, 0, 0));
 
         TextView tip = new TextView(a);

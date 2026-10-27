@@ -943,9 +943,11 @@ public class MainPanels {
 
         card.addView(hint("带宽填 0 表示不限；百分比是每条连接命中该故障的概率。"));
 
-        // 底部固定一行：取消 + 保存并应用——
+        // 底部固定一行：保存并应用——
         // 13 行参数肯定超屏，按钮放内容末尾的话得先滚到底才点得到；
         // 固定在底部后键盘弹出、翻看参数时它们都一直在眼前。
+        // 原来这里还挂了个「取消」，跟标题行的 ✕ 是同一个功能
+        // （都是不保存直接关），两个入口摆在一起只会让人犹豫该点哪个
         Button save = new Button(a);
         save.setAllCaps(false);
         save.setText(fromBuiltin ? "另存为自定义并应用" : "保存并应用");
@@ -960,28 +962,10 @@ public class MainPanels {
             }
         });
 
-        Button cancel = new Button(a);
-        cancel.setAllCaps(false);
-        cancel.setText("取消");
-        cancel.setTextSize(14);
-        cancel.setTextColor(0xFF5A6472);
-        cancel.setBackground(box(0xFFFFFFFF, 0xFFD7DEEA, 8));
-        cancel.setPadding(dp(12), dp(11), dp(12), dp(11));
-        cancel.setContentDescription("取消编辑");
-        cancel.setOnClickListener(new View.OnClickListener() {
-            public void onClick(View v) {
-                cancelEdit();
-            }
-        });
-
         LinearLayout foot = new LinearLayout(a);
         foot.setOrientation(LinearLayout.HORIZONTAL);
-        LinearLayout.LayoutParams fp = new LinearLayout.LayoutParams(
-                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
-        foot.addView(cancel, fp);
-        fp = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
-        fp.setMargins(dp(8), 0, 0, 0);
-        foot.addView(save, fp);
+        foot.addView(save, new LinearLayout.LayoutParams(
+                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
 
         sv.addView(card, new android.widget.FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));

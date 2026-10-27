@@ -248,20 +248,9 @@ public class ScopeSheet {
         card.addView(sv, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
 
-        // ---- 底部：取消 + 保存并应用 ----
-        Button cancel = new Button(a);
-        cancel.setAllCaps(false);
-        cancel.setTextSize(14);
-        cancel.setText("取消");
-        cancel.setTextColor(0xFF5A6472);
-        cancel.setBackground(box(0xFFFFFFFF, 0xFFD7DEEA, 8));
-        cancel.setPadding(dp(12), dp(11), dp(12), dp(11));
-        cancel.setContentDescription("取消指定程序");
-        cancel.setOnClickListener(new View.OnClickListener() {
-            public void onClick(View v) {
-                close();
-            }
-        });
+        // ---- 底部：只留「保存并应用」 ----
+        // 原来这里还挂了个「取消」，跟标题栏右上角的 ✕ 是同一个功能
+        // （都是不保存直接关），两个入口摆在一起只会让人犹豫该点哪个
         Button save = new Button(a);
         save.setAllCaps(false);
         save.setTextSize(14);
@@ -277,7 +266,6 @@ public class ScopeSheet {
         });
         LinearLayout foot = new LinearLayout(a);
         foot.setOrientation(LinearLayout.HORIZONTAL);
-        foot.addView(cancel, weight(0));
         foot.addView(save, weight(1));
         card.addView(foot, full(0, dp(10), 0, 0));
 
