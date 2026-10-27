@@ -1,0 +1,120 @@
+# 说明文案折行黄金文件（由 _t_note_golden.py 生成，别手改）
+# 测宽：粗糙测宽，汉字 1 单位 / ASCII 0.5 / 空格 0.25，UNIT=20
+# 行宽：200 单位
+# 格式：key<TAB>段号<TAB>行号<TAB>这一行的文字
+#
+disconnect_pct	body	0	每块数据按概率直接掐
+disconnect_pct	body	1	断整条连接（两侧
+disconnect_pct	body	2	RST/FIN），App 看到
+disconnect_pct	body	3	的是「连接被重置」。
+disconnect_pct	tip1	0	和丢包的区别：丢包是
+disconnect_pct	tip1	1	慢，断连是断，必须重
+disconnect_pct	tip1	2	连才能继续。
+disconnect_pct	tip2	0	只影响已建立的连接；
+disconnect_pct	tip2	1	能不能建连由
+disconnect_pct	tip2	2	「拒连率」管。
+dns_fail_pct	body	0	按概率让域名解析失败
+dns_fail_pct	body	1	（返回 502 DNS
+dns_fail_pct	body	2	resolution
+dns_fail_pct	body	3	failed）。
+dns_fail_pct	tip1	0	只拦「需要解析域名」
+dns_fail_pct	tip1	1	的连接：用 IP 直连的
+dns_fail_pct	tip1	2	（HTTPDNS、写死 IP 的
+dns_fail_pct	tip1	3	App）不受影响 —— 所以
+dns_fail_pct	tip1	4	填 100% 也可能看到部
+dns_fail_pct	tip1	5	分请求正常。
+down_kbps	body	0	下行总带宽上限，单位
+down_kbps	body	1	kbps（1 Mbps = 1000
+down_kbps	body	2	kbps，1000 kbps ≈ 125
+down_kbps	body	3	KB/s）。0 = 不限。
+down_kbps	tip1	0	注意是全局共享的一份
+down_kbps	tip1	1	带宽：同时开 5 条连接
+down_kbps	tip1	2	是 5 条一起分摊，不是
+down_kbps	tip1	3	每条各拿一份。
+flap_blackout_sec	body	0	每次周期断网持续多
+flap_blackout_sec	body	1	久，到点自动恢复。
+flap_blackout_sec	tip1	0	只在「断网间隔」> 0
+flap_blackout_sec	tip1	1	时生效，单独填没有作
+flap_blackout_sec	tip1	2	用。
+flap_sec	body	0	每隔 N 秒把当前所有连
+flap_sec	body	1	接全部掐断，持续
+flap_sec	body	2	「断网时长」后恢复。
+flap_sec	body	3	0 = 关闭。
+flap_sec	tip1	0	这是周期性的整体断
+flap_sec	tip1	1	网，跟「断连率」随机
+flap_sec	tip1	2	掐单条不是一回事；两
+flap_sec	tip1	3	项可以叠加。
+jitter_ms	body	0	每个数据块的延迟在基
+jitter_ms	body	1	础值上随机浮动 ±N 毫
+jitter_ms	body	2	秒，让延迟忽快忽慢。
+jitter_ms	tip1	0	实际延迟 = 基础延迟 +
+jitter_ms	tip1	1	(-N ~ +N) 的随机值，
+jitter_ms	tip1	2	最小夹到 0。
+jitter_ms	tip2	0	抖动主要影响实时音视
+jitter_ms	tip2	1	频、游戏、VoIP；纯下
+jitter_ms	tip2	2	载几乎感觉不到。
+latency_down_ms	body	0	给「服务器 → 本机」方
+latency_down_ms	body	1	向每块数据加的固定延
+latency_down_ms	body	2	迟，用来拉长响应回来
+latency_down_ms	body	3	的时间。
+latency_down_ms	tip1	0	每块数据都会加，不是
+latency_down_ms	tip1	1	只在建连时加一次 ——
+latency_down_ms	tip1	2	否则 keep-alive /
+latency_down_ms	tip1	3	WebSocket 这类长连接
+latency_down_ms	tip1	4	里只有第一个请求慢，
+latency_down_ms	tip1	5	后面的全是零延迟。
+latency_down_ms	tip2	0	一次往返 ≈ 上行延迟 +
+latency_down_ms	tip2	1	下行延迟。
+latency_up_ms	body	0	给「本机 → 服务器」方
+latency_up_ms	body	1	向加的固定延迟，影响
+latency_up_ms	body	2	请求发出去要多久才到
+latency_up_ms	body	3	服务器。
+latency_up_ms	tip1	0	「点了按钮迟迟不发请
+latency_up_ms	tip1	1	求」看这项，
+latency_up_ms	tip1	2	「请求回来了但界面不
+latency_up_ms	tip1	3	刷新」看下行延迟。
+latency_up_ms	tip2	0	一次往返 ≈ 上行 + 下
+latency_up_ms	tip2	1	行，所以两项都填 400
+latency_up_ms	tip2	2	时 RTT 是 800ms。
+loss_pct	body	0	每块数据按这个概率
+loss_pct	body	1	「丢掉」，表现不是报
+loss_pct	body	2	错，而是一段停顿（模
+loss_pct	body	3	拟 TCP 等重传）。
+loss_pct	tip1	0	停多久由下面的
+loss_pct	tip1	1	「卡顿时长」决定，丢
+loss_pct	tip1	2	包率本身不决定停多
+loss_pct	tip1	3	久。
+loss_pct	tip2	0	填 100 会表现为完全传
+loss_pct	tip2	1	不动。
+reject_pct	body	0	新连接按概率立刻被拒
+reject_pct	body	1	绝（直接返回 502），
+reject_pct	body	2	是「马上失败」而不是
+reject_pct	body	3	挂住。
+reject_pct	tip1	0	模拟飞行模式 / 完全没
+reject_pct	tip1	1	网，用来验证 App 的快
+reject_pct	tip1	2	速失败与降级路径。
+stall_ms	body	0	每次「丢包」命中后停
+stall_ms	body	1	顿多久，实际会在
+stall_ms	body	2	0.5~1.5 倍之间随机。
+stall_ms	tip1	0	只在丢包率 > 0 时生效
+stall_ms	tip1	1	—— 丢包率为 0 时这项
+stall_ms	tip1	2	填什么都不影响结果。
+stall_ms	tip2	0	默认 600。
+timeout_pct	body	0	新连接按概率
+timeout_pct	body	1	「发出去没有回应」，
+timeout_pct	body	2	先挂住不返回，过一会
+timeout_pct	body	3	儿才继续处理。
+timeout_pct	tip1	0	最容易触发
+timeout_pct	tip1	1	「请求卡死、转圈不
+timeout_pct	tip1	2	停」。
+timeout_pct	tip2	0	和「拒连率」的区别：
+timeout_pct	tip2	1	这个是挂住等，那个是
+timeout_pct	tip2	2	立刻失败。
+up_kbps	body	0	上行总带宽上限（本
+up_kbps	body	1	机 → 服务器），单位
+up_kbps	body	2	kbps。0 = 不限。
+up_kbps	tip1	0	上传大文件、发图片、
+up_kbps	tip1	1	提交大请求体时先卡在
+up_kbps	tip1	2	这里；只测
+up_kbps	tip1	3	「页面加载慢」时通常
+up_kbps	tip1	4	不用改它。

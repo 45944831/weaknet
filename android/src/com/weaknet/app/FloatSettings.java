@@ -21,7 +21,8 @@ import java.util.List;
 public class FloatSettings {
     // ---- 可选显示行：id / 名称 / 说明 / 示例 ----
     public static final String[][] FIELDS = {
-            {"scene",  "场景名",     "当前弱网场景；周期断网时追加「· 断网中」", "地铁 5G"},
+            // scene 不再是一行内容：场景名固定在飘窗标题行常驻显示，勾不勾都有
+            {"scene",  "场景名",     "已固定在飘窗标题行显示（无需勾选）",       "地铁 5G"},
             {"limit",  "限速值",     "上下行限速，0 = 不限",                     "限速 ↓1.5M ↑512k"},
             {"rate",   "实时速率",   "每 500ms 实测的上下行速度",               "实时 ↓120KB/s ↑8KB/s"},
             {"loss",   "弱网参数",   "延迟 / 抖动 / 丢包",                       "延迟 120±30ms · 丢包 3%"},
@@ -87,9 +88,8 @@ public class FloatSettings {
             }
         }
         sanitize(s);
-        // 从未设置过：给一组默认行，避免刚授权就看到一个空壳
+        // 从未设置过：给一组默认行，避免刚授权就看到一个空壳（场景名已在标题行，不用列）
         if (s.lines.isEmpty() && (raw == null || raw.length() == 0)) {
-            s.lines.add("scene");
             s.lines.add("limit");
             s.lines.add("rate");
         }

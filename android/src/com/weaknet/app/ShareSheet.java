@@ -31,7 +31,12 @@ import java.util.Set;
  * 环境共享（悬浮二级界面）
  *
  * 从设置浮层里「⭐ 我的自定义」标题后的「🔗 环境共享」按钮弹出 —— 共享的就是那些
- * 自定义场景，入口放在它们旁边最顺手。协议与桌面端完全一致，Windows ↔ Android 可互推。
+ * 自定义场景与弱网组合，入口放在它们旁边最顺手。协议与桌面端完全一致，
+ * Windows ↔ Android 可互推。
+ *
+ * 组合这一栏的规则与环境完全一样：多选勾选 → 同名进对方收件箱 → 覆盖 / 保留 / 另存。
+ * 区别在于组合的每一段可能引用本机才有的自定义场景，连参数快照一起推过去，
+ * 对方那边才有东西可播（详见 ShareNet.comboStepsJson）。
  *
  * 界面里三个列表每 3 秒自动刷新一次（要能看到新上线的设备和别人刚推来的环境）。
  * 勾选状态刻意存在 Set 里而不是 View 上：重建列表时按 id 回填，
@@ -49,6 +54,7 @@ public class ShareSheet {
     private EditText edtName;
     private LinearLayout peerBox;
     private LinearLayout mineBox;
+    private LinearLayout comboBox;
     private LinearLayout inboxBox;
     private Button btnPush;
     private Button btnOver;
@@ -59,6 +65,7 @@ public class ShareSheet {
     /** 勾选状态存这里，列表重建后按 id 回填 */
     private final Set<String> pickPeers = new HashSet<String>();
     private final Set<String> pickMine = new HashSet<String>();
+    private final Set<String> pickCombos = new HashSet<String>();
     private String pickInbox = "";
 
     private final Runnable tick = new Runnable() {
@@ -96,6 +103,12 @@ public class ShareSheet {
 
     public boolean isShowing() {
         return dlg != null && dlg.isShowing();
+    }
+
+    /** 立刻重画一次（别处改了组合/收件箱时调用，省得等 3 秒的自动刷新） */
+    public void reloadNow() {
+        if (dlg == null || !dlg.isShowing()) return;
+        reload();
     }
 
     // ---------------------------------------------------------------- 布局
@@ -185,10 +198,17 @@ public class ShareSheet {
         mineBox.setOrientation(LinearLayout.VERTICAL);
         card.addView(mineBox);
 
+        // ---- 我的弱网组合（与自定义环境同等地位：推过去时连每段的场景参数一起带） ----
+        card.addView(divider(dp(8)));
+        card.addView(label("我的弱网组合（可多选）"));
+        comboBox = new LinearLayout(a);
+        comboBox.setOrientation(LinearLayout.VERTICAL);
+        card.addView(comboBox);
+
         btnPush = new Button(a);
         btnPush.setAllCaps(false);
         btnPush.setTextSize(14);
-        btnPush.setText("→ 推送所选环境");
+        btnPush.setText("→ 推送所选内容");
         btnPush.setTextColor(Color.WHITE);
         btnPush.setBackground(box(ACCENT, ACCENT, 8));
         btnPush.setPadding(dp(12), dp(10), dp(12), dp(10));
@@ -276,6 +296,7 @@ public class ShareSheet {
 
         renderPeers();
         renderMine();
+        renderCombos();
         renderInbox();
         syncButtons();
         tip.setText("本机：" + ShareNet.getUserName() + " · " + WeakNet.I.lanIp()
@@ -339,6 +360,32 @@ public class ShareSheet {
         }
     }
 
+    private void renderCombos() {
+        comboBox.removeAllViews();
+        List<MyCombos.Item> items = MyCombos.load();
+        Set<String> alive = new HashSet<String>();
+        for (MyCombos.Item it : items) alive.add(it.id);
+        pickCombos.retainAll(alive);          // 已被删掉的组合别再留在勾选里
+
+        if (items.isEmpty()) {
+            comboBox.addView(hint("（还没有弱网组合：先在设置里排一支，才能推给别人）"));
+            return;
+        }
+        for (final MyCombos.Item it : items) {
+            boolean on = pickCombos.contains(it.id);
+            Button b = rowBtn("🔀 " + it.name + " · " + WeakNet.summaryOf(it), on, PURPLE);
+            b.setOnClickListener(new View.OnClickListener() {
+                public void onClick(View v) {
+                    if (pickCombos.contains(it.id)) pickCombos.remove(it.id);
+                    else pickCombos.add(it.id);
+                    renderCombos();
+                    syncButtons();
+                }
+            });
+            comboBox.addView(b);
+        }
+    }
+
     private void renderInbox() {
         inboxBox.removeAllViews();
         List<ShareNet.InboxItem> items = ShareNet.inboxList();
@@ -347,12 +394,13 @@ public class ShareSheet {
         if (!alive.contains(pickInbox)) pickInbox = "";
 
         if (items.isEmpty()) {
-            inboxBox.addView(hint("（收件箱为空：别人推来同名环境时会出现在这里）"));
+            inboxBox.addView(hint("（收件箱为空：别人推来同名内容时会出现在这里）"));
             return;
         }
         for (final ShareNet.InboxItem it : items) {
             boolean on = it.id.equals(pickInbox);
-            Button b = rowBtn(it.from + " 推送「" + it.name + "」 · "
+            String tag = "combo".equals(it.kind) ? "[组合]" : "[环境]";
+            Button b = rowBtn(tag + " " + it.from + " 推送「" + it.name + "」 · "
                     + (int) ((System.currentTimeMillis() - it.at) / 1000) + "s前", on, 0xFFD93025);
             b.setOnClickListener(new View.OnClickListener() {
                 public void onClick(View v) {
@@ -366,7 +414,7 @@ public class ShareSheet {
     }
 
     private void syncButtons() {
-        btnPush.setEnabled(!pickPeers.isEmpty() && !pickMine.isEmpty());
+        btnPush.setEnabled(!pickPeers.isEmpty() && (!pickMine.isEmpty() || !pickCombos.isEmpty()));
         boolean has = pickInbox.length() > 0;
         btnOver.setEnabled(has);
         btnKeep.setEnabled(has);
@@ -396,19 +444,20 @@ public class ShareSheet {
     }
 
     private void push() {
-        if (pickPeers.isEmpty() || pickMine.isEmpty()) return;
+        if (pickPeers.isEmpty() || (pickMine.isEmpty() && pickCombos.isEmpty())) return;
         final List<ShareNet.Peer> targets = new ArrayList<ShareNet.Peer>();
         for (ShareNet.Peer p : ShareNet.peers()) {
             if (pickPeers.contains(p.id)) targets.add(p);
         }
         final List<String> ids = new ArrayList<String>(pickMine);
+        final List<String> cids = new ArrayList<String>(pickCombos);
         btnPush.setEnabled(false);
         btnPush.setText("推送中…");
         Thread t = new Thread(new Runnable() {
             public void run() {
                 final StringBuilder msg = new StringBuilder();
                 for (ShareNet.Peer p : targets) {
-                    ShareNet.PushResult r = ShareNet.push(p, ids);
+                    ShareNet.PushResult r = ShareNet.push(p, ids, cids);
                     if (msg.length() > 0) msg.append("\n");
                     msg.append(r.msg);
                 }
@@ -416,7 +465,7 @@ public class ShareSheet {
                     public void run() {
                         Toast.makeText(a, msg.toString(), Toast.LENGTH_LONG).show();
                         WeakNet.I.log("share", msg.toString());
-                        btnPush.setText("→ 推送所选环境");
+                        btnPush.setText("→ 推送所选内容");
                         syncButtons();
                     }
                 });

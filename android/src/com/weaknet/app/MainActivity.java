@@ -26,8 +26,9 @@ import android.widget.Toast;
  *   顶栏（标题 + 「⚙ 设置」按钮） + 状态卡 + 一键接管按钮 + 三块内容面板。
  *
  * 顶栏固定不滚，下面的整体滚动：状态卡 + **总开关一行**（**开始 / 停止弱网测试** 与
- * **「指定程序…」并排**）+ 来自 {@link MainPanels} 的「🎯 测试环境」「⭐ 我的自定义」
- * 「📋 事件日志」——这些都是日常高频操作，为了选个场景或开关限速还要先开一层浮层纯属多余。
+ * **「指定程序…」并排**）+ 来自 {@link MainPanels} 的「🎯 测试环境」
+ * 「⭐ 我的场景与组合」（场景 / 组合用标签切换）「📋 事件日志」——
+ * 这些都是日常高频操作，为了选个场景或开关限速还要先开一层浮层纯属多余。
  *
  * 「接管流量」与「施加限速」原来是两个按钮，实际是一件事的两半：不接管，限速根本落不到
  * App 上；不限速，接管了也只是白跑一趟。所以合并成一个总开关——**开 = 接管并限速（开始
@@ -62,6 +63,11 @@ public class MainActivity extends Activity {
         // 固定竖版：Manifest 已声明 portrait，这里再做一次运行时兜底，
         // 覆盖部分厂商 ROM 忽略 manifest 声明 / 横屏状态下冷启动的情况。
         setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_PORTRAIT);
+
+        // 自定义场景与弱网组合都落在同一个 SharedPreferences：先把上下文备好，
+        // 免得服务还没起来时读到的列表是空的
+        MyPresets.bind(this);
+        MyCombos.bind(this);
 
         // 控制台（同时提供可选的 HTTP 代理通道）
         Intent console = new Intent(this, NetService.class);
@@ -317,6 +323,11 @@ public class MainActivity extends Activity {
         return VpnNetService.active && WeakNet.I.limitOn;
     }
 
+    /** 打开环境共享浮层（组合卡片上的「🔗 共享」按钮走这里） */
+    void openShareSheet() {
+        if (panels != null) panels.openShare();
+    }
+
     /** 状态刷新：主界面 + 设置弹窗（若打开着）一起更新 */
     void updateStatus() {
         boolean on = VpnNetService.active;
@@ -426,8 +437,14 @@ public class MainActivity extends Activity {
             }
         }
         WeakNet.I.setLimitOn(true, restore);
-        WeakNet.I.log("config", "开始弱网测试：" + restore.name);
-        Toast.makeText(this, "已开始弱网测试：" + restore.name, Toast.LENGTH_SHORT).show();
+        // 选中的是弱网组合时，它不是一支静态场景：交给播放序列按 steps 逐段推进
+        boolean combo = WeakNet.I.resumeIfCombo();
+        WeakNet.I.log("config", combo ? "开始播放组合：" + WeakNet.I.comboProgress()
+                : "开始弱网测试：" + restore.name);
+        Toast.makeText(this, combo
+                        ? ("已开始播放组合：" + WeakNet.I.comboProgress())
+                        : ("已开始弱网测试：" + restore.name),
+                Toast.LENGTH_SHORT).show();
         updateStatus();
         // 开了限速但没接管（例：授权被拒）时说清楚，免得以为在测其实没生效
         handler.postDelayed(new Runnable() {
@@ -455,7 +472,12 @@ public class MainActivity extends Activity {
         }, 900);
     }
 
-    /** key → Profile：内置预设名或 u:<id> 形式的自定义场景 */
+    /**
+     * key → Profile：内置预设名或 u:<id> 形式的自定义场景。
+     *
+     * 组合（c:<id>）这里故意返回 null：它不是一支静态场景，没有「一个」Profile 可以代表，
+     * 真正的生效由 {@link WeakNet#resumeIfCombo} 按 steps 逐段推进（见 applyLimitOn）。
+     */
     private static Profile profileOf(String key) {
         if (key == null) return null;
         if (key.startsWith("u:")) {

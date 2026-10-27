@@ -67,6 +67,19 @@ public class MyPresets {
     }
 
     /**
+     * 按名字找（大小写不敏感）——别人推来的组合用的是他那边场景的名字，只能按名字对，
+     * 他那边的 id 在我们这儿没有意义。
+     */
+    public static Item findByName(String name) {
+        String target = name == null ? "" : name.trim().toLowerCase();
+        if (target.length() == 0) return null;
+        for (Item it : load()) {
+            if (it.name.trim().toLowerCase().equals(target)) return it;
+        }
+        return null;
+    }
+
+    /**
      * 保存：给了 id 就覆盖那一条，否则新建。重名会自动加序号，避免两条同名分不清。
      */
     public static Item save(String id, String name, JSONObject prof) {
@@ -174,6 +187,7 @@ public class MyPresets {
             }
             SharedPreferences sp = c.getSharedPreferences(PREF, Context.MODE_PRIVATE);
             sp.edit().putString(KEY, a.toString()).apply();
+            FloatWindow.invalidateSceneCache();   // 场景改名/删除后飘窗标题要重新反查
         } catch (Exception e) {
             WeakNet.I.log("error", "保存自定义场景失败：" + e.getMessage());
         }

@@ -40,15 +40,33 @@ rm -rf "$OUT"
 mkdir -p "$OUT"
 
 echo "== 编译被测代码与测试类 =="
+# 分两阶段编译，踩过的坑记在这：
+#   一次把 src/**/*.java 和测试类丢给 javac 时，只要被测代码里有一个类
+#   （如 MyCombos）因 Android 依赖编不过，javac 会把它从符号表里剔掉，
+#   连带同包里的纯逻辑类（ComboStep / ComboPlan）也一起「找不到符号」——
+#   报错指向测试类，看着像测试写错了，实际是被测代码的锅。
+#   纯逻辑类（ComboStep / ComboPlan）单独编一遍就没事：它们不碰任何 Android API。
+#   第二阶段的 classpath 里的 $OUT 也要转成 Windows 路径：javac 是 Windows 版，
+#   认 /c/... 这种 Unix 路径会当找不到，classpath 被静默忽略。
+OUTW="$OUT"
+if command -v cygpath >/dev/null 2>&1; then
+  OUTW=$(cygpath -w "$OUT")
+fi
 javac -encoding UTF-8 -nowarn \
       -cp "$AJAR" \
+      -d "$OUT" \
+      src/com/weaknet/app/ComboStep.java \
+      src/com/weaknet/app/ComboPlan.java
+
+javac -encoding UTF-8 -nowarn \
+      -cp "$AJAR;$OUTW" \
       -sourcepath "$SRCPATH" \
       -d "$OUT" \
       src/com/weaknet/app/*.java \
       _jw/com/weaknet/app/_*Test.java
 
 FAIL=0
-for T in _PortIdxTest _FlowMatchTest _ScopeTest _BucketConcTest _PresetNotesTest _ParamNotesTest; do
+for T in _PortIdxTest _FlowMatchTest _ScopeTest _BucketConcTest _PresetNotesTest _ParamNotesTest _NoteWrapTest _ComboNewAgainTest _PauseResumeTest; do
   echo ""
   echo "== $T =="
   if java -cp "$OUT;$AJAR" "com.weaknet.app.$T"; then

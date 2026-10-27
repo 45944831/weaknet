@@ -589,6 +589,104 @@ PRESET_NOTES = {
 }
 
 
+# 弱网组合的说明文案与推荐例子。
+#
+# 为什么要单独一份：组合是「按时长排队播的一串场景」，光看按钮上的名字
+# （「通勤」「抢购」）猜不出它到底模拟了什么。用户在组合页点「！」能看到的
+# 内容分三块：组合怎么播、每段拼在一起是什么效果、几个能照抄的例子。
+#
+# 文案放在引擎里而不是界面里，是为了让 Windows 与 APK 两端说同一句话 ——
+# 两端各写一份必然漂移（改了一端忘了另一端，说的就不一样了）。
+COMBO_DOC_SEP = "\x1f"
+
+COMBO_INTRO = (
+    "弱网组合 = 把几支场景按时长排成一条链，选中后自动一段段播过去。\n"
+    "· 顺序播放：一段跑完自动切下一段，中间不用你操作。\n"
+    "· 可循环：末尾再回到第一段，一直循环下去（不勾就播完一遍停住）。\n"
+    "· 最多 5 段：再多就不好在界面上按顺序核对了。\n"
+    "· 组合里不能再套组合：段只能选预设或自定义场景。\n"
+    "· 弱网没开着时点组合只「选中」，不会替你偷偷开始限速；开着才会立刻播。"
+)
+
+# 推荐例子：照抄就能用
+COMBO_EXAMPLES = [
+    {
+        "name": "通勤路上",
+        "desc": "从有信号走进信号差的地方，再彻底没信号，最后恢复。",
+        "effect": "复现「地铁进隧道」这类真实链路：先正常加载，走到弱覆盖区开始卡，"
+                  "进隧道后请求挂住，出站后恢复。适合测弱网下的加载中状态与恢复逻辑。",
+        "steps": "5G 良好 30 秒 → 4G 弱网 1 分 → 完全断网 30 秒 → 5G 良好 30 秒",
+    },
+    {
+        "name": "抢购秒杀",
+        "desc": "平时流畅，一到高峰就抢不到，失败后快速重试。",
+        "effect": "高并发下服务端限流或网络拥塞的典型表现：请求变慢、部分直接失败。"
+                  "适合验证 App 的失败提示、重试与降级路径。",
+        "steps": "5G 良好 20 秒 → 弱 Wi-Fi 1 分 → 黑洞（无响应）15 秒 → 弱 Wi-Fi 1 分",
+    },
+    {
+        "name": "网络抖动",
+        "desc": "信号时好时坏，延迟忽大忽小。",
+        "effect": "模拟电梯、隧道口、拥挤场所的信号抖动。适合测实时音视频、"
+                  "语音通话、在线协作这类对延迟敏感的链路。",
+        "steps": "5G 良好 20 秒 → 弱 5G 20 秒 → 5G 良好 20 秒 → 弱 5G 20 秒（循环）",
+    },
+    {
+        "name": "定时断网",
+        "desc": "每隔一会儿断一次，过一会儿自己恢复。",
+        "effect": "模拟周期性网络中断（如基站切换、家庭路由重启）。"
+                  "适合验证长连接断了能不能自己重连、心跳与超时逻辑。",
+        "steps": "4G 良好 1 分 → 黑洞（无响应）20 秒（循环）",
+    },
+    {
+        "name": "加载渐变",
+        "desc": "从慢到快再到慢，模拟带宽被逐步放开。",
+        "effect": "测大文件 / 长列表的渐进加载表现：首屏慢、之后提速、快结束时又慢下来。"
+                  "适合验证进度条与分片下载逻辑。",
+        "steps": "极慢（100kbps）20 秒 → 4G 弱网 20 秒 → 5G 良好 20 秒 → 极慢（100kbps）20 秒",
+    },
+]
+
+# 组合特有的坑：单支场景页里没有这些
+COMBO_TIPS = [
+    "组合播到一半可以随时切走或暂停：切换后原组合停在原地，不会偷偷继续改参数。",
+    "每一段都是完整的一支场景，段与段之间参数是整套替换的 —— "
+    "不会把上一段的丢包率带进下一段。",
+    "循环组合会一直播下去，测完记得切走或暂停，别忘了它在后台改着参数。",
+]
+
+
+# 三块内容拼成的完整文档串（两端逐字一致，由 _t_combo_notes.py 比对）
+#
+# 为什么拼成一份大字符串而不是留三个独立结构：Java 那边要写成 String[][]，
+# 解析它的源码来比对极易在「多行拼接的字符串」上出错 ——
+# 表现是两边明明一样、测试却说不一样，比没有测试更坏。
+# 拼成一份后，解析只需处理「一个 String 常量」，稳得多。
+COMBO_DOC = COMBO_DOC_SEP.join(
+    [COMBO_INTRO]
+    + ["\n".join([e["name"], e["desc"], e["effect"], e["steps"]])
+       for e in COMBO_EXAMPLES]
+    + list(COMBO_TIPS))
+
+
+def combo_doc_parts(doc=None):
+    """把文档串拆回 (说明, 例子列表, 提醒列表)。例子每条 4 行。"""
+    text = COMBO_DOC if doc is None else doc
+    blocks = text.split(COMBO_DOC_SEP)
+    if not blocks:
+        return "", [], []
+    intro = blocks[0]
+    examples = []
+    for b in blocks[1:len(COMBO_EXAMPLES) + 1]:
+        lines = b.split("\n")
+        if len(lines) < 4:
+            continue
+        examples.append({"name": lines[0], "desc": lines[1],
+                         "effect": lines[2], "steps": lines[3]})
+    tips = blocks[len(COMBO_EXAMPLES) + 1:]
+    return intro, examples, tips
+
+
 def build_preset_profile(key):
     # "u:<id>" = 用户自定义场景（自定义栏），其余为内置预设
     if isinstance(key, str) and key.startswith("u:"):
@@ -700,6 +798,323 @@ PARAM_NOTES = {
 }
 
 
+# 说明文案的固定结构：第一段讲「这项是干什么的」，第二段讲「坑在哪」。
+# 界面上必须分开显示 —— 糊成一坨谁也分不清哪句是提醒
+#（_t_param_notes.py 断言每条都是两段，文案两端逐字比对，所以结构不能随意改）。
+def split_param_note(note):
+    """把一段说明拆成 (作用段, 提醒条目列表)。
+
+    第一段原样作为「作用」；第二段按句号切成一条条「提醒」。
+    第二段常含并列的多个提醒（"和…的区别；两项可以叠加"），
+    分条列出来比挤成一整行好读。
+
+    只有一段时（老存档 / 自定义文案）退回按句切：首句当作用，其余当提醒。
+    """
+    text = str(note or "").strip()
+    if not text:
+        return "", []
+    parts = [p.strip() for p in text.split("\n") if p.strip()]
+    if not parts:
+        return "", []
+    if len(parts) == 1:
+        sents = _split_sentences(parts[0])
+        if not sents:
+            return parts[0], []
+        return sents[0], sents[1:]
+    return parts[0], _split_sentences(" ".join(parts[1:]))
+
+
+def _split_sentences(text):
+    """按中文句号 / 问号 / 感叹号切句，保留标点。"""
+    out, buf = [], ""
+    for ch in str(text or ""):
+        buf += ch
+        if ch in "。！？":
+            s = buf.strip()
+            if s:
+                out.append(s)
+            buf = ""
+    tail = buf.strip()
+    if tail:
+        out.append(tail)
+    return out
+
+
+# ---------------------------------------------------------------- 说明文案的排版
+#
+# 为什么不能直接用 Label 的 wraplength 折行：
+#   Tk 的 Label 只在「空格」处断行。中文正文里为了排版留的空格
+#   （→、≈、+ 两侧）于是全都成了断点 —— 「·」条目符被单独甩到一行，
+#   「「本机 → 服务器」」这种引号短语被从中间劈开。换成 U+00A0 也一样断
+#   （实测行数不变），Tk 层面救不回来。
+#   安卓 TextView 的断行规则又跟 Tk 不一样，同一段文字在两端会长得不同。
+# 所以折行规则必须下沉到引擎层：先把文字切成「不可再分的原子」，
+# 再按像素宽度贪心拼行。两端（桌面 / 安卓）共用同一套规则，
+# 改了一端忘了另一端的话，同一个参数在电脑上和手机上会长得不一样。
+#
+# 原子有四种：
+#   c  单个字符（汉字 / 中文标点 / 独立符号），可以在它前后断行
+#   q  引号短语（「」「『』“”《》整段不可断）
+#   w  英文单词 / 数字带单位（800ms、0.5~1.5、RTT 整段不可断）
+#   s  空白（只用来标记「这里原本有空格」，断开时丢掉）
+#
+# 断行时还会做两件中文排版的事：
+#   避头：收尾标点（，。、）」等）不另起一行 —— 把它留在上一行
+#   避尾：起头标点（（「等）不留在行末 —— 把它带到下一行
+
+_NOTE_QUOTE_PAIRS = {"「": "」", "『": "』", "“": "”", "《": "》"}
+
+# 行首禁则：这些标点不能出现在一行的开头
+_NOTE_NO_START = "，。、；：？！）」』】”’%‰°′″℃…"
+# 行尾禁则：这些标点不能出现在一行的末尾
+_NOTE_NO_END = "（「『【《“"
+
+# 不能孤零零出现在行首的符号：数学 / 箭头符号
+_NOTE_NO_START_GLUE = "≈→←±×÷·〜～"
+
+# 数字 / 单词内部的连接符（0.5~1.5 里的 . ~ ，800ms% 里的 %）
+_NOTE_WORD_CONNECT = ".-~_%+/"
+
+# 视为「空白」的字符（断行时空格丢弃，行内保留一个）
+_NOTE_SPACE_CHARS = " \t　"
+
+
+def _is_note_cjk(ch):
+    """是不是中日韩字符 / 中文标点（含全角形式）。"""
+    code = ord(ch)
+    return (0x2E80 <= code <= 0x9FFF) or (0xF900 <= code <= 0xFAFF) \
+        or (0xFF00 <= code <= 0xFFEF)
+
+
+def _is_note_word_char(text, i):
+    """text[i] 能不能算「英文单词 / 数字」的一部分。
+
+    字母数字当然算；连接符只在两边都是字母数字时才算，
+    这样 0.5~1.5 是一个整体，而「上行 + 下行」里的 + 是独立符号。
+    """
+    ch = text[i]
+    if ch.isascii() and ch.isalnum():
+        return True
+    if ch in _NOTE_WORD_CONNECT:
+        prev_alnum = i > 0 and text[i - 1].isascii() and text[i - 1].isalnum()
+        nxt = text[i + 1] if i + 1 < len(text) else ""
+        next_alnum = bool(nxt) and nxt.isascii() and nxt.isalnum()
+        return prev_alnum and next_alnum
+    return False
+
+
+def split_note_atoms(text):
+    """把一段说明文字切成不可再分的排版原子。
+
+    返回 [[kind, text], ...]，kind 取值 c / q / w / s。
+    折行只能发生在原子与原子之间，绝不会把一个原子劈成两半 ——
+    「「本机 → 服务器」」里的箭头和空格因此永远跟参数名待在一起。
+    """
+    s = str(text or "")
+    out = []
+    i = 0
+    n = len(s)
+    while i < n:
+        ch = s[i]
+        if ch in _NOTE_SPACE_CHARS:
+            j = i
+            while j < n and s[j] in _NOTE_SPACE_CHARS:
+                j += 1
+            out.append(["s", s[i:j]])
+            i = j
+            continue
+        if ch in _NOTE_QUOTE_PAIRS:
+            close = _NOTE_QUOTE_PAIRS[ch]
+            j = s.find(close, i + 1)
+            if j != -1:
+                out.append(["q", s[i:j + 1]])
+                i = j + 1
+                continue
+        if _is_note_cjk(ch):
+            out.append(["c", ch])
+            i += 1
+            continue
+        if ch.isascii() and ch.isalnum():
+            j = i
+            while j < n and _is_note_word_char(s, j):
+                j += 1
+            # 百分号跟在词尾（100%）也算这个词的一部分
+            if j < n and s[j] == "%":
+                j += 1
+            out.append(["w", s[i:j]])
+            i = j
+            continue
+        # 其它 ASCII 符号（= + % 等）单独成原子
+        out.append(["c", ch])
+        i += 1
+    return out
+
+
+def _note_group_units(atoms):
+    """原子表 -> 排版单元表。
+
+    排版单元 = 行内不可再分的一段文字。返回 [[文字, 前面有没有空格], ...]。
+
+    这里顺手做了中文排版的两条「避头尾」规则 —— 不做的话，断行处会出现
+    孤零零的标点（比如一行的开头是「，」）：
+      · 行首禁则（，。、；：？！）等）不能起行 → 粘到前一个单元末尾
+      · 行尾禁则（（《 等）不能收行 → 粘到后一个单元开头
+    合成之后，断行只发生在单元之间，标点自然跟着前面的字走。
+    """
+    units = []
+    sep = False             # 上一段和这一段之间有没有空格
+    hold_txt = ""           # 待与下一个单元合并的起头标点
+    hold_sep = False
+    for kind, t in atoms:
+        if kind == "s":
+            sep = True
+            continue
+        if kind == "c" and len(t) == 1:
+            ch = t
+            if ch in _NOTE_NO_END:
+                # 起头标点不能收在行末 —— 先攒着，跟下一个单元走
+                hold_txt += ch
+                hold_sep = sep
+                sep = False
+                continue
+            if hold_txt:
+                t = hold_txt + ch
+                sep = hold_sep
+                hold_txt = ""
+                hold_sep = False
+            if ch in _NOTE_NO_START or ch in _NOTE_NO_START_GLUE:
+                if units:
+                    # 收尾标点不能起行 —— 粘到上一个单元末尾
+                    units[-1][0] += (" " if sep else "") + ch
+                    sep = False
+                    continue
+            units.append([t, sep])
+            sep = False
+            continue
+        # 引号短语 / 英文单词：整体不可断
+        if hold_txt:
+            t = hold_txt + t
+            sep = hold_sep
+            hold_txt = ""
+            hold_sep = False
+        units.append([t, sep])
+        sep = False
+    if hold_txt:
+        units.append([hold_txt, hold_sep])
+    return units
+
+
+def _note_units_width(units, measure):
+    """一行的宽度：行首单元不算它前面的空格。"""
+    total = 0
+    for idx, u in enumerate(units):
+        if idx > 0 and u[1]:
+            total += measure(" ")
+        total += measure(u[0])
+    return total
+
+
+def _note_units_text(units):
+    """单元表 -> 一行文字（行首不留空格，行内空格保留）。"""
+    parts = []
+    for idx, u in enumerate(units):
+        if idx > 0 and u[1]:
+            parts.append(" ")
+        parts.append(u[0])
+    return "".join(parts)
+
+
+def _note_safe_chunks(text):
+    """把一个单元切成「行内安全的最小块」。
+
+    单元宽过整行时只能硬切，但切之前先按避头尾规则重新分块：
+      · 收尾标点（，。、；：？！）等）粘到前一块末尾 —— 它不能起行
+      · 起头标点（（《 等）粘到后一块开头 —— 它不能收行
+    切完之后，断行只发生在块与块之间，标点自然跟着前面的字走。
+    少了这一步，窄屏上就会出现「」。」这种一行开头的怪事
+    （实测：引号短语被硬切后，收尾引号正好落在下一行开头）。
+    """
+    chunks = []
+    hold = ""                     # 待与下一块合并的起头标点
+    for ch in text:
+        if ch in _NOTE_NO_END:
+            hold += ch
+            continue
+        if hold:
+            ch = hold + ch
+            hold = ""
+        # 只看末字符：拼上起头标点之后，末字符仍是原来那个
+        # （安卓端 Profile.noteSafeChunks 用的是同一套判断）
+        if ch[-1] in _NOTE_NO_START and chunks:
+            chunks[-1] += ch
+            continue
+        chunks.append(ch)
+    if hold:
+        if chunks:
+            chunks[-1] += hold
+        else:
+            chunks.append(hold)
+    return chunks
+
+
+def _note_hard_split(units, measure, max_width):
+    """把宽过整行的单元按「安全块」硬切。
+
+    超长英文词 / 超长引号短语在正常文案里不会出现，但真出现了也不能把
+    版式撑破 —— 宁可切碎，也不能让文字溢出卡片。
+    """
+    out = []
+    for text, sp in units:
+        if measure(text) <= max_width:
+            out.append([text, sp])
+            continue
+        cur = ""
+        for ch in _note_safe_chunks(text):
+            if cur and measure(cur + ch) > max_width:
+                out.append([cur, sp])
+                sp = False
+                cur = ch
+            else:
+                cur += ch
+        if cur:
+            out.append([cur, sp])
+    return out
+
+
+def wrap_note_lines(text, measure, max_width):
+    """把一段说明文字按宽度折成若干行。
+
+    measure : callable(str) -> 数值，量一段文字有多宽
+    max_width : 每行最多允许多宽
+
+    规则（安卓端 Profile.wrapNoteLines 完全一致）：
+      · 引号短语、英文单词、数字带单位整体不可拆开
+      · 断行只发生在排版单元之间；行首不留空格
+      · 收尾标点不另起一行，起头标点不留在行末（避头尾）
+      · 单个单元宽过整行时按字符硬切，不撑破版式
+    """
+    units = _note_hard_split(_note_group_units(split_note_atoms(text)),
+                             measure, max_width)
+    if not units:
+        return []
+    lines = []
+    cur = []
+    cur_w = 0
+    for text, sp in units:
+        w = measure(text)
+        add = (measure(" ") if (sp and cur) else 0) + w
+        if cur and cur_w + add > max_width:
+            lines.append(_note_units_text(cur))
+            cur = []
+            cur_w = 0
+            add = w                 # 断行后行首不留空格
+        cur.append([text, sp])
+        cur_w += add
+    if cur:
+        lines.append(_note_units_text(cur))
+    return lines
+
+
 def _norm_user_profile(name, prof):
     """把外部传入的参数收敛成完整 profile：只接受已知数值字段，并夹到合理区间。
 
@@ -749,9 +1164,31 @@ def _items_payload(items):
     return [{"id": it["id"], "name": it["name"], "profile": it["profile"]} for it in items]
 
 
-def _dump_user_presets(items):
-    """写回磁盘（挑第一个可写的位置）。失败返回 False"""
-    payload = json.dumps({"version": 1, "items": _items_payload(items)},
+def _combos_payload(combos=None):
+    """弱网组合列表的对外形态：id/name/loop/summary/steps。
+
+    字段名与 Android 端 MyCombos.toJsonArray 对齐 —— 同一套脚本在两端都能跑，
+    不用为平台各写一份解析。summary 是一行人类可读的段序说明。
+    """
+    if combos is None:
+        combos = get_combos()
+    return [{"id": c["id"], "name": c["name"], "loop": bool(c.get("loop")),
+             "summary": combo_summary(c),
+             "steps": [{"key": s["key"], "minutes": int(s.get("minutes", 0) or 0),
+                        "seconds": int(s.get("seconds", 0) or 0)}
+                       for s in c.get("steps", [])]}
+            for c in combos]
+
+
+def _dump_store(items=None, combos=None):
+    """把自定义场景与弱网组合一起写回磁盘（两者共用一个文件）"""
+    if items is None:
+        items = get_user_presets()
+    if combos is None:
+        combos = get_combos()
+    payload = json.dumps({"version": 1,
+                          "items": _items_payload(items),
+                          "combos": _combos_payload(combos)},
                          ensure_ascii=False, indent=2).encode("utf-8")
     for f in _preset_files():
         try:
@@ -762,6 +1199,11 @@ def _dump_user_presets(items):
         except Exception:
             continue
     return False
+
+
+def _dump_user_presets(items):
+    """写回磁盘（挑第一个可写的位置）。失败返回 False"""
+    return _dump_store(items=items)
 
 
 def get_user_presets():
@@ -833,6 +1275,304 @@ def delete_user_preset(pid):
 
 
 # --------------------------------------------------------------------------
+# 弱网组合：多支场景按顺序自动播放
+#
+# 一次「地铁通勤」通常是好几段 Different 网络（进站 5G → 隧道掉到 4G 弱网 → 站间
+# 断一下），手动跟着点不现实，所以让用户把几支场景排好队、每段给个时长存下来，
+# 点一下就自动按序播放。存在自定义场景同一个文件里（combos 段），重装跟着留着。
+# --------------------------------------------------------------------------
+
+COMBO_KEY_PREFIX = "c:"
+MAX_COMBO_STEPS = 5            # 上限：再长就不好在界面上按顺序核对了
+STEP_MAX_MINUTES = 600         # 单段最多 10 分钟
+STEP_MAX_SECONDS = 59
+
+
+def step_seconds(st):
+    """一段跑多久（秒）。分秒都空时返回 0 —— 这种段在入库时会被丢掉"""
+    try:
+        mi = max(0, int(st.get("minutes", 0) or 0))
+    except Exception:
+        mi = 0
+    try:
+        se = max(0, int(st.get("seconds", 0) or 0))
+    except Exception:
+        se = 0
+    return min(mi, STEP_MAX_MINUTES) * 60 + min(se, STEP_MAX_SECONDS)
+
+
+def step_text(st):
+    """界面上这段时长怎么写：「2 分 30 秒」"""
+    mi = max(0, int(st.get("minutes", 0) or 0))
+    se = max(0, int(st.get("seconds", 0) or 0))
+    if mi and se:
+        return "%d 分 %d 秒" % (mi, se)
+    if mi:
+        return "%d 分" % mi
+    return "%d 秒" % se
+
+
+def norm_combo_steps(steps, rejected=None):
+    """把外部传入的步骤收敛成合法列表：丢掉没有场景 / 时长全空的段，超上限的裁掉。
+
+    rejected 传入一个 list 时，被丢掉的段会以 {"index": 原序号(从 1 起),
+    "reason": str, "key": str} 记进去，调用方据此提示用户哪一段有问题。
+
+    组合里不允许再选另一支组合（COMBO_KEY_PREFIX 开头的 key）：播放器是按段/steps
+    线性推进的，套一层嵌套它既不会展开也不会报错，只会把这一段静默跳过 —— 用户排的
+    第 2 段凭空不见最难排查，所以在入库这一层就掐死。
+    """
+    out = []
+    for i, s in enumerate(steps or [], 1):
+        try:
+            key = str(s.get("key") or "").strip()
+        except Exception:
+            continue
+        if key.startswith(COMBO_KEY_PREFIX):
+            # 嵌套组合一律不要：见上面 docstring 的说明
+            if isinstance(rejected, list):
+                rejected.append({"index": i, "key": key, "reason": "combo"})
+            continue
+        if not key:
+            continue
+        mi = 0
+        se = 0
+        try:
+            mi = max(0, min(STEP_MAX_MINUTES, int(s.get("minutes", 0) or 0)))
+        except Exception:
+            pass
+        try:
+            se = max(0, min(STEP_MAX_SECONDS, int(s.get("seconds", 0) or 0)))
+        except Exception:
+            pass
+        if mi <= 0 and se <= 0:
+            continue                       # 分秒都填 0 的段没法定时，等于没排
+        out.append({"key": key, "minutes": mi, "seconds": se})
+        if len(out) >= MAX_COMBO_STEPS:
+            break
+    return out
+
+
+def load_combos():
+    """读取磁盘上的弱网组合 → [{"id","name","loop","steps"}]。文件不存在/损坏返回 []"""
+    for f in _preset_files():
+        try:
+            if not f.exists():
+                continue
+            data = json.loads(f.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        raw = data.get("combos") if isinstance(data, dict) else None
+        out = []
+        for c in (raw or []):
+            try:
+                name = str(c.get("name", "")).strip()
+                if not name:
+                    continue
+                steps = norm_combo_steps(c.get("steps"))
+                if not steps:              # 全被拦掉的空壳组合没必要显示
+                    continue
+                out.append({"id": str(c.get("id") or ""), "name": name[:40],
+                            "loop": bool(c.get("loop")), "steps": steps})
+            except Exception:
+                continue
+        ids = {x["id"] for x in out if x["id"]}
+        for x in out:
+            if not x["id"]:
+                x["id"] = _new_pid(ids)
+                ids.add(x["id"])
+        return out
+    return []
+
+
+def get_combos():
+    """内存缓存的弱网组合（首次调用时从磁盘加载）"""
+    if G.combos is None:
+        G.combos = load_combos()
+    return G.combos
+
+
+def find_combo(cid):
+    cid = str(cid)
+    for c in get_combos():
+        if c["id"] == cid:
+            return c
+    return None
+
+
+def scene_profile(key):
+    """任意场景 key（内置 / 'u:<id>' 自定义）→ 完整 profile"""
+    key = str(key)
+    if key.startswith(USER_PRESET_KEY_PREFIX):
+        return build_user_profile(key)
+    return build_preset_profile(key)
+
+
+def scene_name(key):
+    """key → 显示名；查不到返回 key 本身（界面至少还能看出是哪一支）"""
+    key = str(key)
+    try:
+        if key.startswith(COMBO_KEY_PREFIX):
+            c = find_combo(key[len(COMBO_KEY_PREFIX):])
+            return c["name"] if c else "已删除的组合"
+        if key.startswith(USER_PRESET_KEY_PREFIX):
+            return build_user_profile(key).get("name") or key
+        return build_preset_profile(key).get("name") or key
+    except Exception:
+        return key
+
+
+def upsert_combo(name, steps, loop=False, cid=None):
+    """新增或覆盖一个组合，返回 (combo, combos)
+
+    归一化后一段都不剩时（全是嵌套组合 / 全是空时长）**不落库**，返回
+    (None, combos) 让调用方自己决定怎么提示。存一个 0 段的空壳组合毫无意义：
+    播不了、点开是空的，还会在列表里占一行让人以为排好了。
+    覆盖已有组合时原组合保持不变 —— 传了个空壳不该把人家排好的那支抹掉。
+    """
+    combos = get_combos()
+    name = str(name or "").strip()[:40] or "弱网组合"
+    combo = find_combo(cid) if cid else None
+    bad = []
+    steps = norm_combo_steps(steps, bad)
+    if bad:
+        log("组合「%s」丢掉 %d 段：里面选的是别的组合（不允许嵌套）→ %s"
+            % (name, len(bad), ", ".join("第 %d 段" % b["index"] for b in bad)))
+    if not steps:
+        log("组合「%s」没有一段可用，未保存" % name)
+        return None, combos
+    if combo is None:
+        combo = {"id": _new_pid({c["id"] for c in combos}), "name": "",
+                 "loop": False, "steps": []}
+        combos.append(combo)
+    combo["name"] = _unique_name(combos, name, combo["id"])
+    combo["loop"] = bool(loop)
+    combo["steps"] = steps
+    ok = _dump_store(combos=combos)
+    if not ok:
+        log("保存弱网组合失败（存储位置均不可写）")
+    return combo, combos
+
+
+def delete_combo(cid):
+    """删除一个组合，返回 (是否删掉, 剩余列表)"""
+    combos = get_combos()
+    cid = str(cid)
+    left = [c for c in combos if c["id"] != cid]
+    if len(left) == len(combos):
+        return False, combos
+    G.combos = left
+    ok = _dump_store(combos=left)
+    if not ok:
+        log("删除弱网组合后写盘失败（改动仅存在于本次运行）")
+    return True, left
+
+
+def combo_summary(combo):
+    """一行说明：5G 0:30 → 4G 弱网 1:00 → …（界面列表/日志用）"""
+    parts = []
+    for s in combo.get("steps", []):
+        parts.append("%s %s" % (scene_name(s["key"]), step_text(s)))
+    tail = "（循环）" if combo.get("loop") else ""
+    return " → ".join(parts) + tail
+
+
+# --------------------------------------------------------------------------
+# 共享契约：一段里引用的场景，对方机器上未必存在
+#
+# 组合里的每一段记的是「场景 key + 时长」。自定义 key 长这样 u:8f3a —— 这个 id 是
+# 我这台机器存盘时现编的，推给别人时对方那一栏里根本没有这个 id，直接照搬过去会
+# 解析成「已删除的场景」，组合看着收下了、播起来每段都是空的。所以：
+#   自定义段 → 连同名字与整份参数快照一起推（与 items 里的自定义环境一个道理）；
+#   内置段   → 带上名字，对方版本里没这一档时能把话说清楚而不是静默丢掉。
+# --------------------------------------------------------------------------
+
+def share_steps(combo):
+    """组合内的段 → 可推送的形态（每段补齐 scene 名，自定义段额外带 profile）"""
+    out = []
+    for s in (combo or {}).get("steps", []):
+        key = str(s.get("key") or "").strip()
+        if not key:
+            continue
+        item = {"key": key,
+                "minutes": max(0, int(s.get("minutes", 0) or 0)),
+                "seconds": max(0, int(s.get("seconds", 0) or 0))}
+        try:
+            prof = scene_profile(key)
+        except Exception:
+            prof = None
+        item["scene"] = str((prof or {}).get("name") or key)[:40]
+        if key.startswith(USER_PRESET_KEY_PREFIX):
+            item["profile"] = dict(prof) if prof else None
+        out.append(item)
+    return out
+
+
+def _share_clean(name, fallback=""):
+    """共享过来的名字：压空白 + 限长（与本地自定义场景同一上限）"""
+    s = " ".join(str(name or "").split())[:40]
+    return s or fallback
+
+
+def _find_combo_by_name(name):
+    target = str(name or "").strip().lower()
+    for c in get_combos():
+        if c["name"].strip().lower() == target:
+            return c
+    return None
+
+
+def _resolve_shared_step(step):
+    """把别人推来的一段映射到本机记录。（key, None）表示可用，丢段返回 (None, 原因)。
+
+    这里会发生写库：对面用到的自定义场景我们这边没有时，按快照在本地建一条同名
+    自定义场景 —— 组合是「一段引用某场景」，场景本体不落地这一段就无从播放。
+    """
+    key = str((step or {}).get("key") or "").strip()
+    if not key or key.startswith(COMBO_KEY_PREFIX):
+        return None, "嵌套组合"
+    nm = _share_clean((step or {}).get("scene") or (step or {}).get("name"))
+    snapshot = step.get("profile") if isinstance(step.get("profile"), dict) else None
+    if key.startswith(USER_PRESET_KEY_PREFIX):
+        if nm:
+            it = _find_preset_by_name(nm)
+            if it is not None:
+                return USER_PRESET_KEY_PREFIX + it["id"], None
+        if snapshot:
+            nm = nm or "对方的环境"
+            newit, _all = upsert_user_preset(nm, _norm_user_profile(nm, snapshot))
+            return USER_PRESET_KEY_PREFIX + newit["id"], None
+        return None, "缺场景参数"
+    try:
+        scene_profile(key)          # 本版本是否有这一档内置预设
+        return key, None
+    except Exception:
+        pass
+    # 版本差异（对方比我们新）：退一步按名字找本地同类场景，还找不到才丢
+    if nm:
+        it = _find_preset_by_name(nm)
+        if it is not None:
+            return USER_PRESET_KEY_PREFIX + it["id"], None
+    return None, "本机没有「%s」这一档" % (nm or key)
+
+
+def _resolve_shared_steps(steps):
+    """整份组合的段做本机映射，返回 (可用段, 被丢掉的说明列表)"""
+    out, dropped = [], []
+    for i, s in enumerate(steps or [], 1):
+        if not isinstance(s, dict):
+            continue
+        key, why = _resolve_shared_step(s)
+        if key is None:
+            dropped.append("第%d段（%s）" % (i, why))
+            continue
+        out.append({"key": key,
+                    "minutes": max(0, min(STEP_MAX_MINUTES, int(s.get("minutes", 0) or 0))),
+                    "seconds": max(0, min(STEP_MAX_SECONDS, int(s.get("seconds", 0) or 0)))})
+    return out, dropped
+
+
+# --------------------------------------------------------------------------
 # 全局状态
 # --------------------------------------------------------------------------
 
@@ -870,6 +1610,11 @@ class G:
     bucket_up = None
     bucket_down = None
     user_presets = None         # 自定义栏（用户保存的场景），None = 尚未从磁盘加载
+    combos = None               # 弱网组合（多场景按序播放），None = 尚未从磁盘加载
+    combo_task = None           # 正在播放的组合（asyncio.Task），没有则为 None
+    combo_id = None             # 正在播放/暂停在手的组合 id
+    combo_step = -1             # 当前播到第几段（0 起）
+    combo_deadline = 0          # 当前段什么时候结束（time.time()，界面倒计时用）
     # ---- 环境共享 ----
     self_id = ""                # 本机标识（区分广播是不是自己发的）
     user_name = ""              # 局域网上显示的名字
@@ -1977,13 +2722,17 @@ async def set_profile(prof, key):
 
 
 async def select_scene(prof, key):
-    """只「选中」一支场景，不启动弱网。
+    """选中一支场景：弱网已开启就立即生效，没开启就只记下、不碰流量。
 
-    没点总开关之前不碰引擎参数（否则选一下场景流量就被限住了，等于偷偷开始测试）：
-    只记下 preset_key，等用户点「开启限速」时由 set_limit(True) 按这个 key 复原。
-    已经在测试中时，切场景照旧立即生效。
+    这是界面上「点场景 = 立即生效」的真正含义：**生效的前提是弱网已经开着**。
+      - 已在测试中：切场景立刻落到引擎参数上（已在途的连接也跟着变）
+      - 没开始：只更新 preset_key，等用户点「▶ 开启限速」时按这个 key 复原。
+        反过来不行——选一下场景就把流量限住，等于偷偷替用户开始了测试。
     """
     G.preset_key = key
+    if G.combo_task is not None and key != COMBO_KEY_PREFIX + str(G.combo_id):
+        # 用户手动点了别的场景：正在播放的组合必须停下，否则它会到点把场景抢回去
+        await stop_combo()
     if has_limits(prof):
         G.last_profile = dict(prof)
     if not G.limit_on:
@@ -1991,6 +2740,126 @@ async def select_scene(prof, key):
     await set_profile(prof, key)
     G.limit_on = True
     return True
+
+
+# ---------------------------------------------------------------- 弱网组合播放
+
+
+async def _combo_runner(combo):
+    """按 steps 顺序换场景：每段跑满它的时长后自动切下一段。
+
+    循环由 combo['loop'] 决定；不循环就停在最后一段（用户既然排了队，播完保持末段
+    比自动回到直连更符合预期 —— 他还在用这个网络环境看 App 的反应）。
+    """
+    key = COMBO_KEY_PREFIX + combo["id"]
+    steps = combo["steps"]
+    try:
+        while True:
+            for i, st in enumerate(steps):
+                try:
+                    prof = scene_profile(st["key"])
+                except Exception:
+                    # 这一段的场景被删了 / key 不认识：跳过它，别把整个组合带崩
+                    log("组合「%s」第 %d 段的场景不可用，已跳过" % (combo["name"], i + 1))
+                    continue
+                dur = step_seconds(st)
+                G.combo_step = i
+                G.combo_deadline = time.time() + dur
+                await set_profile(prof, key)     # 不经 select_scene：那是手动切场景的入口
+                G.limit_on = True
+                await _sleep_step(dur, combo["id"])
+                if find_combo(combo["id"]) is None:
+                    # 播放途中被删掉了：到这里就停，不能再替它改参数
+                    log("组合「%s」已被删除，停止播放" % combo["name"])
+                    return
+            if not combo.get("loop"):
+                G.combo_deadline = 0             # 播完了：界面上的倒计时收掉
+                log_event("config", "组合「%s」播放完毕，停在最后一段" % combo["name"])
+                return
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:
+        log("组合播放异常：" + repr(e))
+    finally:
+        # 正常播完 / 出错退出后要把「正在播放」的状态收起来；
+        # stop_combo 已经把 G.combo_task 置空了，那时这里不该再动别的字段
+        if G.combo_task is asyncio.current_task():
+            G.combo_task = None
+            G.combo_id = None
+            G.combo_step = -1
+            G.combo_deadline = 0
+
+
+async def _sleep_step(dur, cid):
+    """睡满一段，但每 0.5s 醒一次看组合还在不在：删掉后不该傻等到这段跑完"""
+    end = time.time() + max(0, dur)
+    while True:
+        rest = end - time.time()
+        if rest <= 0:
+            return
+        await asyncio.sleep(min(0.5, rest))
+        if find_combo(str(cid)) is None:
+            return
+
+
+async def start_combo(cid):
+    """立刻按这个组合开始播放（弱网必须已经开着，否则给组合对象会让流量被偷偷限住）"""
+    combo = find_combo(cid)
+    if combo is None:
+        raise KeyError(cid)
+    await stop_combo()                    # 换组合时先掐掉上一支，避免两个 Task 抢着改参数
+    G.combo_id = combo["id"]
+    G.combo_step = -1
+    G.combo_task = asyncio.create_task(_combo_runner(combo))
+    log_event("config", "开始播放组合「%s」：%s" % (combo["name"], combo_summary(combo)))
+    return combo
+
+
+async def select_combo(cid):
+    """选中一个组合：弱网已开启就从第一段开始播，没开启只记下来（同 select_scene 规则）"""
+    combo = find_combo(cid)
+    if combo is None:
+        raise KeyError(cid)
+    G.preset_key = COMBO_KEY_PREFIX + combo["id"]
+    if not G.limit_on:
+        # 还没开始测试：把组合的末段参数记下来没意义，这里只记「选了它」，
+        # 等用户点「开启限速」时 set_limit 会认出 c: 前缀并开始播放
+        G.combo_id = combo["id"]
+        G.combo_step = -1
+        return False
+    await start_combo(combo["id"])
+    return True
+
+
+async def stop_combo():
+    """停掉正在播放的组合（换场景 / 关限速 / 删组合时都要走这里）"""
+    task = G.combo_task
+    G.combo_task = None
+    G.combo_id = None
+    G.combo_step = -1
+    G.combo_deadline = 0
+    if task is None:
+        return
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+    except Exception:
+        pass
+
+
+def combo_state():
+    """给界面看的播放进度：None=没在播；否则 {name, step, total, left}"""
+    if G.combo_task is None or G.combo_id is None:
+        return None
+    combo = find_combo(G.combo_id)
+    if combo is None:
+        return None
+    return {"id": combo["id"], "name": combo["name"],
+            "step": G.combo_step + 1, "total": len(combo["steps"]),
+            "left": max(0, int(G.combo_deadline - time.time())),
+            "loop": bool(combo.get("loop"))}
 
 
 async def set_limit(on):
@@ -2002,14 +2871,25 @@ async def set_limit(on):
     on = bool(on)
     key = G.preset_key
     if on:
-        try:
-            prof = build_preset_profile(key)
-        except Exception:
-            # key 是 "custom"（自定义参数）一类没有预设可查的情况：
-            # 用最后一次生效过的场景复原，避免开启时把用户调好的参数冲掉
-            prof = G.last_profile or default_profile()
-        await set_profile(prof, key)
+        if str(key).startswith(COMBO_KEY_PREFIX):
+            # 选中组合又没开始播放的情形（典型：选了组合后点了停止，再点开启）
+            try:
+                await start_combo(key[len(COMBO_KEY_PREFIX):])
+            except KeyError:
+                log("选中的组合已不存在，已切回上一次的场景")
+                await set_profile(G.last_profile or default_profile(), "custom")
+                G.limit_on = True
+                return G.limit_on
+        else:
+            try:
+                prof = build_preset_profile(key)
+            except Exception:
+                # key 是 "custom"（自定义参数）一类没有预设可查的情况：
+                # 用最后一次生效过的场景复原，避免开启时把用户调好的参数冲掉
+                prof = G.last_profile or default_profile()
+            await set_profile(prof, key)
     else:
+        await stop_combo()                 # 关掉限速时组合不能继续在后台换场景
         await set_profile(default_profile(), key)
     G.limit_on = on                     # 覆盖 set_profile 的推断：自定义全零也算「已开启」
     return G.limit_on
@@ -2254,15 +3134,22 @@ def _find_preset_by_name(name):
     return None
 
 
+COMBO_SHARE_MARK = "🔀 "          # 推文 / 日志里标出「这是个组合」的前缀
+
+
 def receive_share(payload):
-    """别人推给我的环境：不同名直接入库；同名先进收件箱，等本地用户决定
-    保留还是覆盖（同名静默覆盖会把人家调好的参数冲掉，不能替用户做主）。"""
-    items = payload.get("items")
-    if not isinstance(items, list) or not items:
+    """别人推给我的东西（自定义环境 + 弱网组合）：不同名直接入库；同名先进收件箱。
+
+    两类走完全同一套规则 —— 组合跟自定义环境一样，同名就是两条不同内容撞了名字，
+    静默覆盖会把对面排好的段序冲掉，所以一样进收件箱等本机用户决定。
+    """
+    items = payload.get("items") if isinstance(payload.get("items"), list) else []
+    combos = payload.get("combos") if isinstance(payload.get("combos"), list) else []
+    if not items and not combos:
         return {"ok": False, "error": "没有内容"}
     from_name = clean_name(payload.get("from"), "某人")
     from_id = str(payload.get("from_id") or "")
-    accepted, pending = [], []
+    accepted, pending, dropped = [], [], []
     for it in items[:20]:
         if not isinstance(it, dict):
             continue
@@ -2277,21 +3164,93 @@ def receive_share(payload):
         else:
             iid = _new_pid(set(G.inbox))
             G.inbox[iid] = {"id": iid, "from": from_name, "from_id": from_id,
-                            "name": name, "profile": prof, "at": time.time()}
-            pending.append({"id": iid, "name": name})
+                            "kind": "preset", "name": name, "profile": prof,
+                            "at": time.time()}
+            pending.append({"id": iid, "name": name, "kind": "preset"})
             log_event("share", "%s 推送的「%s」与本地同名，等你决定" % (from_name, name))
-    return {"ok": True, "accepted": accepted, "pending": pending, "name": G.user_name}
+    for c in combos[:20]:
+        if not isinstance(c, dict):
+            continue
+        name = _share_clean(c.get("name"))
+        if not name:
+            continue
+        raw_steps = c.get("steps") if isinstance(c.get("steps"), list) else []
+        loop = bool(c.get("loop"))
+        if _find_combo_by_name(name) is None:
+            steps, dropped_steps = _resolve_shared_steps(raw_steps)
+            if not steps:
+                # 一段都落不下来：对方这台机器上没法播这个组合。
+                # 关键是要回执给推送方 —— 静默丢弃的话，发送的人会以为推成功了。
+                why = "、".join(dropped_steps) if dropped_steps else "没有可用的段"
+                dropped.append({"name": name, "reason": why})
+                log_event("share", "%s 推送的组合「%s」没有一段能落在本机，已丢弃：%s"
+                          % (from_name, name, why))
+                continue
+            newc, _all = upsert_combo(name, steps, loop)
+            if newc is None:
+                # 引擎再兜一道：归一化后没段可用就不落库（不能收下一支空壳组合）
+                dropped.append({"name": name, "reason": "没有可用的段"})
+                log_event("share", "%s 推送的组合「%s」没有一段能落在本机，已丢弃"
+                          % (from_name, name))
+                continue
+            accepted.append(COMBO_SHARE_MARK + newc["name"])
+            log_event("share", "收到 %s 推送的弱网组合：%s" % (from_name, newc["name"]))
+            if dropped_steps:
+                log_event("share", "组合「%s」丢掉 %s" % (newc["name"], "、".join(dropped_steps)))
+        else:
+            iid = _new_pid(set(G.inbox))
+            G.inbox[iid] = {"id": iid, "from": from_name, "from_id": from_id,
+                            "kind": "combo", "name": name,
+                            "combo": {"loop": loop, "steps": raw_steps},
+                            "at": time.time()}
+            pending.append({"id": iid, "name": name, "kind": "combo"})
+            log_event("share", "%s 推送的组合「%s」与本地同名，等你决定"
+                      % (from_name, name))
+    return {"ok": True, "accepted": accepted, "pending": pending,
+            "dropped": dropped, "name": G.user_name}
 
 
 def resolve_inbox(iid, action, new_name=None):
-    """处理收件箱里的一条：overwrite=覆盖本地 / keep=保留本地 / rename=另存为新名字"""
+    """处理收件箱里的一条：overwrite=覆盖本地 / keep=保留本地 / rename=另存为新名字。
+
+    自定义环境与弱网组合共用这套处理（kind 区分）：组合要在这一步才把段映射到本机
+    场景 —— 收件箱里的条子随时可能被「保留本地」丢掉，提前写库会白留一堆自定义场景。
+    """
     item = G.inbox.pop(iid, None)
     if item is None:
         return {"ok": False, "error": "该请求已处理或不存在"}
     name = item["name"]
+    kind = item.get("kind") or "preset"
     if action == "keep":
         log_event("share", "保留本地的「%s」，丢弃 %s 推送的版本" % (name, item["from"]))
-        return {"ok": True, "action": "keep", "name": name}
+        return {"ok": True, "action": "keep", "name": name, "kind": kind}
+    if kind == "combo":
+        raw = item.get("combo") or {}
+        steps, dropped = _resolve_shared_steps(raw.get("steps"))
+        if not steps:
+            log_event("share", "%s 推送的组合「%s」没有一段能落在本机，已丢弃"
+                      % (item["from"], name))
+            return {"ok": False, "error": "这个组合里没有任何一段在本机可用"}
+        loop = bool(raw.get("loop"))
+        if action == "rename":
+            nm = _share_clean(new_name) or _share_clean(
+                "%s（来自 %s）" % (name, item["from"]), "收到的组合")
+            combo, _all = upsert_combo(nm, steps, loop)   # 另存 = 新开一条，不动本地那条
+            if combo is None:
+                return {"ok": False, "error": "这个组合里没有任何一段在本机可用"}
+            log_event("share", "已把 %s 推送的组合另存为「%s」" % (item["from"], combo["name"]))
+            if dropped:
+                log_event("share", "组合「%s」丢掉 %s" % (combo["name"], "、".join(dropped)))
+            return {"ok": True, "action": "rename", "name": combo["name"], "kind": kind}
+        cur = _find_combo_by_name(name)
+        combo, _all = upsert_combo(name, steps, loop, cid=(cur or {}).get("id"))
+        if combo is None:
+            # 引擎兜底：不能拿一段都用不上的组合去覆盖本地那支排好的
+            return {"ok": False, "error": "这个组合里没有任何一段在本机可用"}
+        log_event("share", "已用 %s 推送的版本覆盖组合「%s」" % (item["from"], combo["name"]))
+        if dropped:
+            log_event("share", "组合「%s」丢掉 %s" % (combo["name"], "、".join(dropped)))
+        return {"ok": True, "action": "overwrite", "name": combo["name"], "kind": kind}
     if action == "rename":
         nm = clean_name(new_name, "")
         if not nm:
@@ -2314,18 +3273,30 @@ def _post_share(ip, port, payload, timeout=6):
         return json.loads(r.read().decode("utf-8"))
 
 
-async def push_to_peer(peer, item_ids):
-    """把本地的自定义环境推给一个 peer。同步 HTTP 放线程池，别卡住事件循环。"""
+async def push_to_peer(peer, item_ids, combo_ids=None):
+    """把选中的自定义环境 / 弱网组合推给一个 peer。同步 HTTP 放线程池，别卡住事件循环。
+
+    组合随环境在同一次请求里过去：同类内容在对方那边各自判同名，但整体只是一次
+    推送、事件日志上也只留一条「谁推来了什么」，事后回溯两边对得上。
+    """
     by_id = {p["id"]: p for p in get_user_presets()}
     items = []
     for iid in (item_ids or []):
         p = by_id.get(iid)
         if p:
             items.append({"id": p["id"], "name": p["name"], "profile": p["profile"]})
-    if not items:
-        return {"ok": False, "error": "没找到要推送的环境"}
+    by_cid = {c["id"]: c for c in get_combos()}
+    combos = []
+    for cid in (combo_ids or []):
+        c = by_cid.get(cid)
+        if c:
+            combos.append({"id": c["id"], "name": c["name"], "loop": bool(c.get("loop")),
+                           "steps": share_steps(c)})
+    if not items and not combos:
+        return {"ok": False, "error": "没找到要推送的内容"}
     payload = {"from": G.user_name, "from_id": G.self_id,
-               "platform": "windows" if IS_WIN else os.name, "items": items}
+               "platform": "windows" if IS_WIN else os.name,
+               "items": items, "combos": combos}
     ip = str(peer.get("ip") or "")
     port = int(peer.get("share") or SHARE_PORT)
     who = peer.get("name") or ip
@@ -2339,14 +3310,21 @@ async def push_to_peer(peer, item_ids):
         return {"ok": False, "error": str(e)[:160]}
     accepted = [str(x) for x in (res.get("accepted") or [])]
     pending = res.get("pending") or []
+    dropped = res.get("dropped") or []
     if accepted:
         log_event("share", "已推送给 %s：%s" % (res.get("name") or who, "、".join(accepted)))
     if pending:
-        log_event("share", "%s 那边已有同名环境，等对方确认：%s"
+        log_event("share", "%s 那边已有同名内容，等对方确认：%s"
                   % (res.get("name") or who,
                      "、".join(str(p.get("name")) for p in pending)))
+    if dropped:
+        # 对方那边一段都用不上，组合被丢了 —— 必须回执，不然发送方以为推成功了
+        for d in dropped:
+            log_event("share", "%s 那边收不下组合「%s」：%s"
+                      % (res.get("name") or who, d.get("name") or "",
+                         d.get("reason") or "没有可用的段"))
     return {"ok": True, "to": res.get("name") or who,
-            "accepted": accepted, "pending": pending}
+            "accepted": accepted, "pending": pending, "dropped": dropped}
 
 
 async def handle_share(reader, writer):
@@ -2506,6 +3484,57 @@ async def handle_ctrl(reader, writer):
             send_response(writer, 200, JSON_CT, json.dumps(
                 {"items": _items_payload(get_user_presets())},
                 ensure_ascii=False).encode())
+        elif path == "/api/combos":
+            # 弱网组合列表（每支带 steps 与一行摘要）。字段与 Android 端同名，
+            # 同一套脚本在两端都能跑，不用为平台各写一份
+            send_response(writer, 200, JSON_CT, json.dumps(
+                {"items": _combos_payload()}, ensure_ascii=False).encode())
+        elif method == "POST" and path == "/api/combo":
+            # 新增或覆盖一支组合：{id?, name, loop, steps:[{key,minutes,seconds}]}
+            try:
+                data = json.loads(body)
+            except Exception:
+                data = None
+            if not isinstance(data, dict):
+                send_response(writer, 400, JSON_CT, b'{"error":"bad request"}')
+                return
+            raw_steps = data.get("steps") if isinstance(data.get("steps"), list) else []
+            steps = []
+            for s in raw_steps:
+                if not isinstance(s, dict):
+                    continue
+                steps.append({"key": str(s.get("key") or ""),
+                              "minutes": max(0, int(s.get("minutes", 0) or 0)),
+                              "seconds": max(0, int(s.get("seconds", 0) or 0))})
+            combo, _all = upsert_combo(data.get("name") or "", steps,
+                                       loop=bool(data.get("loop")),
+                                       cid=data.get("id"))
+            if combo is None:
+                # 一段都留不下：不当成保存成功，否则调用方会以为库里多了一支空组合
+                send_response(writer, 400, JSON_CT, json.dumps(
+                    {"error": "没有一段能用的场景"}, ensure_ascii=False).encode())
+                return
+            log_event("config", "保存弱网组合：" + combo["name"])
+            send_response(writer, 200, JSON_CT, json.dumps(
+                {"ok": True, "id": combo["id"], "name": combo["name"],
+                 "steps": len(combo["steps"])},
+                ensure_ascii=False).encode())
+        elif method == "POST" and path == "/api/combo/delete":
+            try:
+                cid = json.loads(body).get("id")
+            except Exception:
+                cid = None
+            if not cid:
+                send_response(writer, 400, JSON_CT, b'{"error":"bad request"}')
+                return
+            combo = find_combo(cid)
+            ok = bool(combo) and delete_combo(cid)[0]
+            if ok:
+                # 删的正是正在播的那支：立刻停，别让它在后台继续改参数
+                await stop_combo()
+                log_event("config", "删除弱网组合：" + combo["name"])
+            send_response(writer, 200, JSON_CT,
+                          json.dumps({"ok": ok}, ensure_ascii=False).encode())
         elif method == "POST" and path == "/api/upreset":
             # 保存（带 id 则覆盖更新那一条，否则新建）
             try:
@@ -2539,6 +3568,21 @@ async def handle_ctrl(reader, writer):
             key = None
             try:
                 key = json.loads(body).get("key")
+            except Exception:
+                key = None
+            if str(key or "").startswith(COMBO_KEY_PREFIX):
+                # "c:<id>" = 弱网组合：与 GUI 点组合按钮走同一条路
+                # （已开限速就立刻按序播放，没开只选中，不替用户偷偷开始限速）
+                cid = str(key)[len(COMBO_KEY_PREFIX):]
+                if find_combo(cid) is None:
+                    send_response(writer, 400, JSON_CT, b'{"error":"bad request"}')
+                    return
+                applied = await select_combo(cid)
+                send_response(writer, 200, JSON_CT, json.dumps(
+                    {"ok": True, "applied": bool(applied),
+                     "kind": "combo"}, ensure_ascii=False).encode())
+                return
+            try:
                 prof = build_preset_profile(key)
             except Exception:
                 prof = None
@@ -2680,6 +3724,11 @@ async def handle_ctrl(reader, writer):
                 ids = [ids]
             if not isinstance(ids, list):
                 ids = []
+            cids = d.get("combo_ids")
+            if isinstance(cids, str):
+                cids = [cids]
+            if not isinstance(cids, list):
+                cids = []
             peer = d.get("peer")
             if isinstance(peer, str) and ":" in peer:      # 兼容 "ip:port" 写法
                 ip, _, pstr = peer.partition(":")
@@ -2687,14 +3736,20 @@ async def handle_ctrl(reader, writer):
             if not isinstance(peer, dict) or not peer.get("ip"):
                 send_response(writer, 400, JSON_CT, b'{"error":"bad peer"}')
             else:
-                res = await push_to_peer(peer, ids)
+                res = await push_to_peer(peer, ids, cids)
                 send_response(writer, 200, JSON_CT,
                               json.dumps(res, ensure_ascii=False).encode())
         elif path == "/api/inbox":
             items = []
             for it in sorted(G.inbox.values(), key=lambda x: x["at"]):
-                items.append({"id": it["id"], "from": it["from"], "name": it["name"],
-                              "profile": it["profile"], "ago": int(time.time() - it["at"])})
+                row = {"id": it["id"], "from": it["from"], "name": it["name"],
+                       "kind": it.get("kind") or "preset",
+                       "ago": int(time.time() - it["at"])}
+                if row["kind"] == "combo":
+                    row["combo"] = it.get("combo") or {}
+                else:
+                    row["profile"] = it.get("profile") or {}
+                items.append(row)
             send_response(writer, 200, JSON_CT,
                           json.dumps({"items": items}, ensure_ascii=False).encode())
         elif method == "POST" and path == "/api/inbox/resolve":

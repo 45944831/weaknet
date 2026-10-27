@@ -3,6 +3,7 @@ package com.weaknet.app;
 import android.app.Dialog;
 import android.content.DialogInterface;
 import android.graphics.Color;
+import android.graphics.Paint;
 import android.graphics.Typeface;
 import android.graphics.drawable.ColorDrawable;
 import android.graphics.drawable.GradientDrawable;
@@ -36,10 +37,26 @@ import android.widget.TextView;
 public class ParamSheet {
     private final MainActivity a;
 
+    // ---------------------------------------------------------------- 排版常量
+    //
+    // 与桌面版 weaknet_gui.py 的 NOTE_* 一一对应，两端保持一样。
+    // 折行由引擎层（Profile.wrapNoteLines）做，不交给 TextView 自己断：
+    // 安卓的断行规则跟桌面端不同，同一段文案在两端会被断在不同位置；
+    // 而且「·」条目符会被甩到单独一行，「「本机 → 服务器」」会被从中间劈开。
+    private static final int NOTE_PAD = 14;           // 卡片内左右留白（dp）
+    private static final int NOTE_TIP_INDENT = 14;    // 「·」条目符占的宽度（dp）
+    private static final float NOTE_TEXT_SIZE = 14f;  // 正文字号（sp）
+    private static final float NOTE_HEAD_SIZE = 15f;  // 标题字号（sp）
+
     private Dialog dlg;
     private LinearLayout card;
     private TextView tvName;
-    private TextView tvNote;
+    private TextView tvBody;
+    private LinearLayout tvTipsBox;
+    private String currentKey = "";
+
+    /** 量文字宽度用（安卓端按真实字体测，桌面端按 Tk 字体测） */
+    private final Paint notePaint = new Paint();
 
     ParamSheet(MainActivity a) {
         this.a = a;
@@ -51,9 +68,80 @@ public class ParamSheet {
         String note = Profile.noteOfParam(key);
         if (note.length() == 0) return;
         if (dlg == null) build();
+        currentKey = key;
         tvName.setText(labelOf(key));
-        tvNote.setText(note);
+        // 正文分两层：作用一段、提醒若干条（规则与桌面版 split_param_note 一致）
+        Object[] parts = Profile.splitNote(key);
+        String body = parts[0] == null ? "" : (String) parts[0];
+        tvBody.setText(wrap(body.length() == 0 ? "（暂无说明）" : body,
+                textWidth()));
+
+        tvTipsBox.removeAllViews();
+        java.util.List<?> tips = (java.util.List<?>) parts[1];
+        if (tips != null && !tips.isEmpty()) {
+            tvTipsBox.addView(sectionLabel("注意", 0xFFD97706, dp(12)));
+            for (int i = 0; i < tips.size(); i++) {
+                tvTipsBox.addView(tipRow((String) tips.get(i),
+                        i == 0 ? dp(4) : dp(3)));
+            }
+        }
         if (dlg != null && !dlg.isShowing()) dlg.show();
+    }
+
+    /**
+     * 一条提醒：左边一个「·」，右边一块正文。
+     *
+     * 「·」必须单独一个控件。之前跟正文拼成同一个字符串（"· " + tip），
+     * TextView 会把「·」当成一个词，单独甩到一行 —— 用户截图里那行光秃秃的
+     * 「·」就是这么来的。拆开后符号固定待在左边，正文整体缩进，悬挂缩进。
+     */
+    private View tipRow(String tip, int marginTop) {
+        LinearLayout row = new LinearLayout(a);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+
+        TextView dot = new TextView(a);
+        dot.setText("·");
+        dot.setTextSize(NOTE_TEXT_SIZE);
+        dot.setTextColor(0xFF1F2430);
+        LinearLayout.LayoutParams dotLp = new LinearLayout.LayoutParams(
+                dp(NOTE_TIP_INDENT), ViewGroup.LayoutParams.WRAP_CONTENT);
+        row.addView(dot, dotLp);
+
+        TextView t = new TextView(a);
+        t.setText(wrap(tip, textWidth() - dp(NOTE_TIP_INDENT)));
+        t.setTextSize(NOTE_TEXT_SIZE);
+        t.setTextColor(0xFF1F2430);
+        t.setLineSpacing(dp(4), 1f);
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
+        row.addView(t, lp);
+
+        LinearLayout.LayoutParams rp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        rp.setMargins(0, marginTop, 0, 0);
+        row.setLayoutParams(rp);
+        return row;
+    }
+
+    /** 正文可用宽度（像素）：屏幕宽减去卡片与浮层的留白 */
+    private int textWidth() {
+        int wide = a.getResources().getDisplayMetrics().widthPixels;
+        return Math.max(dp(120), wide - dp(16) * 2 - NOTE_PAD * 2 - dp(2));
+    }
+
+    /** 用引擎层规则折行，返回带 \n 的文本 */
+    private String wrap(String text, int maxWidth) {
+        java.util.List<String> lines = Profile.wrapNoteLines(text, new Profile.NoteMeasurer() {
+            public int measure(String s) {
+                return (int) Math.ceil(notePaint.measureText(s));
+            }
+        }, maxWidth);
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < lines.size(); i++) {
+            if (i > 0) sb.append('\n');
+            sb.append(lines.get(i));
+        }
+        return sb.toString();
     }
 
     void close() {
@@ -79,6 +167,13 @@ public class ParamSheet {
         dlg.setCancelable(true);
         dlg.setCanceledOnTouchOutside(true);
 
+        // 测宽用的 Paint：字号必须跟正文 TextView 完全一致，
+        // 否则量出来的宽度跟实际排版差一截，断行位置就全错了
+        notePaint.setAntiAlias(false);
+        notePaint.setTextSize(NOTE_TEXT_SIZE * a.getResources()
+                .getDisplayMetrics().scaledDensity);
+        notePaint.setTypeface(Typeface.DEFAULT);
+
         ScrollView sv = new ScrollView(a);
         sv.setBackgroundColor(Color.TRANSPARENT);
 
@@ -87,18 +182,20 @@ public class ParamSheet {
         card.setBackground(box(Color.WHITE, 0xFFDDE3EC, 14));
         card.setPadding(dp(14), dp(12), dp(14), dp(14));
 
-        // ---- 标题栏：！ + 参数名 + ✕ ----
+        // ---- 标题栏：! + 参数名 + ✕ ----
+        // 用半角「!」，不用全角「！」：全角感叹号在中文正文字体里占一整格，
+        // 墨迹却挤在格子左缘，跟参数名之间凭空多出一大段空隙，看起来像浮在半空。
         LinearLayout head = new LinearLayout(a);
         head.setOrientation(LinearLayout.HORIZONTAL);
         head.setGravity(Gravity.CENTER_VERTICAL);
         TextView bang = new TextView(a);
-        bang.setText("！");
-        bang.setTextSize(15);
+        bang.setText("!");
+        bang.setTextSize(NOTE_HEAD_SIZE);
         bang.setTextColor(0xFF2F6FED);
         bang.setTypeface(null, Typeface.BOLD);
         head.addView(bang);
         tvName = new TextView(a);
-        tvName.setTextSize(15);
+        tvName.setTextSize(NOTE_HEAD_SIZE);
         tvName.setTextColor(0xFF1F2430);
         tvName.setTypeface(null, Typeface.BOLD);
         tvName.setPadding(dp(6), 0, 0, 0);
@@ -117,13 +214,29 @@ public class ParamSheet {
         });
         head.addView(close);
         card.addView(head);
-        card.addView(divider(dp(8)));
+        card.addView(divider(dp(10)));
 
-        tvNote = new TextView(a);
-        tvNote.setTextSize(13);
-        tvNote.setTextColor(0xFF3A4250);
-        tvNote.setLineSpacing(dp(3), 1f);
-        card.addView(tvNote);
+        // ---- 单位 / 取值范围：两枚小标签，一眼分得清哪个是单位、哪个是上限 ----
+        LinearLayout chips = new LinearLayout(a);
+        chips.setOrientation(LinearLayout.HORIZONTAL);
+        chips.setPadding(0, dp(2), 0, 0);
+        chips.addView(chip("单位", unitOf(currentKey)));
+        chips.addView(chip("取值范围", "0 ~ " + topOf(currentKey)));
+        card.addView(chips);
+        card.addView(divider(dp(10)));
+
+        // ---- 正文：分「作用」与「注意」两层 ----
+        // 之前整段糊在一起，读者分不清哪句是提醒，最容易踩的那句反倒被略过
+        tvBody = new TextView(a);
+        tvBody.setTextSize(NOTE_TEXT_SIZE);
+        tvBody.setTextColor(0xFF1F2430);
+        tvBody.setLineSpacing(dp(4), 1f);
+        card.addView(sectionLabel("作用", 0xFF6B7280, dp(10)));
+        card.addView(tvBody);
+
+        tvTipsBox = new LinearLayout(a);
+        tvTipsBox.setOrientation(LinearLayout.VERTICAL);
+        card.addView(tvTipsBox);
 
         Button ok = new Button(a);
         ok.setAllCaps(false);
@@ -141,7 +254,7 @@ public class ParamSheet {
         LinearLayout.LayoutParams op = new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
         op.gravity = Gravity.END;
-        op.setMargins(0, dp(12), 0, 0);
+        op.setMargins(0, dp(14), 0, 0);
         card.addView(ok, op);
 
         int m = dp(16);
@@ -194,6 +307,55 @@ public class ParamSheet {
         return key;
     }
 
+    /** 这项的单位（可能为空串） */
+    private String unitOf(String key) {
+        return Profile.unitOfParam(key);
+    }
+
+    /** 这项的取值上限 */
+    private String topOf(String key) {
+        return String.valueOf(Profile.limitOfParam(key));
+    }
+
+    /** 小标题：「作用」/「注意」 */
+    private TextView sectionLabel(String text, int color, int marginTop) {
+        TextView v = new TextView(a);
+        v.setText(text);
+        v.setTextSize(12);
+        v.setTextColor(color);
+        v.setTypeface(null, Typeface.BOLD);
+        LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        p.setMargins(0, marginTop, 0, 0);
+        v.setLayoutParams(p);
+        return v;
+    }
+
+    /** 一枚小标签：左侧标题（浅底）+ 右侧取值 */
+    private View chip(String name, String value) {
+        LinearLayout box = new LinearLayout(a);
+        box.setOrientation(LinearLayout.HORIZONTAL);
+        box.setBackground(box2(0xFFF1F4FA, 0xFFDDE3EC, 6));
+        box.setPadding(dp(8), dp(3), dp(8), dp(3));
+        TextView n = new TextView(a);
+        n.setText(name);
+        n.setTextSize(12);
+        n.setTextColor(0xFF6B7280);
+        box.addView(n);
+        TextView v = new TextView(a);
+        v.setText(value);
+        v.setTextSize(12);
+        v.setTextColor(0xFF1F2430);
+        v.setTypeface(null, Typeface.BOLD);
+        v.setPadding(dp(6), 0, 0, 0);
+        box.addView(v);
+        LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        p.setMargins(0, 0, dp(6), 0);
+        box.setLayoutParams(p);
+        return box;
+    }
+
     private View divider(int gap) {
         View v = new View(a);
         v.setBackgroundColor(0xFFE6EAF0);
@@ -210,6 +372,11 @@ public class ParamSheet {
         g.setStroke(1, stroke);
         g.setCornerRadius(dp(radiusDp));
         return g;
+    }
+
+    /** 同上，但指定圆角 —— 小标签的圆角比卡片小一号 */
+    private GradientDrawable box2(int fill, int stroke, int radiusDp) {
+        return box(fill, stroke, radiusDp);
     }
 
     private int dp(int v) {

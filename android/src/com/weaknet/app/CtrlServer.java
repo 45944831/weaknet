@@ -38,6 +38,7 @@ public class CtrlServer implements Runnable {
         this.proxy = proxy;
         this.ctx = ctx;
         MyPresets.bind(ctx);        // 自定义场景要落 SharedPreferences，先把上下文备好
+        MyCombos.bind(ctx);         // 弱网组合同理（同一个 weaknet 存储，不同 key）
         FloatSettings.bind(ctx);    // 悬浮窗设置同理
     }
 
@@ -69,6 +70,14 @@ public class CtrlServer implements Runnable {
             // ignore
         }
         pool.shutdownNow();
+    }
+
+    /** JSON 数组 → 字符串列表（没有就给个空列表，省得每个路由都判一遍 null） */
+    private static List<String> jsonList(JSONArray a) {
+        List<String> out = new ArrayList<String>();
+        if (a == null) return out;
+        for (int i = 0; i < a.length(); i++) out.add(a.optString(i, ""));
+        return out;
     }
 
     class Handler implements Runnable {
@@ -153,22 +162,20 @@ public class CtrlServer implements Runnable {
                 return;
             }
             if ("POST".equals(method) && "/api/share/push".equals(path)) {
-                // 给脚本用：{peer: "<id>", ids: [...]}；真实界面走 ShareSheet
+                // 给脚本用：{peer: "<id>", ids: [...], combo_ids: [...]}；真实界面走 ShareSheet
                 try {
                     JSONObject d = new JSONObject(body);
                     ShareNet.Peer p = ShareNet.findPeer(d.optString("peer", ""));
-                    JSONArray ids = d.optJSONArray("ids");
-                    List<String> list = new ArrayList<String>();
-                    if (ids != null) {
-                        for (int i = 0; i < ids.length(); i++) list.add(ids.optString(i, ""));
-                    }
+                    List<String> list = jsonList(d.optJSONArray("ids"));
+                    List<String> clist = jsonList(d.optJSONArray("combo_ids"));
                     // 推送是同步 HTTP，必须挪出 HTTP 线程；最多等 15 秒
                     final ShareNet.Peer fp = p;
                     final List<String> flist = list;
+                    final List<String> fclist = clist;
                     final ShareNet.PushResult[] holder = new ShareNet.PushResult[1];
                     Thread t = new Thread(new Runnable() {
                         public void run() {
-                            holder[0] = ShareNet.push(fp, flist);
+                            holder[0] = ShareNet.push(fp, flist, fclist);
                         }
                     }, "share-push-api");
                     t.setDaemon(true);
@@ -180,6 +187,33 @@ public class CtrlServer implements Runnable {
                     respond(200, JSON_CT, o.toString().getBytes("UTF-8"));
                 } catch (Exception e) {
                     respond(400, JSON_CT, "{\"error\":\"bad request\"}".getBytes("UTF-8"));
+                }
+                return;
+            }
+            if ("GET".equals(method) && "/api/share/inbox".equals(path)) {
+                // 收件箱列表：kind 区分「环境」和「组合」，与桌面端 /api/inbox 同构
+                try {
+                    JSONArray arr = new JSONArray();
+                    long now = System.currentTimeMillis();
+                    for (ShareNet.InboxItem it : ShareNet.inboxList()) {
+                        JSONObject o = new JSONObject();
+                        o.put("id", it.id);
+                        o.put("from", it.from);
+                        o.put("name", it.name);
+                        o.put("kind", it.kind);
+                        o.put("ago", (int) ((now - it.at) / 1000));
+                        if ("combo".equals(it.kind)) {
+                            o.put("combo", it.combo);
+                        } else {
+                            o.put("profile", it.profile);
+                        }
+                        arr.put(o);
+                    }
+                    JSONObject o = new JSONObject();
+                    o.put("items", arr);
+                    respond(200, JSON_CT, o.toString().getBytes("UTF-8"));
+                } catch (Exception e) {
+                    respond(500, JSON_CT, "{\"error\":\"inbox failed\"}".getBytes("UTF-8"));
                 }
                 return;
             }
@@ -376,6 +410,19 @@ public class CtrlServer implements Runnable {
                 } catch (Exception e) {
                     // ignore
                 }
+                // "c:<id>" = 弱网组合：与 App 里点组合按钮走同一条路
+                // （已开限速就立刻按序播放，没开只选中，不替用户偷偷开始限速）
+                if (key != null && key.startsWith(MyCombos.KEY_PREFIX)) {
+                    MyCombos.Item ci = MyCombos.find(key.substring(MyCombos.KEY_PREFIX.length()));
+                    if (ci == null) {
+                        respond(400, JSON_CT, "{\"error\":\"bad request\"}".getBytes("UTF-8"));
+                        return;
+                    }
+                    boolean applied = WeakNet.I.selectCombo(ci);
+                    respond(200, JSON_CT, ("{\"ok\":true,\"applied\":" + applied
+                            + ",\"kind\":\"combo\"}").getBytes("UTF-8"));
+                    return;
+                }
                 Profile p = buildKeyProfile(key);       // 内置预设 或 自定义场景（u:<id>）
                 if (p == null) {
                     respond(400, JSON_CT, "{\"error\":\"bad request\"}".getBytes("UTF-8"));
@@ -387,6 +434,65 @@ public class CtrlServer implements Runnable {
                 respond(200, JSON_CT, "{\"ok\":true}".getBytes("UTF-8"));
                 return;
             }
+            // GET /api/combos：弱网组合列表（含每段 steps 与一行摘要）
+            if ("/api/combos".equals(path)) {
+                respond(200, JSON_CT, MyCombos.listJson().toString().getBytes("UTF-8"));
+                return;
+            }
+
+            // POST /api/combo：新增或覆盖一支组合 {id?, name, loop, steps:[{key,minutes,seconds}]}
+            if (method.equals("POST") && "/api/combo".equals(path)) {
+                try {
+                    JSONObject o = new JSONObject(body);
+                    boolean loop = o.optBoolean("loop", false);
+                    List<MyCombos.Step> steps = new ArrayList<MyCombos.Step>();
+                    JSONArray ss = o.optJSONArray("steps");
+                    if (ss != null) {
+                        for (int i = 0; i < ss.length(); i++) {
+                            JSONObject so = ss.optJSONObject(i);
+                            if (so == null) continue;
+                            MyCombos.Step s = new MyCombos.Step();
+                            s.key = so.optString("key", "");
+                            s.minutes = so.optInt("minutes", 0);
+                            s.seconds = so.optInt("seconds", 0);
+                            steps.add(s);
+                        }
+                    }
+                    MyCombos.Item it = MyCombos.save(
+                            o.optString("id", null), o.optString("name", ""), loop, steps);
+                    if (it == null) {
+                        // 一段都留不下：不当成保存成功，否则调用方会以为库里多了一支空组合
+                        respond(400, JSON_CT,
+                                "{\"error\":\"没有一段能用的场景\"}".getBytes("UTF-8"));
+                        return;
+                    }
+                    JSONObject r = new JSONObject();
+                    r.put("ok", true);
+                    r.put("id", it.id);
+                    r.put("name", it.name);
+                    r.put("steps", it.steps.size());
+                    respond(200, JSON_CT, r.toString().getBytes("UTF-8"));
+                } catch (Exception e) {
+                    respond(500, JSON_CT, ("{\"error\":\"" + e.getMessage() + "\"}")
+                            .getBytes("UTF-8"));
+                }
+                return;
+            }
+
+            // POST /api/combo/delete：{id}。删的这支万一正在播，立刻停，别让它继续改参数
+            if (method.equals("POST") && "/api/combo/delete".equals(path)) {
+                String cid = null;
+                try {
+                    cid = new JSONObject(body).optString("id");
+                } catch (Exception e) {
+                    // ignore
+                }
+                boolean ok = MyCombos.delete(cid);
+                WeakNet.I.stopCombo();
+                respond(200, JSON_CT, ("{\"ok\":" + ok + "}").getBytes("UTF-8"));
+                return;
+            }
+
             if (method.equals("POST") && "/api/profile".equals(path)) {
                 try {
                     JSONObject o = new JSONObject(body);
@@ -421,8 +527,12 @@ public class CtrlServer implements Runnable {
                     if (restore == null) restore = new Profile();
                 }
                 WeakNet.I.setLimitOn(enable, restore);
+                // 选中的是弱网组合时，上面那支静态 restore 不算数：
+                // 让播放序列自己按 steps 把第一段顶上去
+                boolean combo = enable && WeakNet.I.resumeIfCombo();
                 WeakNet.I.log("config", enable
-                        ? "开启限速：" + WeakNet.I.profile.name
+                        ? (combo ? "开启限速，开始播放组合：" + WeakNet.I.comboProgress()
+                                 : "开启限速：" + WeakNet.I.profile.name)
                         : "停止限速（恢复直连，场景保留：" + WeakNet.I.presetKey + "）");
                 respond(200, JSON_CT, ("{\"ok\":true,\"limit_on\":" + WeakNet.I.limitOn + "}")
                         .getBytes("UTF-8"));

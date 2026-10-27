@@ -58,6 +58,10 @@ public class ShareNet {
         public String fromId = "";
         public String name = "";
         public JSONObject profile = new JSONObject();
+        /** "preset"=自定义环境 / "combo"=弱网组合：两类处理逻辑不同，收件箱里要分开摆在明面上 */
+        public String kind = "preset";
+        /** kind=="combo" 时：整份组合载荷（loop + 原始 steps），处理时才映射到本机场景 */
+        public JSONObject combo = new JSONObject();
         public long at = 0;
     }
 
@@ -67,6 +71,8 @@ public class ShareNet {
         public String msg = "";
         public List<String> accepted = new ArrayList<String>();
         public List<String> pending = new ArrayList<String>();
+        /** 对方那边一段都落不下、被丢弃的组合名 */
+        public List<String> dropped = new ArrayList<String>();
     }
 
     private static final String PREF = "weaknet";
@@ -378,52 +384,229 @@ public class ShareNet {
 
     // ---------------------------------------------------------------- 接收
 
+    // ---------------------------------------------------------------- 共享契约
+
+    /**
+     * 组合里的段 → 可推送的形态。
+     *
+     * 段记的 key 是「u:<id>」还是内置档位：自定义 id 是每台机自己编的，推给别人时
+     * 对方根本没有这个 id，照搬过去会解析成「已删除的场景」——组合看着收下了，播起来
+     * 每段都是空的。所以自定义段连名字和整份参数一起塞进去（与 items 一个道理），
+     * 内置段至少带上名字，版本不同导致对方没这一档时能把话说清楚。
+     */
+    public static JSONArray comboStepsJson(MyCombos.Item it) {
+        JSONArray ss = new JSONArray();
+        if (it == null) return ss;
+        try {
+            for (MyCombos.Step s : it.steps) {
+                JSONObject so = new JSONObject();
+                so.put("key", s.key);
+                so.put("minutes", s.minutes);
+                so.put("seconds", s.seconds);
+                so.put("scene", sceneLabel(s.key));
+                if (s.key != null && s.key.startsWith("u:")) {
+                    MyPresets.Item ref = MyPresets.find(s.key.substring(2));
+                    if (ref != null) so.put("profile", ref.profile.toJson());
+                }
+                ss.put(so);
+            }
+        } catch (Exception e) {
+            // ignore
+        }
+        return ss;
+    }
+
+    /** 某个场景 key 现在的名字（用它来告诉对方「这一段是啥」） */
+    private static String sceneLabel(String key) {
+        if (key == null || key.length() == 0) return "";
+        if (key.startsWith("u:")) {
+            MyPresets.Item it = MyPresets.find(key.substring(2));
+            return it == null ? key : it.name;
+        }
+        if (Profile.known(key)) return Profile.build(key).name;
+        return key;
+    }
+
+    /**
+     * 别人推来的一段 → 本机这一段的 key。返回 null 表示本机没有它要的场景，这段只能丢掉。
+     *
+     * 自定义段在本机没有同名场景时，会按对方带来的参数快照在本机新建一条：组合是
+     * 「一段引用某场景」，场景本体不落地，这一段就无处可播。
+     */
+    private static String resolveStepKey(JSONObject so, JSONArray dropped, int idx) {
+        if (so == null) return null;
+        String key = so.optString("key", "").trim();
+        if (key.length() == 0 || key.startsWith("c:")) {
+            drop(dropped, idx, key, "嵌套组合");
+            return null;
+        }
+        if (key.startsWith("u:")) {
+            String nm = cleanScene(so.optString("scene", ""));
+            MyPresets.Item exists = nm.length() > 0 ? MyPresets.findByName(nm) : null;
+            if (exists != null) return "u:" + exists.id;
+            JSONObject snap = so.optJSONObject("profile");
+            if (snap != null) {
+                MyPresets.Item made = MyPresets.save(null, nm.length() > 0 ? nm : "对方的环境", snap);
+                return "u:" + made.id;
+            }
+            drop(dropped, idx, key, "缺场景参数");
+            return null;
+        }
+        if (Profile.known(key)) return key;
+        // 版本差异（对方比我们新）：退一步看本地有没有同名的自定义场景
+        String nm = cleanScene(so.optString("scene", ""));
+        MyPresets.Item like = nm.length() > 0 ? MyPresets.findByName(nm) : null;
+        if (like != null) return "u:" + like.id;
+        drop(dropped, idx, key, "本机没有这一档");
+        return null;
+    }
+
+    /** 整份组合的段做本机映射：别人给的 raw steps → 本机 steps + 被丢掉的说明 */
+    private static List<MyCombos.Step> resolveSteps(JSONArray raw, JSONArray dropped) {
+        List<MyCombos.Step> out = new ArrayList<MyCombos.Step>();
+        if (raw == null) return out;
+        for (int i = 0; i < raw.length(); i++) {
+            JSONObject so = raw.optJSONObject(i);
+            if (so == null) continue;
+            String key = resolveStepKey(so, dropped, i + 1);
+            if (key == null) continue;
+            MyCombos.Step s = new MyCombos.Step();
+            s.key = key;
+            s.minutes = Math.max(0, so.optInt("minutes", 0));
+            s.seconds = Math.max(0, Math.min(59, so.optInt("seconds", 0)));
+            out.add(s);
+        }
+        return out;
+    }
+
+    private static void drop(JSONArray dropped, int idx, String key, String why) {
+        if (dropped == null) return;
+        dropped.put("第" + idx + "段（" + why + "）");
+    }
+
+    /** 别人给的名字：压空白 + 限长（与本地限制一致） */
+    private static String cleanScene(String s) {
+        String t = s == null ? "" : s.trim().replaceAll("\\s+", " ");
+        return t.length() > 40 ? t.substring(0, 40) : t;
+    }
+
     /** 别人推给我的环境：不同名直接入库；同名进收件箱等本机决定 */
     public static synchronized JSONObject receiveShare(JSONObject payload) {
         JSONObject res = new JSONObject();
         JSONArray accepted = new JSONArray();
         JSONArray pending = new JSONArray();
+        JSONArray dropList = new JSONArray();   // 对方收不下的组合（回执给推送方）
         try {
             JSONArray items = payload.optJSONArray("items");
-            if (items == null || items.length() == 0) {
+            JSONArray combos = payload.optJSONArray("combos");
+            if ((items == null || items.length() == 0)
+                    && (combos == null || combos.length() == 0)) {
                 res.put("ok", false);
                 res.put("error", "没有内容");
                 return res;
             }
             String from = cleanName(payload.optString("from", ""), "某人");
             String fromId = payload.optString("from_id", "");
-            for (int i = 0; i < items.length() && i < 20; i++) {
-                JSONObject it = items.optJSONObject(i);
-                if (it == null) continue;
-                String name = cleanName(it.optString("name", ""), "");
-                if (name.length() == 0) continue;
-                JSONObject prof = it.optJSONObject("profile");
-                if (prof == null) prof = new JSONObject();
-                if (findByName(name) == null) {
-                    MyPresets.Item saved = MyPresets.save(null, name, prof);
-                    accepted.put(saved.name);
-                    WeakNet.I.log("share", "收到 " + from + " 推送的环境：" + saved.name);
-                } else {
-                    String iid = newId();
-                    while (inbox.containsKey(iid)) iid = newId();
-                    InboxItem ib = new InboxItem();
-                    ib.id = iid;
-                    ib.from = from;
-                    ib.fromId = fromId;
-                    ib.name = name;
-                    ib.profile = prof;
-                    ib.at = System.currentTimeMillis();
-                    inbox.put(iid, ib);
-                    JSONObject pi = new JSONObject();
-                    pi.put("id", iid);
-                    pi.put("name", name);
-                    pending.put(pi);
-                    WeakNet.I.log("share", from + " 推送的「" + name + "」与本地同名，等你决定");
+            if (items != null) {
+                for (int i = 0; i < items.length() && i < 20; i++) {
+                    JSONObject it = items.optJSONObject(i);
+                    if (it == null) continue;
+                    String name = cleanName(it.optString("name", ""), "");
+                    if (name.length() == 0) continue;
+                    JSONObject prof = it.optJSONObject("profile");
+                    if (prof == null) prof = new JSONObject();
+                    if (findByName(name) == null) {
+                        MyPresets.Item saved = MyPresets.save(null, name, prof);
+                        accepted.put(saved.name);
+                        WeakNet.I.log("share", "收到 " + from + " 推送的环境：" + saved.name);
+                    } else {
+                        String iid = newId();
+                        while (inbox.containsKey(iid)) iid = newId();
+                        InboxItem ib = new InboxItem();
+                        ib.id = iid;
+                        ib.from = from;
+                        ib.fromId = fromId;
+                        ib.name = name;
+                        ib.kind = "preset";
+                        ib.profile = prof;
+                        ib.at = System.currentTimeMillis();
+                        inbox.put(iid, ib);
+                        JSONObject pi = new JSONObject();
+                        pi.put("id", iid);
+                        pi.put("name", name);
+                        pi.put("kind", "preset");
+                        pending.put(pi);
+                        WeakNet.I.log("share", from + " 推送的「" + name + "」与本地同名，等你决定");
+                    }
+                }
+            }
+            if (combos != null) {
+                for (int i = 0; i < combos.length() && i < 20; i++) {
+                    JSONObject c = combos.optJSONObject(i);
+                    if (c == null) continue;
+                    String name = cleanScene(c.optString("name", ""));
+                    if (name.length() == 0) continue;
+                    JSONObject keep = new JSONObject();
+                    keep.put("loop", c.optBoolean("loop", false));
+                    JSONArray raw = c.optJSONArray("steps");
+                    keep.put("steps", raw == null ? new JSONArray() : raw);
+                    if (MyCombos.findByName(name) == null) {
+                        JSONArray dropped = new JSONArray();
+                        List<MyCombos.Step> steps = resolveSteps(keep.optJSONArray("steps"), dropped);
+                        if (steps.isEmpty()) {
+                            // 一段都落不下来：对方这台机器没法播这个组合。
+                            // 要回执给推送方 —— 静默丢弃的话发送方会以为推成功了。
+                            String why = dropped.length() > 0 ? joinArr(dropped) : "没有可用的段";
+                            JSONObject d = new JSONObject();
+                            d.put("name", name);
+                            d.put("reason", why);
+                            dropList.put(d);
+                            WeakNet.I.log("share", from + " 推送的组合「" + name
+                                    + "」没有一段能落在本机，已丢弃：" + why);
+                            continue;
+                        }
+                        MyCombos.Item saved = MyCombos.save(null, name,
+                                keep.optBoolean("loop", false), steps);
+                        if (saved == null) {
+                            // 引擎再兜一道：归一化后没段可用就不落库（不能收下一支空壳组合）
+                            JSONObject d2 = new JSONObject();
+                            d2.put("name", name);
+                            d2.put("reason", "没有可用的段");
+                            dropList.put(d2);
+                            WeakNet.I.log("share", from + " 推送的组合「" + name
+                                    + "」没有一段能落在本机，已丢弃");
+                            continue;
+                        }
+                        accepted.put("🔀 " + saved.name);
+                        WeakNet.I.log("share", "收到 " + from + " 推送的弱网组合：" + saved.name);
+                        if (dropped.length() > 0) {
+                            WeakNet.I.log("share", "组合「" + saved.name + "」丢掉 " + joinArr(dropped));
+                        }
+                    } else {
+                        String iid = newId();
+                        while (inbox.containsKey(iid)) iid = newId();
+                        InboxItem ib = new InboxItem();
+                        ib.id = iid;
+                        ib.from = from;
+                        ib.fromId = fromId;
+                        ib.name = name;
+                        ib.kind = "combo";
+                        ib.combo = keep;
+                        ib.at = System.currentTimeMillis();
+                        inbox.put(iid, ib);
+                        JSONObject pi = new JSONObject();
+                        pi.put("id", iid);
+                        pi.put("name", name);
+                        pi.put("kind", "combo");
+                        pending.put(pi);
+                        WeakNet.I.log("share", from + " 推送的组合「" + name + "」与本地同名，等你决定");
+                    }
                 }
             }
             res.put("ok", true);
             res.put("accepted", accepted);
             res.put("pending", pending);
+            res.put("dropped", dropList);
             res.put("name", getUserName());
         } catch (Exception e) {
             try {
@@ -433,6 +616,16 @@ public class ShareNet {
             }
         }
         return res;
+    }
+
+    private static String joinArr(JSONArray a) {
+        StringBuilder sb = new StringBuilder();
+        if (a == null) return "";
+        for (int i = 0; i < a.length(); i++) {
+            if (sb.length() > 0) sb.append("、");
+            sb.append(a.optString(i, ""));
+        }
+        return sb.toString();
     }
 
     private static MyPresets.Item findByName(String name) {
@@ -462,7 +655,12 @@ public class ShareNet {
         }
     }
 
-    /** 处理收件箱里的一条：overwrite=覆盖本地 / keep=保留本地 / rename=另存为新名字 */
+    /**
+     * 处理收件箱里的一条：overwrite=覆盖本地 / keep=保留本地 / rename=另存为新名字。
+     *
+     * 环境（preset）与组合（combo）共用这三个动作；组合到这一步才把段映射到本机场景
+     * —— 收件箱里的条子随时可能被「保留本地」丢掉，提前写库会白留一堆自定义场景。
+     */
     public static synchronized JSONObject resolveInbox(String iid, String action, String newName) {
         JSONObject res = new JSONObject();
         InboxItem item;
@@ -478,11 +676,55 @@ public class ShareNet {
             return res;
         }
         try {
+            boolean isCombo = "combo".equals(item.kind);
+            res.put("kind", item.kind);
             if ("keep".equals(action)) {
                 WeakNet.I.log("share", "保留本地的「" + item.name + "」，丢弃 " + item.from + " 推送的版本");
                 res.put("ok", true);
                 res.put("action", "keep");
                 res.put("name", item.name);
+                return res;
+            }
+            if (isCombo) {
+                JSONArray dropped = new JSONArray();
+                List<MyCombos.Step> steps = resolveSteps(item.combo.optJSONArray("steps"), dropped);
+                if (steps.isEmpty()) {
+                    WeakNet.I.log("share", item.from + " 推送的组合「" + item.name
+                            + "」没有一段能落在本机，已丢弃");
+                    res.put("ok", false);
+                    res.put("error", "这个组合里没有任何一段在本机可用");
+                    return res;
+                }
+                boolean loop = item.combo.optBoolean("loop", false);
+                MyCombos.Item saved;
+                if ("rename".equals(action)) {
+                    String nm = cleanScene(newName);
+                    if (nm.length() == 0) nm = cleanScene(item.name + "（来自 " + item.from + "）");
+                    if (nm.length() == 0) nm = "收到的组合";
+                    saved = MyCombos.save(null, nm, loop, steps);
+                    if (saved == null) {
+                        // 引擎兜底：不能拿一段都用不上的组合去覆盖本地那支排好的
+                        res.put("ok", false);
+                        res.put("error", "这个组合里没有任何一段在本机可用");
+                        return res;
+                    }
+                    WeakNet.I.log("share", "已把 " + item.from + " 推送的组合另存为「" + saved.name + "」");
+                } else {
+                    MyCombos.Item exists = MyCombos.findByName(item.name);
+                    saved = MyCombos.save(exists == null ? null : exists.id, item.name, loop, steps);
+                    if (saved == null) {
+                        res.put("ok", false);
+                        res.put("error", "这个组合里没有任何一段在本机可用");
+                        return res;
+                    }
+                    WeakNet.I.log("share", "已用 " + item.from + " 推送的版本覆盖组合「" + saved.name + "」");
+                }
+                if (dropped.length() > 0) {
+                    WeakNet.I.log("share", "组合「" + saved.name + "」丢掉 " + joinArr(dropped));
+                }
+                res.put("ok", true);
+                res.put("action", "rename".equals(action) ? "rename" : "overwrite");
+                res.put("name", saved.name);
                 return res;
             }
             if ("rename".equals(action)) {
@@ -513,8 +755,17 @@ public class ShareNet {
 
     // ---------------------------------------------------------------- 推送
 
-    /** 把本地的自定义环境推给一个 peer（同步 HTTP，调用方务必在后台线程执行） */
+    /** 只推自定义环境（旧入口，保留给不想关心组合的调用方） */
     public static PushResult push(Peer peer, List<String> ids) {
+        return push(peer, ids, null);
+    }
+
+    /**
+     * 把选中的自定义环境 / 弱网组合一次推给一个 peer（同步 HTTP，别在主线程调）。
+     * 两类在同一次请求里过去：同名判定各自独立，但整体上只是一次推送、日志上也
+     * 只留一条「谁推来了什么」，事后两边对得上。
+     */
+    public static PushResult push(Peer peer, List<String> ids, List<String> comboIds) {
         PushResult r = new PushResult();
         if (peer == null) {
             r.msg = "请先选择一台设备";
@@ -538,8 +789,30 @@ public class ShareNet {
                 }
             }
         }
-        if (items.length() == 0) {
-            r.msg = "没找到要推送的环境";
+        // 组合：段里的自定义场景在对方机器上多半没有 id 可对，连参数快照一起带过去
+        List<MyCombos.Item> combos = MyCombos.load();
+        JSONArray cs = new JSONArray();
+        if (comboIds != null) {
+            for (String id : comboIds) {
+                for (MyCombos.Item it : combos) {
+                    if (it.id.equals(id)) {
+                        try {
+                            JSONObject o = new JSONObject();
+                            o.put("id", it.id);
+                            o.put("name", it.name);
+                            o.put("loop", it.loop);
+                            o.put("steps", comboStepsJson(it));
+                            cs.put(o);
+                        } catch (Exception e) {
+                            // ignore
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+        if (items.length() == 0 && cs.length() == 0) {
+            r.msg = "没找到要推送的内容";
             return r;
         }
         JSONObject payload = new JSONObject();
@@ -548,6 +821,7 @@ public class ShareNet {
             payload.put("from_id", getSelfId());
             payload.put("platform", "android");
             payload.put("items", items);
+            payload.put("combos", cs);
         } catch (Exception e) {
             r.msg = "打包失败";
             return r;
@@ -585,13 +859,25 @@ public class ShareNet {
                     r.pending.add(p == null ? "" : p.optString("name", ""));
                 }
             }
+            // 对方那边一段都落不下 → 组合被丢了，必须回执，不然用户以为推成功了
+            JSONArray drop = res.optJSONArray("dropped");
+            if (drop != null) {
+                for (int i = 0; i < drop.length(); i++) {
+                    JSONObject d = drop.optJSONObject(i);
+                    if (d != null) r.dropped.add(d.optString("name", ""));
+                }
+            }
             r.ok = true;
             String to = res.optString("name", peer.name);
             StringBuilder msg = new StringBuilder();
             if (!r.accepted.isEmpty()) msg.append("已推送给 ").append(to).append("：").append(join(r.accepted));
             if (!r.pending.isEmpty()) {
                 if (msg.length() > 0) msg.append("；");
-                msg.append("对方有同名环境，等他确认：").append(join(r.pending));
+                msg.append("对方有同名内容，等他确认：").append(join(r.pending));
+            }
+            if (!r.dropped.isEmpty()) {
+                if (msg.length() > 0) msg.append("；");
+                msg.append("对方那边收不下：").append(join(r.dropped));
             }
             if (msg.length() == 0) msg.append("已推送给 ").append(to);
             r.msg = msg.toString();

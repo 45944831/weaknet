@@ -29,12 +29,16 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * 主界面的三块内容：测试环境 / ⭐ 我的自定义 / 事件日志。
+ * 主界面的三块内容：测试环境 / ⭐ 我的场景与组合 / 事件日志。
  *
  * 这三块原本散落在设置浮层里（桌面版是网页控制台），现在直接铺在主界面上：
  * 选择弱网场景是最高频的操作，为了点它而多开一层浮层纯属多余。
  * 布局是「顶栏固定 + 下面整体滚动」（见 {@link MainActivity}），这里只负责往
  * 容器里塞卡片，不承担窗口标题那类职责。
+ *
+ * 「我的自定义场景」与「我的弱网组合」合成同一张卡片，用顶部标签切换
+ * （见 {@link #mineComboCard()}）——两块都是自己攒下来的东西，分成两张卡片
+ * 会把主界面拉得很长。
  *
  * 刷新策略：MainActivity 每 3 秒的状态循环会调 {@link #sync()}——
  *   · 场景按钮：只有「内置+自定义」的 key 集合变了才重建网格，否则只更新高亮，
@@ -76,6 +80,15 @@ public class MainPanels {
     private ShareSheet share;
     private NotesSheet notes;
     private ParamSheet param;
+    private ComboSheet comboSheet;
+    // 「场景 / 组合」标签：两张页合并成一张卡片后，切换只换显隐
+    private Button tabScene;
+    private Button tabCombo;
+    private LinearLayout scenePage;
+    private LinearLayout comboPage;
+    private String curTab = "scene";
+    /** 上一次同步时的选中项：只有它变了才自动翻标签页 */
+    private String lastTabKey = null;
     private String sceneSig = null;
     private String logSig = "";
 
@@ -88,7 +101,8 @@ public class MainPanels {
     /** 构建三张卡片，挂到主界面的滚动容器上 */
     void build(LinearLayout host) {
         host.addView(builtinCard(), cardLp());
-        host.addView(mineCard(), cardLp());
+        // 「我的自定义场景」与「我的弱网组合」合成一张卡片，顶部标签切换
+        host.addView(mineComboCard(), cardLp());
         host.addView(logCard(), cardLp());
         sync();
     }
@@ -124,6 +138,13 @@ public class MainPanels {
         reloadScenesIfChanged();
         syncHighlight();
         syncSceneBtns();
+        // 组合可能在别处被改到（飘窗面板选了别的、接口新建了组合），这里跟上
+        if (comboSheet != null) comboSheet.refresh();
+        // 标签跟着选中项走：组合与自定义场景合成一张卡片后，
+        // 选中的东西不在当前这一页时用户会以为「没生效」——自动翻到对应的那页
+        syncTabToSelection();
+        // 共享面板开着时也立刻重画：删了组合 / 来了新推送，别等那 3 秒的自动刷新
+        if (share != null) share.reloadNow();
         int n = ShareNet.inboxCount();
         if (btnShare != null) {
             btnShare.setText(n > 0 ? "🔗 环境共享（" + n + " 条待处理）" : "🔗 环境共享");
@@ -200,25 +221,153 @@ public class MainPanels {
         return card;
     }
 
-    // ---------------------------------------------------------------- 我的自定义
+    // ---------------------------------------------------------------- 我的场景与组合
 
-    private LinearLayout mineCard() {
+    /**
+     * 「我的自定义场景」与「我的弱网组合」合并成一张卡片，顶部用标签切换。
+     *
+     * 这两块本来就是一类东西（都是我自己攒下来的、点一下即切换的环境），
+     * 原来却各占一张卡片，主界面向下拖很长才够得着下面那块；
+     * 合并后用「场景 / 组合」两个标签切换，一次只显示当前那一页。
+     */
+    private LinearLayout mineComboCard() {
         LinearLayout card = cardShell();
+
+        // 标题行：名字 + 环境共享（自定义场景与弱网组合在同一个窗口里共享）
         LinearLayout head = new LinearLayout(a);
         head.setOrientation(LinearLayout.HORIZONTAL);
         head.setGravity(Gravity.CENTER_VERTICAL);
+        head.addView(title("⭐ 我的场景与组合"),
+                new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
 
-        TextView t = new TextView(a);
-        t.setText("⭐ 我的自定义");
-        t.setTextSize(14);
-        t.setTextColor(0xFF1F2430);
-        t.setTypeface(null, Typeface.BOLD);
-        head.addView(t, new LinearLayout.LayoutParams(0, dp(30), 1f));
+        btnShare = new Button(a);
+        btnShare.setAllCaps(false);
+        btnShare.setTextSize(12);
+        btnShare.setText("🔗 环境共享");
+        btnShare.setTextColor(0xFF7A4FF3);
+        btnShare.setBackground(box(0xFFF3EFFF, 0xFFD9CBFB, 8));
+        btnShare.setPadding(dp(10), dp(4), dp(10), dp(4));
+        btnShare.setOnClickListener(new View.OnClickListener() {
+            public void onClick(View v) {
+                openShare();
+            }
+        });
+        head.addView(btnShare);
+        card.addView(head);
+
+        // 标签行：场景 / 组合。做成两段按钮，选中的那段落成主色，一眼能看出在看哪边
+        LinearLayout tabs = new LinearLayout(a);
+        tabs.setOrientation(LinearLayout.HORIZONTAL);
+        tabScene = tabBtn("场景");
+        tabCombo = tabBtn("组合");
+        tabScene.setOnClickListener(new View.OnClickListener() {
+            public void onClick(View v) {
+                switchTab("scene");
+            }
+        });
+        tabCombo.setOnClickListener(new View.OnClickListener() {
+            public void onClick(View v) {
+                switchTab("combo");
+            }
+        });
+        LinearLayout.LayoutParams tlp = new LinearLayout.LayoutParams(
+                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
+        tlp.setMargins(0, 0, dp(6), 0);
+        tabs.addView(tabScene, tlp);
+        tabs.addView(tabCombo, new LinearLayout.LayoutParams(
+                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        card.addView(tabs, full(0, dp(8), 0, dp(4)));
+
+        // 两个页面：同一时刻只显示其中一个
+        scenePage = new LinearLayout(a);
+        scenePage.setOrientation(LinearLayout.VERTICAL);
+        comboPage = new LinearLayout(a);
+        comboPage.setOrientation(LinearLayout.VERTICAL);
+        card.addView(scenePage);
+        card.addView(comboPage);
+
+        buildScenePage(scenePage);
+        comboSheet = new ComboSheet(a);
+        comboPage.addView(comboSheet.buildContent(), full(0, 0, 0, 0));
+
+        // 初始停在当前选中的那一页：选中的正是组合，就别让用户再点一次标签
+        String key = WeakNet.I.presetKey;
+        switchTab(key != null && key.startsWith(MyCombos.KEY_PREFIX) ? "combo" : "scene");
+        return card;
+    }
+
+    /** 标签按钮：默认灰底，切换时由 syncTabStyle 染色 */
+    private Button tabBtn(String text) {
+        Button b = new Button(a);
+        b.setAllCaps(false);
+        b.setText(text);
+        b.setTextSize(13);
+        b.setTypeface(null, Typeface.BOLD);
+        b.setPadding(dp(8), dp(4), dp(8), dp(4));
+        b.setMinWidth(0);
+        b.setMinimumWidth(0);
+        b.setMinHeight(0);
+        b.setMinimumHeight(0);
+        b.setContentDescription(text + "标签");
+        return b;
+    }
+
+    /** 切换「场景 / 组合」标签页：只换显示，不重建内容 */
+    private void switchTab(String key) {
+        boolean scene = "scene".equals(key);
+        if (scenePage != null) {
+            scenePage.setVisibility(scene ? View.VISIBLE : View.GONE);
+        }
+        if (comboPage != null) {
+            comboPage.setVisibility(scene ? View.GONE : View.VISIBLE);
+        }
+        syncTabStyle();
+        curTab = key;
+    }
+
+    /** 当前标签的配色：选中方染主色，另一方灰底 */
+    private void syncTabStyle() {
+        boolean scene = "scene".equals(curTab);
+        if (tabScene != null) {
+            tabScene.setTextColor(scene ? 0xFFFFFFFF : 0xFF2F3F52);
+            tabScene.setBackground(box(scene ? 0xFF7A4FF3 : 0xFFFFFFFF,
+                    scene ? 0xFF7A4FF3 : 0xFFD7DEEA, 8));
+        }
+        if (tabCombo != null) {
+            tabCombo.setTextColor(scene ? 0xFF2F3F52 : 0xFFFFFFFF);
+            tabCombo.setBackground(box(scene ? 0xFFFFFFFF : 0xFF1F8A70,
+                    scene ? 0xFFD7DEEA : 0xFF1F8A70, 8));
+        }
+    }
+
+    /**
+     * 选中项变了就翻到对应的那一页。
+     *
+     * 只在「选中项真的变了」时才翻页，否则每 3 秒的同步会把用户手动切过去的
+     * 标签又拽回来，看着像标签点不动。
+     */
+    private void syncTabToSelection() {
+        String key = WeakNet.I.presetKey;
+        String k = key == null ? "" : key;
+        if (k.equals(lastTabKey)) return;
+        lastTabKey = k;
+        if (k.startsWith(MyCombos.KEY_PREFIX)) {
+            switchTab("combo");
+        } else if (k.startsWith("u:")) {
+            switchTab("scene");
+        }
+    }
+
+    /** 「场景」页的内容：新建按钮 + 场景列表 + 编辑/删除行 + 提示 */
+    private void buildScenePage(LinearLayout page) {
+        LinearLayout row = new LinearLayout(a);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setGravity(Gravity.CENTER_VERTICAL);
 
         btnNew = new Button(a);
         btnNew.setAllCaps(false);
         btnNew.setTextSize(12);
-        btnNew.setText("➕ 新建");
+        btnNew.setText("➕ 新建场景");
         btnNew.setTextColor(0xFF7A4FF3);
         btnNew.setBackground(box(0xFFF3EFFF, 0xFFD9CBFB, 8));
         btnNew.setPadding(dp(10), dp(4), dp(10), dp(4));
@@ -228,28 +377,12 @@ public class MainPanels {
                 openEditor(null);       // 永远是新建：想改已有的场景用下面的「✏️ 编辑」
             }
         });
-        head.addView(btnNew);
-
-        btnShare = new Button(a);
-        btnShare.setAllCaps(false);
-        btnShare.setTextSize(12);
-        btnShare.setTextColor(0xFF7A4FF3);
-        btnShare.setBackground(box(0xFFF3EFFF, 0xFFD9CBFB, 8));
-        btnShare.setPadding(dp(10), dp(4), dp(10), dp(4));
-        btnShare.setOnClickListener(new View.OnClickListener() {
-            public void onClick(View v) {
-                openShare();
-            }
-        });
-        LinearLayout.LayoutParams sp = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        sp.setMargins(dp(6), 0, 0, 0);
-        head.addView(btnShare, sp);
-        card.addView(head);
+        row.addView(btnNew);
+        page.addView(row, full(0, 0, 0, 2));
 
         mineGrid = new LinearLayout(a);
         mineGrid.setOrientation(LinearLayout.VERTICAL);
-        card.addView(mineGrid, full(0, 4, 0, 4));
+        page.addView(mineGrid, full(0, 4, 0, 4));
 
         // 编辑 + 删除：只有选中自定义场景时才出现，两个并排各占一半宽度
         tailRow = new LinearLayout(a);
@@ -290,12 +423,11 @@ public class MainPanels {
         tailRow.addView(btnDel, new LinearLayout.LayoutParams(
                 0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
         tailRow.setVisibility(View.GONE);
-        card.addView(tailRow, full(0, 0, 0, 4));
+        page.addView(tailRow, full(0, 0, 0, 4));
 
-        card.addView(hint("自定义场景可保存 13 项参数；「➕ 新建」随时可以再加一条，"
+        page.addView(hint("自定义场景可保存 13 项参数；「➕ 新建场景」随时可以再加一条，"
                 + "选中某条后下面会出现「✏️ 编辑 / 🗑 删除」。也能通过「🔗 环境共享」"
                 + "与同一局域网里的电脑/其他手机互推。"));
-        return card;
     }
 
     /**
@@ -633,7 +765,8 @@ public class MainPanels {
 
     // ---------------------------------------------------------------- 环境共享
 
-    private void openShare() {
+    /** 打开环境共享浮层（组合卡片上的「🔗 共享」按钮也走这里） */
+    void openShare() {
         if (share == null) share = new ShareSheet(a);
         share.show();
     }

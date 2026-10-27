@@ -32,6 +32,15 @@ public class Profile {
             "highspeed_rail", "elevator", "flapping", "blackhole", "dns_fail", "airplane"
     };
 
+    /** key 是不是本机认识的某一档内置预设（别人推来的组合里可能有我们没有的档位） */
+    public static boolean known(String key) {
+        if (key == null) return false;
+        for (String k : KEYS) {
+            if (k.equals(key)) return true;
+        }
+        return false;
+    }
+
     /** 按钮上的短名（手机屏窄，全名会把按钮撑出卡片；与桌面版 SHORT 保持一致） */
     public static String shortOf(String key) {
         if ("direct".equals(key)) return "直连";
@@ -189,6 +198,527 @@ public class Profile {
     public static String noteOfParam(String key) {
         String s = key == null ? null : PARAM_NOTES.get(key);
         return s == null ? "" : s;
+    }
+
+    // ---------------------------------------------------------------- 弱网组合说明
+    //
+    // 与桌面版 weaknet.py 的 COMBO_DOC 逐字一致（由 _t_combo_notes.py 两端比对）。
+    // 文案放引擎里而不是各写一份：两端各写必然漂移 ——
+    // 改了一端忘了另一端，同一个功能说出来的话就不一样了。
+    //
+    // 三块内容（机制 / 例子 / 提醒）拼成一份文档串，用 \u001F 分隔：
+    // 拆成 String[][] 的话，测试要解析 Java 源码来比对，
+    // 在「多行拼接的字符串」上极易出错 —— 表现是两边明明一样、测试却说不一样。
+
+    /** 块与块之间的分隔符（U+001F 单元分隔符，正常文本里不会出现） */
+    public static final String COMBO_DOC_SEP = "\u001F";
+
+    /** 例子条数（分界用：前 N 块是例子，之后是提醒） */
+    public static final int COMBO_EXAMPLE_COUNT = 5;
+
+    /** 完整文档：第 1 块是机制，之后每 4 行一个例子，剩下的是提醒 */
+    public static final String COMBO_DOC =
+                        "弱网组合 = 把几支场景按时长排成一条链，选中后自动一段段播过去。\n"
+            +             "· 顺序播放：一段跑完自动切下一段，中间不用你操作。\n"
+            +             "· 可循环：末尾再回到第一段，一直循环下去（不勾就播完一遍停住）。\n"
+            +             "· 最多 5 段：再多就不好在界面上按顺序核对了。\n"
+            +             "· 组合里不能再套组合：段只能选预设或自定义场景。\n"
+            +             "· 弱网没开着时点组合只「选中」，不会替你偷偷开始限速；开着才会立刻播。\u001F通勤路上\n"
+            +             "从有信号走进信号差的地方，再彻底没信号，最后恢复。\n"
+            +             "复现「地铁进隧道」这类真实链路：先正常加载，走到弱覆盖区开始卡，进隧道后请求挂住，出站后恢复。适合测弱网下的加载中状态与恢复逻辑。\n"
+            +             "5G 良好 30 秒 → 4G 弱网 1 分 → 完全断网 30 秒 → 5G 良好 30 秒\u001F抢购秒杀\n"
+            +             "平时流畅，一到高峰就抢不到，失败后快速重试。\n"
+            +             "高并发下服务端限流或网络拥塞的典型表现：请求变慢、部分直接失败。适合验证 App 的失败提示、重试与降级路径。\n"
+            +             "5G 良好 20 秒 → 弱 Wi-Fi 1 分 → 黑洞（无响应）15 秒 → 弱 Wi-Fi 1 分\u001F网络抖动\n"
+            +             "信号时好时坏，延迟忽大忽小。\n"
+            +             "模拟电梯、隧道口、拥挤场所的信号抖动。适合测实时音视频、语音通话、在线协作这类对延迟敏感的链路。\n"
+            +             "5G 良好 20 秒 → 弱 5G 20 秒 → 5G 良好 20 秒 → 弱 5G 20 秒（循环）\u001F定时断网\n"
+            +             "每隔一会儿断一次，过一会儿自己恢复。\n"
+            +             "模拟周期性网络中断（如基站切换、家庭路由重启）。适合验证长连接断了能不能自己重连、心跳与超时逻辑。\n"
+            +             "4G 良好 1 分 → 黑洞（无响应）20 秒（循环）\u001F加载渐变\n"
+            +             "从慢到快再到慢，模拟带宽被逐步放开。\n"
+            +             "测大文件 / 长列表的渐进加载表现：首屏慢、之后提速、快结束时又慢下来。适合验证进度条与分片下载逻辑。\n"
+            +             "极慢（100kbps）20 秒 → 4G 弱网 20 秒 → 5G 良好 20 秒 → 极慢（100kbps）20 秒\u001F组合播到一半可以随时切走或暂停：切换后原组合停在原地，不会偷偷继续改参数。\u001F每一段都是完整的一支场景，段与段之间参数是整套替换的 —— 不会把上一段的丢包率带进下一段。\u001F循环组合会一直播下去，测完记得切走或暂停，别忘了它在后台改着参数。";
+
+    /**
+     * 把文档串拆成三块：说明、例子列表、提醒列表。
+     *
+     * 例子每条 4 行：名字 / 一句话说明 / 效果 / 怎么排。
+     * 规则与桌面版 combo_doc_parts 一致 —— 两端拆法必须一样，
+     * 不然同一个组合在电脑上和在手机上看到的排版会不同。
+     */
+    public static Object[] comboDocParts() {
+        String[] blocks = COMBO_DOC.split(COMBO_DOC_SEP);
+        java.util.List<String> examples = new java.util.ArrayList<String>();
+        java.util.List<String> tips = new java.util.ArrayList<String>();
+        String intro = blocks.length > 0 ? blocks[0] : "";
+        for (int i = 1; i < blocks.length; i++) {
+            if (i <= COMBO_EXAMPLE_COUNT) {
+                String[] lines = blocks[i].split("\n", -1);
+                if (lines.length >= 4) {
+                    examples.add(lines[0] + "\n" + lines[1] + "\n"
+                            + lines[2] + "\n" + lines[3]);
+                }
+            } else {
+                tips.add(blocks[i]);
+            }
+        }
+        return new Object[]{intro, examples, tips};
+    }
+
+
+    /**
+     * 把说明拆成「作用」与若干条「注意」。
+     *
+     * 规则与桌面版 weaknet.py 的 split_param_note 完全一致（两端文案逐字相同，
+     * 切分规则也必须一致，不然同一个参数在两端会长得不一样）：
+     * 第一段讲这项干什么，第二段按句号切成一条条提醒。
+     *
+     * @return 第一个元素是作用段，第二个是提醒条目（没有提醒时为空数组）
+     */
+    public static Object[] splitNote(String key) {
+        String note = noteOfParam(key);
+        String[] out = new String[1];
+        java.util.List<String> tips = new java.util.ArrayList<String>();
+        if (note == null || note.length() == 0) {
+            out[0] = "";
+            return new Object[]{out[0], tips};
+        }
+        String[] parts = note.split("\n");
+        java.util.List<String> segs = new java.util.ArrayList<String>();
+        for (int i = 0; i < parts.length; i++) {
+            String p = parts[i].trim();
+            if (p.length() > 0) segs.add(p);
+        }
+        if (segs.isEmpty()) {
+            out[0] = "";
+            return new Object[]{out[0], tips};
+        }
+        if (segs.size() == 1) {
+            java.util.List<String> sents = splitSentences(segs.get(0));
+            out[0] = sents.isEmpty() ? segs.get(0) : sents.get(0);
+            for (int i = 1; i < sents.size(); i++) tips.add(sents.get(i));
+            return new Object[]{out[0], tips};
+        }
+        out[0] = segs.get(0);
+        StringBuilder rest = new StringBuilder();
+        for (int i = 1; i < segs.size(); i++) {
+            if (rest.length() > 0) rest.append(" ");
+            rest.append(segs.get(i));
+        }
+        tips.addAll(splitSentences(rest.toString()));
+        return new Object[]{out[0], tips};
+    }
+
+    /** 按中文句号 / 问号 / 感叹号切句，保留标点 */
+    private static java.util.List<String> splitSentences(String text) {
+        java.util.List<String> out = new java.util.ArrayList<String>();
+        if (text == null) return out;
+        StringBuilder buf = new StringBuilder();
+        for (int i = 0; i < text.length(); i++) {
+            char ch = text.charAt(i);
+            buf.append(ch);
+            if (ch == '。' || ch == '！' || ch == '？') {
+                String s = buf.toString().trim();
+                if (s.length() > 0) out.add(s);
+                buf.setLength(0);
+            }
+        }
+        String tail = buf.toString().trim();
+        if (tail.length() > 0) out.add(tail);
+        return out;
+    }
+
+    /** 参数取值上限：与桌面版 weaknet.py 的 PROF_LIMITS 保持一致 */
+    public static int limitOfParam(String key) {
+        if (key == null) return 0;
+        if ("latency_up_ms".equals(key) || "latency_down_ms".equals(key)) return 10000;
+        if ("jitter_ms".equals(key)) return 5000;
+        if ("down_kbps".equals(key) || "up_kbps".equals(key)) return 1000000;
+        if ("stall_ms".equals(key)) return 60000;
+        if ("flap_sec".equals(key)) return 3600;
+        if ("flap_blackout_sec".equals(key)) return 600;
+        return 100;                       // 各项百分比
+    }
+
+    /** 参数单位：从显示名里括起来的那段取（如「下行带宽 (kbps)」-> kbps） */
+    public static String unitOfParam(String key) {
+        if (key == null) return "";
+        for (String[] f : MainPanels.FIELDS) {
+            if (!f[0].equals(key)) continue;
+            String name = f[1] == null ? "" : f[1];
+            int a = name.indexOf('(');
+            int b = name.lastIndexOf(')');
+            if (a >= 0 && b > a) return name.substring(a + 1, b).trim();
+            return "";
+        }
+        return "";
+    }
+
+    // ---------------------------------------------------------------- 说明文案的排版
+    //
+    // 与桌面版 weaknet.py 的同名逻辑逐条对应（split_note_atoms /
+    // _note_group_units / wrap_note_lines）。两端必须一模一样：
+    // 同一个参数在电脑上和手机上会长得不一样，是最难解释的一类 bug。
+    //
+    // 为什么不能直接用 TextView 的自动换行：安卓的断行规则跟桌面端不同，
+    // 同一个文案在两端会被断在不同的位置；而且「·」这种条目符会被甩到单独一行，
+    // 「「本机 → 服务器」」这种引号短语会被从中间劈开。
+    // 所以两端都把文字先切成「不可再分的原子」，再按像素宽贪心拼行。
+    //
+    // 原子的四种：
+    //   c  单个字符（汉字 / 中文标点 / 独立符号），可以在它前后断行
+    //   q  引号短语（「」「『』“”《》整段不可断）
+    //   w  英文单词 / 数字带单位（800ms、0.5~1.5、RTT 整段不可断）
+    //   s  空白（只用来标记「这里原本有空格」，断开时丢掉）
+    //
+    // 断行时还做两件中文排版的事：
+    //   避头：收尾标点（，。、）」等）不另起一行 —— 把它留在上一行
+    //   避尾：起头标点（（《等）不留在行末 —— 把它带到下一行
+
+    /** 引号配对（开 -> 闭） */
+    private static final String NOTE_QUOTE_OPEN = "「『“《";
+    private static final String NOTE_QUOTE_CLOSE = "」』”》";
+
+    /** 行首禁则：这些标点不能出现在一行的开头 */
+    public static final String NOTE_NO_START = "，。、；：？！）」』】”’%‰°′″℃…";
+
+    /** 行尾禁则：这些标点不能出现在一行的末尾 */
+    public static final String NOTE_NO_END = "（「『【《“";
+
+    /** 不能孤零零出现在行首的符号：数学 / 箭头符号 */
+    public static final String NOTE_NO_START_GLUE = "≈→←±×÷·〜～";
+
+    /** 数字 / 单词内部的连接符（0.5~1.5 里的 . ~ ，800ms% 里的 %） */
+    private static final String NOTE_WORD_CONNECT = ".-~_%+/";
+
+    /** 视为「空白」的字符（断行时空格丢弃，行内保留一个） */
+    private static final String NOTE_SPACE_CHARS = " \t　";
+
+    /** 一个排版原子 */
+    static final class NoteAtom {
+        final String kind;   // c / q / w / s
+        final String text;
+        NoteAtom(String kind, String text) {
+            this.kind = kind;
+            this.text = text;
+        }
+    }
+
+    /** 一个排版单元：行内不可再分的一段文字 */
+    static final class NoteUnit {
+        final String text;
+        final boolean sep;   // 前面有没有空格
+        NoteUnit(String text, boolean sep) {
+            this.text = text;
+            this.sep = sep;
+        }
+    }
+
+    /** 是不是中日韩字符 / 中文标点（含全角形式） */
+    private static boolean isNoteCjk(char ch) {
+        int code = ch;
+        return (code >= 0x2E80 && code <= 0x9FFF)
+                || (code >= 0xF900 && code <= 0xFAFF)
+                || (code >= 0xFF00 && code <= 0xFFEF);
+    }
+
+    /** 是不是 ASCII 的字母 / 数字 */
+    private static boolean isAsciiAlnum(char ch) {
+        return (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z')
+                || (ch >= '0' && ch <= '9');
+    }
+
+    /**
+     * s.charAt(i) 能不能算「英文单词 / 数字」的一部分。
+     * 字母数字当然算；连接符只在两边都是字母数字时才算，
+     * 这样 0.5~1.5 是一个整体，而「上行 + 下行」里的 + 是独立符号。
+     */
+    private static boolean isNoteWordChar(String s, int i) {
+        char ch = s.charAt(i);
+        if (isAsciiAlnum(ch)) return true;
+        if (NOTE_WORD_CONNECT.indexOf(ch) >= 0) {
+            boolean prevAlnum = i > 0 && isAsciiAlnum(s.charAt(i - 1));
+            boolean nextAlnum = i + 1 < s.length() && isAsciiAlnum(s.charAt(i + 1));
+            return prevAlnum && nextAlnum;
+        }
+        return false;
+    }
+
+    /**
+     * 把一段说明文字切成不可再分的排版原子。
+     * 返回 [kind, text] 的列表，kind 取值 c / q / w / s。
+     * 折行只能发生在原子与原子之间，绝不会把一个原子劈成两半 ——
+     * 「「本机 → 服务器」」里的箭头和空格因此永远跟参数名待在一起。
+     */
+    static java.util.List<NoteAtom> splitNoteAtoms(String text) {
+        java.util.List<NoteAtom> out = new java.util.ArrayList<NoteAtom>();
+        if (text == null) return out;
+        int i = 0;
+        int n = text.length();
+        while (i < n) {
+            char ch = text.charAt(i);
+            if (NOTE_SPACE_CHARS.indexOf(ch) >= 0) {
+                int j = i;
+                while (j < n && NOTE_SPACE_CHARS.indexOf(text.charAt(j)) >= 0) j++;
+                out.add(new NoteAtom("s", text.substring(i, j)));
+                i = j;
+                continue;
+            }
+            int oi = NOTE_QUOTE_OPEN.indexOf(ch);
+            if (oi >= 0) {
+                char close = NOTE_QUOTE_CLOSE.charAt(oi);
+                int j = text.indexOf(close, i + 1);
+                if (j != -1) {
+                    out.add(new NoteAtom("q", text.substring(i, j + 1)));
+                    i = j + 1;
+                    continue;
+                }
+            }
+            if (isNoteCjk(ch)) {
+                out.add(new NoteAtom("c", String.valueOf(ch)));
+                i++;
+                continue;
+            }
+            if (isAsciiAlnum(ch)) {
+                int j = i;
+                while (j < n && isNoteWordChar(text, j)) j++;
+                // 百分号跟在词尾（100%）也算这个词的一部分
+                if (j < n && text.charAt(j) == '%') j++;
+                out.add(new NoteAtom("w", text.substring(i, j)));
+                i = j;
+                continue;
+            }
+            // 其它 ASCII 符号（= + % 等）单独成原子
+            out.add(new NoteAtom("c", String.valueOf(ch)));
+            i++;
+        }
+        return out;
+    }
+
+    /**
+     * 原子表 -> 排版单元表。
+     * 这里顺手做了中文排版的两条「避头尾」规则 —— 不做的话，断行处会出现
+     * 孤零零的标点（比如一行的开头是「，」）：
+     *   行首禁则（，。、；：？！）等）不能起行 -> 粘到前一个单元末尾
+     *   行尾禁则（（《 等）不能收行 -> 粘到后一个单元开头
+     * 合成之后，断行只发生在单元之间，标点自然跟着前面的字走。
+     */
+    static java.util.List<NoteUnit> noteGroupUnits(java.util.List<NoteAtom> atoms) {
+        java.util.List<NoteUnit> units = new java.util.ArrayList<NoteUnit>();
+        boolean sep = false;              // 上一段和这一段之间有没有空格
+        StringBuilder hold = new StringBuilder();   // 待与下一个单元合并的起头标点
+        boolean holdSep = false;
+        for (NoteAtom a : atoms) {
+            String kind = a.kind;
+            String t = a.text;
+            if ("s".equals(kind)) {
+                sep = true;
+                continue;
+            }
+            if ("c".equals(kind) && t.length() == 1) {
+                char ch = t.charAt(0);
+                if (NOTE_NO_END.indexOf(ch) >= 0) {
+                    // 起头标点不能收在行末 —— 先攒着，跟下一个单元走
+                    hold.append(ch);
+                    holdSep = sep;
+                    sep = false;
+                    continue;
+                }
+                if (hold.length() > 0) {
+                    t = hold.toString() + ch;
+                    sep = holdSep;
+                    hold.setLength(0);
+                    holdSep = false;
+                }
+                if (NOTE_NO_START.indexOf(ch) >= 0 || NOTE_NO_START_GLUE.indexOf(ch) >= 0) {
+                    if (!units.isEmpty()) {
+                        // 收尾标点不能起行 —— 粘到上一个单元末尾
+                        NoteUnit last = units.get(units.size() - 1);
+                        units.set(units.size() - 1,
+                                new NoteUnit(last.text + (sep ? " " : "") + ch, last.sep));
+                        sep = false;
+                        continue;
+                    }
+                }
+                units.add(new NoteUnit(t, sep));
+                sep = false;
+                continue;
+            }
+            // 引号短语 / 英文单词：整体不可断
+            if (hold.length() > 0) {
+                t = hold.toString() + t;
+                sep = holdSep;
+                hold.setLength(0);
+                holdSep = false;
+            }
+            units.add(new NoteUnit(t, sep));
+            sep = false;
+        }
+        if (hold.length() > 0) {
+            units.add(new NoteUnit(hold.toString(), holdSep));
+        }
+        return units;
+    }
+
+    /** 一行的宽度：行首单元不算它前面的空格 */
+    private static int noteUnitsWidth(java.util.List<NoteUnit> units, NoteMeasurer measurer) {
+        int total = 0;
+        for (int i = 0; i < units.size(); i++) {
+            NoteUnit u = units.get(i);
+            if (i > 0 && u.sep) total += measurer.measure(" ");
+            total += measurer.measure(u.text);
+        }
+        return total;
+    }
+
+    /** 单元表 -> 一行文字（行首不留空格，行内空格保留） */
+    private static String noteUnitsText(java.util.List<NoteUnit> units) {
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < units.size(); i++) {
+            NoteUnit u = units.get(i);
+            if (i > 0 && u.sep) sb.append(' ');
+            sb.append(u.text);
+        }
+        return sb.toString();
+    }
+
+    /**
+     * 把一个单元切成「行内安全的最小块」。
+     * 单元宽过整行时只能硬切，但切之前先按避头尾规则重新分块：
+     *   · 收尾标点（，。、；：？！）等）粘到前一块末尾 —— 它不能起行
+     *   · 起头标点（（《 等）粘到后一块开头 —— 它不能收行
+     * 切完之后，断行只发生在块与块之间，标点自然跟着前面的字走。
+     * 少了这一步，窄屏上就会出现「」。」这种一行开头的怪事
+     * （实测：引号短语被硬切后，收尾引号正好落在下一行开头）。
+     */
+    private static java.util.List<String> noteSafeChunks(String text) {
+        java.util.List<String> chunks = new java.util.ArrayList<String>();
+        StringBuilder hold = new StringBuilder();   // 待与下一块合并的起头标点
+        for (int i = 0; i < text.length(); i++) {
+            char ch = text.charAt(i);
+            if (NOTE_NO_END.indexOf(ch) >= 0) {
+                hold.append(ch);
+                continue;
+            }
+            String piece;
+            if (hold.length() > 0) {
+                piece = hold.toString() + ch;
+                hold.setLength(0);
+            } else {
+                piece = String.valueOf(ch);
+            }
+            char last = piece.charAt(piece.length() - 1);
+            if (NOTE_NO_START.indexOf(last) >= 0 && !chunks.isEmpty()) {
+                chunks.set(chunks.size() - 1, chunks.get(chunks.size() - 1) + piece);
+                continue;
+            }
+            chunks.add(piece);
+        }
+        if (hold.length() > 0) {
+            if (!chunks.isEmpty()) {
+                chunks.set(chunks.size() - 1, chunks.get(chunks.size() - 1) + hold);
+            } else {
+                chunks.add(hold.toString());
+            }
+        }
+        return chunks;
+    }
+
+    /**
+     * 把宽过整行的单元按「安全块」硬切。
+     * 超长英文词 / 超长引号短语在正常文案里不会出现，但真出现了也不能把
+     * 版式撑破 —— 宁可切碎，也不能让文字溢出卡片。
+     */
+    private static java.util.List<NoteUnit> noteHardSplit(java.util.List<NoteUnit> units,
+                                                          NoteMeasurer measurer, int maxWidth) {
+        java.util.List<NoteUnit> out = new java.util.ArrayList<NoteUnit>();
+        for (NoteUnit u : units) {
+            if (measurer.measure(u.text) <= maxWidth) {
+                out.add(u);
+                continue;
+            }
+            boolean sp = u.sep;
+            StringBuilder cur = new StringBuilder();
+            for (String ch : noteSafeChunks(u.text)) {
+                if (cur.length() > 0 && measurer.measure(cur.toString() + ch) > maxWidth) {
+                    out.add(new NoteUnit(cur.toString(), sp));
+                    sp = false;
+                    cur.setLength(0);
+                    cur.append(ch);
+                } else {
+                    cur.append(ch);
+                }
+            }
+            if (cur.length() > 0) out.add(new NoteUnit(cur.toString(), sp));
+        }
+        return out;
+    }
+
+    /**
+     * 把一段说明文字按宽度折成若干行。
+     *
+     * measurer : 能量出一段文字有多宽（安卓端用 Paint 测量）
+     * maxWidth : 每行最多允许多宽（像素）
+     *
+     * 规则（桌面版 weaknet.wrap_note_lines 完全一致）：
+     *   · 引号短语、英文单词、数字带单位整体不可拆开
+     *   · 断行只发生在排版单元之间；行首不留空格
+     *   · 收尾标点不另起一行，起头标点不留在行末（避头尾）
+     *   · 单个单元宽过整行时按字符硬切，不撑破版式
+     */
+    static java.util.List<String> wrapNoteLines(String text, NoteMeasurer measurer, int maxWidth) {
+        java.util.List<String> lines = new java.util.ArrayList<String>();
+        if (text == null || text.length() == 0) return lines;
+        java.util.List<NoteUnit> units = noteHardSplit(noteGroupUnits(splitNoteAtoms(text)),
+                measurer, maxWidth);
+        if (units.isEmpty()) return lines;
+        java.util.List<NoteUnit> cur = new java.util.ArrayList<NoteUnit>();
+        int curW = 0;
+        for (NoteUnit u : units) {
+            int w = measurer.measure(u.text);
+            int add = ((u.sep && !cur.isEmpty()) ? measurer.measure(" ") : 0) + w;
+            if (!cur.isEmpty() && curW + add > maxWidth) {
+                lines.add(noteUnitsText(cur));
+                cur = new java.util.ArrayList<NoteUnit>();
+                curW = 0;
+                add = w;                 // 断行后行首不留空格
+            }
+            cur.add(u);
+            curW += add;
+        }
+        if (!cur.isEmpty()) lines.add(noteUnitsText(cur));
+        return lines;
+    }
+
+    /** 文字测宽器：安卓端用 Paint 实现，纯逻辑测试里可以自己实现一个 */
+    interface NoteMeasurer {
+        int measure(String text);
+    }
+
+    /**
+     * 文字测宽器：按「汉字算 1 个单位、ASCII 算 0.5 个单位」估算。
+     * 纯逻辑测试用（不依赖 Android 的 Paint，能在 JVM 上跑）。
+     * 界面上要精确排版时由 ParamSheet 传入一个基于 Paint 的实现。
+     */
+    static class NoteRoughMeasurer implements NoteMeasurer {
+        private final int unit;
+
+        NoteRoughMeasurer(int unit) {
+            this.unit = unit;
+        }
+
+        public int measure(String text) {
+            if (text == null) return 0;
+            int w = 0;
+            for (int i = 0; i < text.length(); i++) {
+                char ch = text.charAt(i);
+                if (ch == ' ') w += unit / 4;
+                else if (isNoteCjk(ch)) w += unit;
+                else w += unit / 2;
+            }
+            return w;
+        }
     }
 
     public static Profile build(String key) {

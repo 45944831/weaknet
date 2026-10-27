@@ -44,6 +44,33 @@ FONT = ("Microsoft YaHei UI", 9)
 FONT_B = ("Microsoft YaHei UI", 9, "bold")
 FONT_T = ("Microsoft YaHei UI", 13, "bold")
 
+# ---------------------------------------------------------------- 参数说明小窗排版
+#
+# 说明窗的文字折行不在 Tk 里做，交给引擎层 weaknet.wrap_note_lines：
+# Tk 的 Label 只按「空格」断行，中文正文里为排版留的空格（→、≈、+ 两侧）
+# 全成了断点 —— 于是「·」条目符被甩到单独一行，「「本机 → 服务器」」
+# 这种引号短语被从中间劈开。折行下沉到引擎层后，两端（桌面 / 安卓）
+# 用同一套规则，同一个参数在电脑上和手机上不会长得不一样。
+#
+# 宽度（像素）：
+NOTE_PAD = 14            # 卡片内左右留白
+NOTE_TEXT_W = 330        # 正文一行最多多宽
+NOTE_TIP_INDENT = 12     # 「·」条目符占的宽度：符号停在左边，正文悬挂缩进
+NOTE_WIN_W = 380         # 说明窗固定宽度（正文区 330 + 左右留白 28 + 边框 + 窗口留白）
+
+# 引擎层折行需要知道「一段文字有多宽」，这里用 Tk 字体实测。
+# 不自己按字数估：中文一个字 13px、英文一个字母 7px、箭头 13px，
+# 估出来的宽度跟真实差几十像素，断行位置就全错了。
+_NOTE_FONT = None
+
+
+def _note_measure(text):
+    """量一段文字的像素宽（供 weaknet.wrap_note_lines 折行用）。"""
+    global _NOTE_FONT
+    if _NOTE_FONT is None:
+        _NOTE_FONT = tkfont.Font(family="Microsoft YaHei UI", size=10)
+    return _NOTE_FONT.measure(text)
+
 # GUI 里的短名称（Web 控制台仍用全名）
 SHORT = {
     "direct": "直连", "wifi": "Wi-Fi 良好", "4g": "4G LTE", "5g": "5G 良好",
@@ -169,6 +196,11 @@ class App:
         self.param_win = None                 # 单个参数的「！」说明小窗
         self._param_key = None                # 小窗当前讲的是哪个参数
         self.param_btns = {}                  # 参数 key -> 「！」按钮
+        self.combo_win = None                 # 弱网组合编辑窗口，None = 当前未打开
+        self._combo_rows = []                 # 编辑器里的每一行（场景 + 分/秒）
+        self._combo_editing = None            # 正在编辑的组合 id（新建为 None）
+        self.combo_notes_win = None           # 组合说明二级窗口（组合区的「！」）
+        self.combo_notes_txt = None           # 组合说明的正文控件
         # USB 手机弱网：adb 命令最长 20 秒，一律丢后台线程，
         # 结果经这个队列回到主线程（tkinter 不是线程安全的，绝不能在子线程里直接碰控件）
         self.usb_q = queue.Queue()
@@ -450,6 +482,8 @@ class App:
             except Exception:
                 pass
         self._last_fold_toggle = toggle
+        # 记下内容容器：外部要判断这张卡片是收起还是展开（见 goto_new_scene）
+        self._last_fold_inner = inner
 
         if collapsed:
             arrow.config(text="▸")
@@ -520,7 +554,7 @@ class App:
         # 标题右侧的「！」：17 支档位光看名字分不清差别（4G 弱网 vs 弱 Wi-Fi 差在哪），
         # 点开是每支的场景说明 + 参数摘要，不占卡片高度
         box, self.preset_help_btn = self._card_x(
-            self.col_left, "场景预设（点击即生效）",
+            self.col_left, "场景预设（弱网开启后点一下即生效）",
             action=("！", self.open_preset_notes))
         self.preset_help_btn.configure(text="！", width=2,
                                        font=("Microsoft YaHei UI", 10, "bold"))
@@ -547,8 +581,8 @@ class App:
                 self.preset_btns[key] = b
             row += 1
 
-        # 自定义栏：保存过的场景与内置预设并排常驻，点一下即切换（保存入口在下方自定义参数里）
-        self._build_mine(box)
+        # 「我的自定义场景」与「我的弱网组合」合成一张卡片，用顶部标签切换
+        self._build_mine_combo(box)
 
     def _build_custom(self):
         # 预设场景已覆盖绝大多数用例，自定义参数默认收起，需要细调时点标题展开
@@ -560,6 +594,8 @@ class App:
         # 记下卡片本体，便于自检与外部展开/收起
         self.custom_card = self.root.nametowidget(box.winfo_parent())
         self.custom_toggle = self._last_fold_toggle
+        # 内容容器：用来判断这张卡片当前是展开还是收起（见 goto_new_scene）
+        self.custom_fold_inner = self._last_fold_inner
 
         grid = tk.Frame(box, bg=CARD)
         grid.pack(fill="x")
@@ -618,6 +654,8 @@ class App:
                        relief="flat", highlightthickness=1, highlightbackground=LINE,
                        highlightcolor=ACCENT, bg="#fbfcfe", fg=TEXT)
         ent.pack(side="left", padx=(6, 8))
+        # 记下输入框：「➕ 新建场景」要把光标送过来
+        self.mine_name_ent = ent
         ent.bind("<Return>", lambda _e: self.save_mine())
         tk.Button(row, text="保存当前参数", font=FONT, bg="#eef2f7", fg=TEXT,
                   relief="flat", padx=12, pady=4, cursor="hand2",
@@ -628,28 +666,88 @@ class App:
                  font=FONT, bg=CARD, fg=MUTED, anchor="w", justify="left",
                  wraplength=430).pack(fill="x", pady=(6, 0))
 
-    def _build_mine(self, box):
+    def _build_mine_combo(self, box):
+        """我的自定义场景 + 我的弱网组合：合并成一张卡片，用标签切换。
+
+        这两块本来就是一类东西（都是我自己攒下来的、点一下即切换的环境），
+        原来却各占一块纵向空间，加起来比内置档位那一整片还长；
+        合成一张卡片后用「场景 / 组合」两个标签切换，一次只显示当前那一页。
+        """
+        tk.Frame(box, bg=LINE, height=1).pack(fill="x", pady=(10, 8))
+        head = tk.Frame(box, bg=CARD)
+        head.pack(fill="x")
+        tk.Label(head, text="⭐ 我的场景与组合", font=FONT_B, bg=CARD,
+                 fg=TEXT).pack(side="left")
+
+        # 环境共享：自定义场景与弱网组合在同一个窗口里共享，入口跟着这张卡片走
+        self.btn_share = tk.Button(head, text="🔗 环境共享", font=FONT, bg="#eef2f7",
+                                   fg=TEXT, relief="flat", padx=10, pady=3,
+                                   cursor="hand2", command=self.open_share)
+        self.btn_share.pack(side="right")
+
+        # 标签（场景 / 组合）单独占一行：紧贴标题会被看成标题的一部分，
+        # 看不出这里有两页可切。做成两段按钮，选中的那段落成主色。
+        tabs = tk.Frame(box, bg=CARD)
+        tabs.pack(fill="x", pady=(7, 0))
+        self.tab_btns = {}
+        for key, label in (("scene", "场景"), ("combo", "组合")):
+            b = tk.Button(tabs, text=label, font=FONT_B, bg="#eef2f7", fg=MUTED,
+                          relief="flat", padx=16, pady=3, cursor="hand2",
+                          command=lambda k=key: self.switch_tab(k))
+            b.pack(side="left", padx=(0, 4))
+            self.tab_btns[key] = b
+
+        # 两个页面容器：同一时刻只显示其中一个
+        self.tab_pages = {}
+        for key in ("scene", "combo"):
+            self.tab_pages[key] = tk.Frame(box, bg=CARD)
+
+        self._build_mine(self.tab_pages["scene"])
+        self._build_combo(self.tab_pages["combo"])
+        # 初始停在当前选中的那一页：选中的正是组合，就别让用户再点一次标签
+        cur = W.G.preset_key or ""
+        self.switch_tab("combo" if cur.startswith(W.COMBO_KEY_PREFIX) else "scene")
+
+    def switch_tab(self, key):
+        """切换「场景 / 组合」标签页。
+
+        只换显示，不重建内容：两个页面的按钮都是活的，切换回来还在原位。
+        """
+        pages = getattr(self, "tab_pages", None)
+        if not pages:
+            return
+        for k, page in pages.items():
+            if k == key:
+                if not page.winfo_manager():
+                    page.pack(fill="x")
+            elif page.winfo_manager():
+                page.pack_forget()
+        for k, b in getattr(self, "tab_btns", {}).items():
+            on = (k == key)
+            b.configure(bg=ACCENT if on else "#eef2f7",
+                        fg="white" if on else MUTED)
+        self.cur_tab = key
+
+    def _build_mine(self, page):
         """自定义场景：与内置预设同处一张卡片、用同样的按钮样式。
 
         不再单独拉一个带「删除选中」的列表——保存后就跟内置档位长得一样，
         点一下即切换；删除入口跟着「当前选中的场景」出现（见 _sync_mine_del）。
         """
-        tk.Frame(box, bg=LINE, height=1).pack(fill="x", pady=(10, 8))
-        # 标题行：环境共享共享的就是下面这些自定义环境，按钮跟标题同行最顺手
-        mhead = tk.Frame(box, bg=CARD)
-        mhead.pack(fill="x")
-        self.mine_head = tk.Label(mhead, text="⭐ 我的自定义", font=FONT_B,
-                                  bg=CARD, fg=TEXT)
-        self.mine_head.pack(side="left")
-        self.btn_share = tk.Button(mhead, text="🔗 环境共享", font=FONT, bg="#eef2f7",
-                                   fg=TEXT, relief="flat", padx=10, pady=3,
-                                   cursor="hand2", command=self.open_share)
-        self.btn_share.pack(side="left", padx=(10, 0))
-        self.mine_grid = tk.Frame(box, bg=CARD)
+        # 动作行：「➕ 新建场景」直接跳到下方的自定义参数区起名保存
+        # （Windows 端保存场景要填名字，名字框在「自定义参数」卡片里，
+        #  所以这里不是弹窗，而是把那块展开并把光标送过去）
+        row = tk.Frame(page, bg=CARD)
+        row.pack(fill="x")
+        tk.Button(row, text="➕ 新建场景", font=FONT, bg="#eef2f7", fg=TEXT,
+                  relief="flat", padx=10, pady=3, cursor="hand2",
+                  command=self.goto_new_scene).pack(side="left")
+
+        self.mine_grid = tk.Frame(page, bg=CARD)
         self.mine_grid.pack(fill="x", pady=(6, 0))
         self.mine_btns = {}
 
-        bar = tk.Frame(box, bg=CARD)
+        bar = tk.Frame(page, bg=CARD)
         bar.pack(fill="x", pady=(8, 0))
         self.mine_del_bar = bar
         self.btn_mine_del = tk.Button(bar, text="🗑 删除当前场景", font=FONT,
@@ -657,10 +755,38 @@ class App:
                                       padx=12, pady=4, cursor="hand2",
                                       command=self.del_mine)
         self.btn_mine_del.pack(side="left")
-        self.lab_mine = tk.Label(box, text="", font=FONT, bg=CARD, fg=MUTED,
+        self.lab_mine = tk.Label(page, text="", font=FONT, bg=CARD, fg=MUTED,
                                  anchor="w", justify="left", wraplength=430)
         self.lab_mine.pack(fill="x", pady=(6, 0))
         self.reload_mine()
+
+    def goto_new_scene(self):
+        """「➕ 新建场景」：展开自定义参数卡片，把光标送到名称输入框。
+
+        保存一条自定义场景必须先给参数起个名字，而名字框在「自定义参数」卡片里
+        （那张卡片默认是收起的）。这里一步到位：展开 → 滚进视野 → 聚焦。
+        """
+        try:
+            inner = getattr(self, "custom_fold_inner", None)
+            # 卡片是收起状态时才展开：toggle 是「切换」语义，已经展开着再点一下
+            # 反而会把它收起来
+            if inner is not None and not inner.winfo_manager():
+                self.custom_toggle()
+            self.root.after(30, lambda: self._left_ensure_visible(self.custom_card))
+            self.root.after(60, lambda: self._focus_mine_name())
+        except Exception:
+            pass
+
+    def _focus_mine_name(self):
+        """把焦点放到自定义场景的名称输入框（窗口没显示时忽略）"""
+        try:
+            ent = getattr(self, "mine_name_ent", None)
+            if ent is None:
+                return
+            self._left_ensure_visible(ent)
+            ent.focus_set()
+        except Exception:
+            pass
 
     # ---------------- 场景说明（二级窗口） ----------------
 
@@ -833,32 +959,75 @@ class App:
         card.pack(fill="both", expand=True, padx=10, pady=10)
 
         head = tk.Frame(card, bg=CARD)
-        head.pack(fill="x", padx=12, pady=(9, 0))
-        tk.Label(head, text="！", font=("Microsoft YaHei UI", 10, "bold"),
-                 bg=CARD, fg=ACCENT).pack(side="left")
-        tk.Label(head, text=label, font=FONT_B, bg=CARD, fg=TEXT).pack(
-            side="left", padx=(5, 0))
-        tk.Button(head, text="✕", font=FONT, bg=CARD, fg=MUTED, relief="flat",
-                  bd=0, padx=4, pady=0, cursor="hand2", takefocus=0,
+        head.pack(fill="x", padx=NOTE_PAD, pady=(12, 0))
+        # 标题标记用半角「!」，不用全角「！」。
+        # 全角感叹号在 Microsoft YaHei UI 里占 15px 宽，墨迹却只有 2px，
+        # 还挤在格子左缘 —— 跟参数名之间凭空多出 20 多像素空隙，看起来像浮在半空。
+        # 半角只有 5px 宽、墨迹居中，和参数名挨得紧。
+        tk.Label(head, text="!", font=("Microsoft YaHei UI", 11, "bold"),
+                 bg=CARD, fg=ACCENT, padx=0, bd=0).pack(side="left")
+        tk.Label(head, text=label, font=("Microsoft YaHei UI", 11, "bold"),
+                 bg=CARD, fg=TEXT, padx=0, bd=0).pack(side="left", padx=(6, 0))
+        tk.Button(head, text="✕", font=("Microsoft YaHei UI", 10), bg=CARD, fg=MUTED,
+                  relief="flat", bd=0, padx=4, pady=0, cursor="hand2", takefocus=0,
                   activebackground=CARD, activeforeground=TEXT,
                   command=self.close_param_note).pack(side="right")
 
-        # 单位与取值范围从 FIELDS 现算，不写死在文案里 —— 改上限时说明自动跟着变
+        # 单位与取值范围做成两枚小标签：一眼分得清「这是单位」和「这是上限」，
+        # 挤在一行文字里读起来像半句话
+        chips = tk.Frame(card, bg=CARD)
+        chips.pack(fill="x", padx=NOTE_PAD, pady=(8, 0))
         if unit:
-            meta_line = "单位 %s · 取值范围 0 ~ %s" % (unit, top)
-        else:
-            meta_line = "取值范围 0 ~ %s" % top
-        tk.Label(card, text=meta_line, font=FONT, bg=CARD, fg=MUTED,
-                 anchor="w").pack(fill="x", padx=12, pady=(2, 0))
-        tk.Frame(card, bg=LINE, height=1).pack(fill="x", padx=12, pady=(7, 0))
-        tk.Label(card, text=note or "（暂无说明）", font=FONT, bg=CARD, fg=TEXT,
-                 anchor="w", justify="left", wraplength=330).pack(
-            fill="x", padx=12, pady=(9, 0))
-        tk.Button(card, text="知道了", font=FONT, bg="#eef2f7", fg=TEXT,
-                  relief="flat", padx=14, pady=4, cursor="hand2", takefocus=0,
-                  bd=0, highlightthickness=1, highlightbackground=LINE,
-                  command=self.close_param_note).pack(anchor="e", padx=12,
-                                                      pady=(11, 11))
+            self._note_chip(chips, "单位", unit)
+        self._note_chip(chips, "取值范围", "0 ~ %s" % top)
+
+        tk.Frame(card, bg=LINE, height=1).pack(fill="x", padx=NOTE_PAD, pady=(11, 0))
+
+        # 正文分两层：第一段讲「这项干什么」，后面的讲「坑在哪」。
+        # 之前整段糊在一起，读者分不清哪句是提醒，最容易踩的那句反倒被略过
+        body, tips = W.split_param_note(note)
+        tk.Label(card, text="作用", font=("Microsoft YaHei UI", 9, "bold"),
+                 bg=CARD, fg=MUTED, padx=0, bd=0).pack(
+            anchor="w", padx=NOTE_PAD, pady=(11, 0))
+        # 折行由引擎层做（见文件头 NOTE_* 常量的说明）：先把文字切成不可再分的
+        # 原子，再按像素宽贪心拼行。Tk 自己的 wraplength 只按空格断行，
+        # 中文里为排版留的空格全成了断点，会把「·」甩到单独一行、
+        # 把「「本机 → 服务器」」从中间劈开。
+        body_lines = W.wrap_note_lines(body or "（暂无说明）",
+                                       _note_measure, NOTE_TEXT_W)
+        tk.Label(card, text="\n".join(body_lines),
+                 font=("Microsoft YaHei UI", 10), bg=CARD, fg=TEXT,
+                 anchor="w", justify="left", padx=0, bd=0).pack(
+            fill="x", padx=NOTE_PAD, pady=(4, 0))
+
+        if tips:
+            tk.Label(card, text="注意", font=("Microsoft YaHei UI", 9, "bold"),
+                     bg=CARD, fg=WARN, padx=0, bd=0).pack(
+                anchor="w", padx=NOTE_PAD, pady=(13, 0))
+            for i, tip in enumerate(tips):
+                # 「·」单独做一个控件，不再跟正文拼在同一个字符串里。
+                # 拼在一起时 Tk 会把它当一个词，单独甩到一行（截图里的那行光秃秃的「·」）。
+                # 拆开后它固定待在左边，右侧正文整体缩进 —— 悬挂缩进，
+                # 换行后的第二行仍然和第一行正文对齐。
+                row = tk.Frame(card, bg=CARD)
+                row.pack(fill="x", padx=NOTE_PAD, pady=(5 if i == 0 else 4, 0))
+                row.grid_columnconfigure(0, minsize=NOTE_TIP_INDENT)
+                row.grid_columnconfigure(1, weight=1)
+                tk.Label(row, text="·", font=("Microsoft YaHei UI", 10),
+                         bg=CARD, fg=TEXT, padx=0, bd=0,
+                         anchor="w").grid(row=0, column=0, sticky="w")
+                tip_lines = W.wrap_note_lines(tip, _note_measure,
+                                              NOTE_TEXT_W - NOTE_TIP_INDENT)
+                tk.Label(row, text="\n".join(tip_lines),
+                         font=("Microsoft YaHei UI", 10), bg=CARD, fg=TEXT,
+                         anchor="w", justify="left", padx=0, bd=0).grid(
+                    row=0, column=1, sticky="w")
+
+        tk.Button(card, text="知道了", font=("Microsoft YaHei UI", 9), bg="#eef2f7",
+                  fg=TEXT, relief="flat", padx=16, pady=5, cursor="hand2",
+                  takefocus=0, bd=0, highlightthickness=1, highlightbackground=LINE,
+                  command=self.close_param_note).pack(anchor="e", padx=NOTE_PAD,
+                                                      pady=(16, 13))
 
         self.param_win = win
         self._param_key = key
@@ -867,14 +1036,27 @@ class App:
         self._place_param_note(win, key)
         win.deiconify()
 
+    def _note_chip(self, parent, name, value):
+        """说明窗里的一枚小标签：标题（浅底）+ 取值（等宽感）。"""
+        chip = tk.Frame(parent, bg="#f1f4fa", highlightbackground=LINE,
+                        highlightthickness=1)
+        chip.pack(side="left", padx=(0, 6))
+        tk.Label(chip, text=name, font=("Microsoft YaHei UI", 9), bg="#f1f4fa",
+                 fg=MUTED, padx=6, pady=2).pack(side="left")
+        tk.Label(chip, text=value, font=("Microsoft YaHei UI", 9, "bold"),
+                 bg="#f1f4fa", fg=TEXT, padx=6, pady=2).pack(side="left")
+
     def _place_param_note(self, win, key):
         """贴在被点的「！」旁边：右边放不下就翻到左边，最后夹在屏幕内。
 
         不挂在鼠标坐标上：键盘 / 脚本触发时没有鼠标位置，取按钮自己的位置更稳。
+
+        宽度写死：正文已经按固定宽度折好行了，若让 Tk 按最长的一行自适应，
+        换个参数窗口就忽宽忽窄 —— 看着像没做完。
         """
         try:
             win.update_idletasks()
-            w, h = win.winfo_reqwidth(), win.winfo_reqheight()
+            w, h = NOTE_WIN_W, win.winfo_reqheight()
             btn = self.param_btns.get(key)
             if btn is not None and btn.winfo_ismapped():
                 bx, by = btn.winfo_rootx(), btn.winfo_rooty()
@@ -985,6 +1167,555 @@ class App:
         self.reload_mine()
         self.load_current()
         self.refresh()
+
+    # ---------------- 弱网组合 ----------------
+
+    def open_combo_notes(self):
+        """组合说明：组合怎么播 + 每支的段序 + 几个能照抄的例子。
+
+        入口是「我的弱网组合」标题右侧的「！」。组合是把几支场景按时间排队播，
+        按钮上只写着「通勤」「抢购」这类名字，猜不出它到底模拟了什么 ——
+        这里把机制、当前各支的段序和推荐例子摊开，省得每次都去翻源码。
+        """
+        if self.combo_notes_win is not None:
+            try:                              # 已经开着就提到前台，不重复建
+                self.combo_notes_win.deiconify()
+                self.combo_notes_win.lift()
+                return
+            except Exception:
+                self.combo_notes_win = None
+
+        win = tk.Toplevel(self.root)
+        win.title("弱网组合说明")
+        sh = win.winfo_screenheight()
+        nh = min(700, max(400, sh - 120))
+        win.geometry("600x%d" % nh)
+        win.configure(bg=BG)
+        try:
+            win.transient(self.root)
+        except Exception:
+            pass
+        try:
+            self.root.update_idletasks()
+            rx, ry = self.root.winfo_rootx(), self.root.winfo_rooty()
+            rw, rh = self.root.winfo_width(), self.root.winfo_height()
+            win.geometry("+%d+%d" % (max(0, rx + (rw - 600) // 2),
+                                     max(0, ry + (rh - nh) // 2)))
+        except Exception:
+            pass
+        self.combo_notes_win = win
+
+        head = tk.Frame(win, bg=CARD, highlightbackground=LINE, highlightthickness=1)
+        head.pack(fill="x", padx=12, pady=12)
+        tk.Button(head, text="← 返回", font=FONT, bg="#eef2f7", fg=TEXT,
+                  relief="flat", padx=12, pady=5, cursor="hand2",
+                  command=self.close_combo_notes).pack(side="left")
+        tk.Label(head, text="弱网组合说明", font=FONT_T, bg=CARD, fg=TEXT).pack(
+            side="left", padx=(12, 0))
+        tk.Label(head, text="共 %d 支" % len(W.get_combos()), font=FONT, bg=CARD,
+                 fg=MUTED).pack(side="right")
+
+        wrap = tk.Frame(win, bg=BG)
+        wrap.pack(fill="both", expand=True, padx=12, pady=(0, 12))
+        txt = tk.Text(wrap, font=FONT, bg=CARD, fg=TEXT, relief="flat",
+                      highlightthickness=1, highlightbackground=LINE, bd=0,
+                      wrap="char", padx=14, pady=12, spacing1=1, spacing3=3,
+                      takefocus=0, cursor="arrow")
+        sb = tk.Scrollbar(wrap, command=txt.yview)
+        txt.configure(yscrollcommand=sb.set)
+        txt.pack(side="left", fill="both", expand=True)
+        sb.pack(side="right", fill="y")
+
+        txt.tag_configure("cat", font=FONT_B, foreground=ACCENT,
+                          spacing1=12, spacing3=3)
+        txt.tag_configure("name", font=FONT_B, foreground=TEXT, spacing1=7)
+        txt.tag_configure("param", font=FONT, foreground=MUTED,
+                          lmargin1=14, lmargin2=14, spacing3=2)
+        txt.tag_configure("note", font=FONT, foreground=TEXT,
+                          lmargin1=14, lmargin2=14, spacing3=6)
+        txt.tag_configure("tip", font=FONT, foreground=WARN,
+                          lmargin1=14, lmargin2=14, spacing3=4)
+
+        # ---- 1. 机制 ----
+        txt.insert("end", "组合怎么播\n", "cat")
+        intro, examples, tips = W.combo_doc_parts()
+        for line in intro.split("\n"):
+            txt.insert("end", line + "\n", "note")
+
+        # ---- 2. 我自己的组合 ----
+        combos = W.get_combos()
+        txt.insert("end", "我保存的组合\n", "cat")
+        if not combos:
+            txt.insert("end", "还没有组合。点「＋ 新建组合」把几支场景排成一条链。\n",
+                       "note")
+        else:
+            cur = W.G.preset_key
+            for c in combos:
+                mark = "　　← 当前选中" if W.COMBO_KEY_PREFIX + c["id"] == cur else ""
+                txt.insert("end", c["name"] + mark + "\n", "name")
+                txt.insert("end", W.combo_summary(c) + "\n", "param")
+
+        # ---- 3. 推荐例子 ----
+        txt.insert("end", "推荐例子（照抄就能用）\n", "cat")
+        for ex in examples:
+            txt.insert("end", ex["name"] + "　" + ex["desc"] + "\n", "name")
+            txt.insert("end", "怎么排：" + ex["steps"] + "\n", "param")
+            txt.insert("end", ex["effect"] + "\n", "note")
+
+        # ---- 4. 提醒 ----
+        txt.insert("end", "注意\n", "cat")
+        for tip in tips:
+            txt.insert("end", "· " + tip + "\n", "tip")
+
+        txt.configure(state="disabled")
+        self.combo_notes_txt = txt
+        win.bind("<Escape>", lambda _e: self.close_combo_notes())
+        win.protocol("WM_DELETE_WINDOW", self.close_combo_notes)
+
+    def close_combo_notes(self):
+        if self.combo_notes_win is None:
+            return
+        try:
+            self.combo_notes_win.destroy()
+        except Exception:
+            pass
+        self.combo_notes_win = None
+        self.combo_notes_txt = None
+
+    def _scene_options(self):
+        """编辑器下拉的候选：内置预设 + 自定义场景。返回 (显示名列表, key 列表)
+
+        已保存的「弱网组合」不在这里出现 —— 组合是按时长线性播的一组场景，
+        嵌一层它不会被展开，运行时只会把那一段跳过，用户排好了却发现少一段最难查。
+        下面这层过滤是界面侧的显式保证，引擎侧 norm_combo_steps 还会再兜一道。
+        """
+        labels, keys = [], []
+        for key, (name, _cat, _extra) in W.PRESETS.items():
+            if key.startswith(W.COMBO_KEY_PREFIX):
+                continue
+            labels.append(SHORT.get(key, name))
+            keys.append(key)
+        for it in W.get_user_presets():
+            k = "u:" + it["id"]
+            if k.startswith(W.COMBO_KEY_PREFIX):
+                continue
+            labels.append(it["name"])
+            keys.append(k)
+        return labels, keys
+
+    def _build_combo(self, page):
+        """弱网组合区：把几支场景排队自动播放，按钮样式与上面两组保持一致"""
+        # 动作行：「＋ 新建组合」排一支，「！」看组合说明（放右侧贴着行尾）
+        head = tk.Frame(page, bg=CARD)
+        head.pack(fill="x")
+        tk.Button(head, text="＋ 新建组合", font=FONT, bg="#eef2f7", fg=ACCENT,
+                  relief="flat", padx=10, pady=3, cursor="hand2",
+                  command=lambda: self.open_combo_editor()).pack(side="left")
+        # 「！」：组合怎么播 + 推荐例子。光看「通勤」「抢购」这类名字猜不出
+        # 它到底模拟了什么，点开才知道
+        cb = tk.Button(head, text="！", font=("Microsoft YaHei UI", 10, "bold"),
+                       bg=CARD, fg=MUTED, relief="flat", bd=0, padx=3, pady=0,
+                       cursor="hand2", takefocus=0, activebackground=CARD,
+                       activeforeground=ACCENT, command=self.open_combo_notes)
+        cb.pack(side="right")
+        cb.bind("<Enter>", lambda _e, w=cb: w.configure(fg=ACCENT))
+        cb.bind("<Leave>", lambda _e, w=cb: w.configure(fg=MUTED))
+        self.combo_grid = tk.Frame(page, bg=CARD)
+        self.combo_grid.pack(fill="x", pady=(6, 0))
+        self.combo_btns = {}
+        self.combo_edit_bar = tk.Frame(page, bg=CARD)
+        self.combo_edit_bar.pack(fill="x", pady=(8, 0))
+        self.btn_combo_edit = tk.Button(self.combo_edit_bar, text="✏️ 编辑", font=FONT,
+                                        bg="#eef2f7", fg=TEXT, relief="flat", padx=12,
+                                        pady=3, cursor="hand2", command=self.edit_combo)
+        self.btn_combo_del = tk.Button(self.combo_edit_bar, text="🗑 删除", font=FONT,
+                                       bg="#eef2f7", fg=TEXT, relief="flat", padx=12,
+                                       pady=3, cursor="hand2", command=self.del_combo)
+        self.lab_combo = tk.Label(page, text="", font=FONT, bg=CARD, fg=MUTED,
+                                  anchor="w", justify="left", wraplength=430)
+        self.lab_combo.pack(fill="x", pady=(6, 0))
+        self.reload_combo()
+
+    def reload_combo(self):
+        """重画组合按钮（自己新建的、别处删掉的都要跟上）"""
+        self.combo_items = W.get_combos()
+        self.combo_sig = ",".join(c["id"] for c in self.combo_items)
+        for b in self.combo_btns.values():
+            b.destroy()
+        self.combo_btns = {}
+        for i, c in enumerate(self.combo_items):
+            key = W.COMBO_KEY_PREFIX + c["id"]
+            b = tk.Button(self.combo_grid, text="🔀 " + c["name"], font=FONT, bg="#eef2f7",
+                          fg=TEXT, relief="flat", padx=9, pady=3, cursor="hand2",
+                          command=lambda k=key: self.apply_preset(k))
+            # 单击 = 选中（已开限速就立即按序播），双击 = 打开查看/编辑（里面有删除按钮）
+            b.bind("<Double-Button-1>", lambda _e, cid=c["id"]: self.open_combo_editor(cid))
+            b.grid(row=i // 4, column=i % 4, padx=(0, 5), pady=2, sticky="w")
+            self.combo_btns[key] = b
+        self._sync_combo_bar()
+
+    def _sync_combo_bar(self):
+        """编辑/删除只跟着「当前选中的组合」出现；下面那行再写播放进度"""
+        if not hasattr(self, "combo_edit_bar"):
+            return
+        key = W.G.preset_key or ""
+        combo = None
+        if key.startswith(W.COMBO_KEY_PREFIX):
+            cid = key[len(W.COMBO_KEY_PREFIX):]
+            combo = next((c for c in getattr(self, "combo_items", [])
+                          if c["id"] == cid), None)
+        if combo is None:
+            for b in (self.btn_combo_edit, self.btn_combo_del):
+                try:
+                    b.pack_forget()
+                except Exception:
+                    pass
+            self.lab_combo.config(text=(
+                "点一支组合先选中它，「开启限速」后按顺序播放；双击可查看/编辑并删除。"
+                if self.combo_items else
+                "还没有组合：点「＋ 新建组合」，把最多 %d 支场景排成一条链路。"
+                % W.MAX_COMBO_STEPS))
+            return
+        for b in (self.btn_combo_edit, self.btn_combo_del):
+            if not b.winfo_manager():
+                b.pack(side="left", padx=(0 if b is self.btn_combo_edit else 8, 0))
+        self.btn_combo_del.config(text="🗑 删除「%s」" % combo["name"])
+        st = W.combo_state()
+        if st:
+            text = "▶ 正在播放第 %d/%d 段，还剩 %d 秒%s" % (
+                st["step"], st["total"], st["left"], "（循环）" if st["loop"] else "")
+        elif not W.G.limit_on:
+            text = "已选中，点「开启限速」后按序播放：%s" % W.combo_summary(combo)
+        else:
+            text = W.combo_summary(combo)
+        self.lab_combo.config(text=text)
+
+    def edit_combo(self):
+        key = W.G.preset_key or ""
+        if not key.startswith(W.COMBO_KEY_PREFIX):
+            return
+        self.open_combo_editor(key[len(W.COMBO_KEY_PREFIX):])
+
+    def del_combo(self):
+        """删除当前选中的组合（正在播放的先停，免得后台继续改参数）"""
+        key = W.G.preset_key or ""
+        if not key.startswith(W.COMBO_KEY_PREFIX):
+            return
+        self.delete_combo_by_id(key[len(W.COMBO_KEY_PREFIX):])
+
+    def delete_combo_by_id(self, cid, ask=True):
+        """删掉一支组合，并把所有看到它的地方都刷新一遍。
+
+        入口有两处：主界面选中后的「🗑 删除」，以及查看/编辑那扇窗里的删除按钮 ——
+        同一套删除逻辑，避免两处行为不一致（一个停播放另一个不停之类的）。
+        """
+        combo = W.find_combo(cid)
+        if combo is None:
+            self.reload_combo()
+            return False
+        if ask and not messagebox.askyesno(
+                "删除弱网组合", "确定删除「%s」？此操作不可撤销。" % combo["name"]):
+            return False
+        self._run(W.stop_combo())
+        ok, _left = W.delete_combo(cid)
+        if ok:
+            W.log_event("config", "删除弱网组合：" + combo["name"])
+            # 删除后 preset_key 指向已不存在的组合：切回直连最干净
+            self._run(W.set_profile(W.default_profile(), "direct"))
+            W.log_event("config", "删除组合后切回直连")
+        self.reload_combo()
+        self.load_current()
+        self.refresh()
+        # 共享窗口开着的话，它那份列表也列着组合，得跟着少一行
+        if getattr(self, "share_win", None) is not None:
+            self.reload_share()
+        return ok
+
+    # ---- 组合编辑器 ----
+
+    def open_combo_editor(self, cid=None):
+        """新建 / 编辑组合：名字 + 若干段（场景 + 分/秒）+ 是否循环"""
+        if self.combo_win is not None:
+            # 窗口还开着时，只有「同一支组合」才直接提前台；要看别的组合就得重建，
+            # 否则「保存后接着新建」的模式会把别人点的组合挡住（界面上还是新建那份）
+            same = (self._combo_editing or "") == (cid or "")
+            if same:
+                # 已经处于新建模式时再点「＋ 新建组合」：得把界面上填了一半的内容清掉。
+                # 否则用户以为在排新组合，实际上一支没填完的还留在那儿，一不留神就存成两支。
+                if not cid:
+                    try:
+                        self._combo_reset_to_new("新建一支组合：填好名字和各段时间后保存。")
+                    except Exception:
+                        pass
+                try:                            # 已经开着就提到前台，不重复建
+                    self.combo_win.deiconify()
+                    self.combo_win.lift()
+                    return
+                except Exception:
+                    self.combo_win = None
+            else:
+                try:
+                    self.combo_win.destroy()
+                except Exception:
+                    pass
+                self.combo_win = None
+                self._combo_editing = None
+                self._combo_rows = []
+        combo = W.find_combo(cid) if cid else None
+        win = tk.Toplevel(self.root)
+        win.title("编辑弱网组合" if combo else "新建弱网组合")
+        win.configure(bg=BG)
+        win.geometry("520x520")
+        try:
+            win.transient(self.root)
+        except Exception:
+            pass
+        try:                                    # 居中到主窗口上
+            self.root.update_idletasks()
+            rx, ry = self.root.winfo_rootx(), self.root.winfo_rooty()
+            rw, rh = self.root.winfo_width(), self.root.winfo_height()
+            win.geometry("+%d+%d" % (max(0, rx + (rw - 520) // 2),
+                                     max(0, ry + (rh - 520) // 2)))
+        except Exception:
+            pass
+        win.protocol("WM_DELETE_WINDOW", self.close_combo_editor)
+        self.combo_win = win
+        self._combo_editing = combo["id"] if combo else None
+        self._combo_rows = []
+
+        card = tk.Frame(win, bg=CARD, highlightbackground=LINE, highlightthickness=1)
+        card.pack(fill="both", expand=True, padx=12, pady=12)
+        inner = tk.Frame(card, bg=CARD)
+        inner.pack(fill="both", expand=True, padx=12, pady=10)
+
+        row0 = tk.Frame(inner, bg=CARD)
+        row0.pack(fill="x")
+        tk.Label(row0, text="组合名称", font=FONT_B, bg=CARD, fg=TEXT).pack(side="left")
+        self.combo_name = tk.StringVar(value=(combo["name"] if combo else ""))
+        ent = tk.Entry(row0, textvariable=self.combo_name, font=FONT, width=22,
+                       relief="flat", highlightthickness=1, highlightbackground=LINE,
+                       highlightcolor=ACCENT, bg="#fbfcfe", fg=TEXT)
+        ent.pack(side="left", padx=(8, 0))
+        ent.focus_set()
+
+        self.combo_loop = tk.BooleanVar(value=bool(combo and combo.get("loop")))
+        tk.Checkbutton(inner, text="播完后循环（不勾则停在最后一段）", font=FONT,
+                       bg=CARD, fg=TEXT, variable=self.combo_loop,
+                       activebackground=CARD, selectcolor="#fbfcfe").pack(
+            anchor="w", pady=(6, 0))
+
+        tk.Label(inner, text="按顺序播放（最多 %d 段，每段都要填时间）"
+                 % W.MAX_COMBO_STEPS, font=FONT_B, bg=CARD, fg=TEXT).pack(
+            anchor="w", pady=(12, 4))
+        self.combo_steps_box = tk.Frame(inner, bg=CARD)
+        self.combo_steps_box.pack(fill="x")
+        # 历史存档里万一混进了嵌套段（下拉早就不列了，但旧文件可能带着）：
+        # 直接不显示它，并告诉用户被去掉了几段，别让他对着少了一段的列表发懵
+        raw_steps = (combo["steps"] if combo
+                     else [{"key": "5g", "minutes": 0, "seconds": 30}])
+        steps, nested = [], 0
+        for st in raw_steps[:W.MAX_COMBO_STEPS]:
+            if str(st.get("key") or "").startswith(W.COMBO_KEY_PREFIX):
+                nested += 1
+                continue
+            steps.append(st)
+        if not steps:
+            steps = [{"key": "5g", "minutes": 0, "seconds": 30}]
+        for st in steps:
+            self._combo_add_row(st)
+        if nested:
+            win.after(80, lambda n=nested: messagebox.showinfo(
+                "弱网组合",
+                "这个组合里有 %d 段选的是别的组合，已帮你去掉（组合不能嵌套）。\n"
+                "重新选好场景后保存即可。" % n))
+
+        self.btn_combo_add = tk.Button(inner, text="＋ 添加一段", font=FONT,
+                                       bg="#eef2f7", fg=ACCENT, relief="flat",
+                                       padx=10, pady=3, cursor="hand2",
+                                       command=lambda: self._combo_add_row())
+        self.btn_combo_add.pack(anchor="w", pady=(6, 0))
+        self._combo_sync_add()
+
+        bar = tk.Frame(inner, bg=CARD)
+        bar.pack(fill="x", pady=(14, 0))
+        tk.Button(bar, text="保存组合", font=FONT_B, bg=ACCENT, fg="white",
+                  relief="flat", padx=14, pady=5, cursor="hand2",
+                  command=self.save_combo).pack(side="left")
+        # 查看已有组合时，删除入口就在这扇窗里：不用先切回主界面再找删除
+        self.btn_combo_del_in = tk.Button(bar, text="🗑 删除该组合", font=FONT,
+                                           bg="#eef2f7", fg="#c0392b", relief="flat",
+                                           padx=12, pady=5, cursor="hand2",
+                                           command=self._combo_delete_in_editor)
+        tk.Button(bar, text="取消", font=FONT, bg="#eef2f7", fg=TEXT,
+                  relief="flat", padx=12, pady=5, cursor="hand2",
+                  command=self.close_combo_editor).pack(side="left", padx=(8, 0))
+        if combo:
+            self.btn_combo_del_in.pack(side="left", padx=(8, 0))
+        self.lab_combo_tip = tk.Label(inner, text="", font=FONT, bg=CARD, fg=MUTED,
+                                      anchor="w", justify="left", wraplength=430)
+        self.lab_combo_tip.pack(fill="x", pady=(8, 0))
+        tk.Label(inner, text="每段的「分」和「秒」至少填一个且大于 0；时间到点自动切下一段，"
+                             "上限 %d 段。保存后可以接着排下一支，不用关窗。" % W.MAX_COMBO_STEPS,
+                 font=FONT, bg=CARD, fg=MUTED, anchor="w", justify="left",
+                 wraplength=430).pack(fill="x", pady=(6, 0))
+
+    def _combo_add_row(self, st=None):
+        """编辑器里的一行：场景 + 分 + 秒 + 删除本行"""
+        # 硬上限写在这里而不是只靠按钮禁用：否则任何绕过按钮的路径（编辑旧组合、
+        # 手抖多按一次）都能排到 6 段，最后被 norm_combo_steps 悄悄砍掉第 6 段
+        if len(self._combo_rows) >= W.MAX_COMBO_STEPS:
+            return
+        row = tk.Frame(self.combo_steps_box, bg=CARD)
+        row.pack(fill="x", pady=2)
+        labels, keys = self._scene_options()
+        if not keys:
+            tk.Label(row, text="（暂无可用场景）", font=FONT, bg=CARD, fg=MUTED).pack(side="left")
+            self._combo_rows.append({"frame": row, "cb": None, "keys": [],
+                                     "mv": tk.StringVar(), "sv": tk.StringVar()})
+            self._combo_sync_add()
+            return
+        cb = ttk.Combobox(row, values=labels, width=16, state="readonly", font=FONT)
+        cb.pack(side="left")
+        idx = keys.index(st["key"]) if st and st["key"] in keys else 0
+        cb.current(idx)
+        mv = tk.StringVar(value=str(int(st.get("minutes", 0) or 0)) if st else "0")
+        sv = tk.StringVar(value=str(int(st.get("seconds", 0) or 0)) if st else "30")
+        ttk.Spinbox(row, from_=0, to=W.STEP_MAX_MINUTES, width=4,
+                    textvariable=mv, font=FONT).pack(side="left", padx=(10, 2))
+        tk.Label(row, text="分", font=FONT, bg=CARD, fg=MUTED).pack(side="left")
+        ttk.Spinbox(row, from_=0, to=W.STEP_MAX_SECONDS, width=4,
+                    textvariable=sv, font=FONT).pack(side="left", padx=(10, 2))
+        tk.Label(row, text="秒", font=FONT, bg=CARD, fg=MUTED).pack(side="left")
+        item = {"frame": row, "cb": cb, "keys": keys, "mv": mv, "sv": sv}
+        self._combo_rows.append(item)
+        tk.Button(row, text="✕", font=FONT, bg=CARD, fg=MUTED, relief="flat",
+                  padx=6, pady=0, cursor="hand2",
+                  command=lambda it=item: self._combo_del_row(it)).pack(side="left", padx=(10, 0))
+        self._combo_sync_add()
+
+    def _combo_del_row(self, item):
+        try:
+            item["frame"].destroy()
+        except Exception:
+            pass
+        try:
+            self._combo_rows.remove(item)
+        except ValueError:
+            pass
+        self._combo_sync_add()
+
+    def _combo_sync_add(self):
+        """到上限就把「添加一段」禁用：与其让用户排第 6 段时被静默裁掉，不如直接说清楚"""
+        if not hasattr(self, "btn_combo_add"):
+            return
+        full = len(self._combo_rows) >= W.MAX_COMBO_STEPS
+        try:
+            self.btn_combo_add.config(state="disabled" if full else "normal",
+                                      text=("已达上限（%d 段）" % W.MAX_COMBO_STEPS)
+                                      if full else "＋ 添加一段")
+        except Exception:
+            pass
+
+    def save_combo(self):
+        name = (self.combo_name.get() or "").strip()
+        if not name:
+            messagebox.showinfo("弱网组合", "请先给这个组合起个名字。")
+            return
+        steps = []
+        for i, r in enumerate(self._combo_rows, 1):
+            cb = r.get("cb")
+            if cb is None:
+                continue
+            idx = cb.current()
+            if idx < 0 or idx >= len(r["keys"]):
+                messagebox.showinfo("弱网组合", "第 %d 段还没选场景。" % i)
+                return
+            try:
+                mi = max(0, int(float(r["mv"].get() or 0)))
+            except Exception:
+                mi = 0
+            try:
+                se = max(0, int(float(r["sv"].get() or 0)))
+            except Exception:
+                se = 0
+            if mi <= 0 and se <= 0:
+                messagebox.showinfo(
+                    "弱网组合",
+                    "第 %d 段没有填时间：分和秒至少要有一个大于 0。" % i)
+                return
+            key = r["keys"][idx]
+            if key.startswith(W.COMBO_KEY_PREFIX):
+                # 界面下拉本来就不该出现组合；真走到这儿说明是旧存档带进来的脏数据，
+                # 直接拒绝保存并指明段落，而不是让它被 norm_combo_steps 悄悄丢掉
+                messagebox.showinfo(
+                    "弱网组合",
+                    "第 %d 段选的是另一个组合「%s」。\n\n组合里不能再套组合，"
+                    "请改选一个预设或自定义场景。" % (i, W.scene_name(key)))
+                return
+            steps.append({"key": key, "minutes": mi, "seconds": se})
+        if not steps:
+            messagebox.showinfo("弱网组合", "至少要排一段场景。")
+            return
+        combo, _combos = W.upsert_combo(name, steps, loop=self.combo_loop.get(),
+                                        cid=self._combo_editing)
+        if combo is None:
+            # 一段都留不下（全是嵌套组合之类的脏数据）：不存空壳，原来的组合也不动
+            messagebox.showinfo(
+                "弱网组合",
+                "这个组合里没有一段能用的场景，没有保存。\n\n"
+                "组合里不能再套组合，请改选一个预设或自定义场景。")
+            return
+        W.log_event("config", "保存弱网组合：" + combo["name"])
+        self.reload_combo()
+        self.refresh()
+        # 保存完不关窗：直接切成「新建」模式，接着排下一支（用户连着建几支时最省事）
+        self._combo_reset_to_new("已保存「%s」，可以接着排下一支。" % combo["name"])
+
+    def _combo_reset_to_new(self, tip=""):
+        """把编辑器清成「新建」状态：名字、循环开关、段列表都回到初始值"""
+        self._combo_editing = None
+        try:
+            self.combo_name.set("")
+            self.combo_loop.set(False)
+        except Exception:
+            pass
+        for r in list(getattr(self, "_combo_rows", [])):
+            try:
+                r["frame"].destroy()
+            except Exception:
+                pass
+        self._combo_rows = []
+        self._combo_add_row({"key": "5g", "minutes": 0, "seconds": 30})
+        try:
+            self.combo_win.title("新建弱网组合")
+        except Exception:
+            pass
+        # 删除按钮只对「已有组合」有意义，新建模式下收起来
+        try:
+            self.btn_combo_del_in.pack_forget()
+        except Exception:
+            pass
+        try:
+            self.lab_combo_tip.config(text=tip)
+        except Exception:
+            pass
+
+    def _combo_delete_in_editor(self):
+        """在查看/编辑窗口里删掉当前这支组合：删完关窗，并把主界面、共享窗口刷新"""
+        cid = self._combo_editing
+        if not cid:
+            return
+        if self.delete_combo_by_id(cid):
+            self.close_combo_editor()
+
+    def close_combo_editor(self):
+        try:
+            self.combo_win.destroy()
+        except Exception:
+            pass
+        self.combo_win = None
+        self._combo_editing = None
+        self._combo_rows = []
 
     def _build_stats(self):
         pass   # 实时状态已并入顶栏（见 _build_header）
@@ -1267,11 +1998,14 @@ class App:
     # ---------------- 环境共享：二级窗口 ----------------
 
     def open_share(self):
-        """打开二级窗口：局域网互推自定义环境。
+        """打开二级窗口：局域网互推自定义环境与弱网组合。
 
         网页控制台下线后，这里是 Windows 端唯一的环境共享入口：
-        改名字 → 设备列表里能看到同局域网的其它 WeakNet → 选设备 + 选环境推送 →
+        改名字 → 设备列表里能看到同局域网的其它 WeakNet → 选设备 + 勾选内容推送 →
         对方那边同名会进他的收件箱，我方这边的收件箱同样在里面处理。
+
+        弱网组合与自定义环境共用这一个窗口：组合里引用的自定义场景在对方机器上
+        通常不存在，连同参数快照一起推过去，落到对方那边才有意义。
         """
         if getattr(self, "share_win", None) is not None:
             try:                              # 已经开着就提到前台，不重复建
@@ -1284,7 +2018,12 @@ class App:
         W.ensure_identity()          # 首次进来先把「我是谁」补齐
         win = tk.Toplevel(self.root)
         win.title("环境共享")
-        win.geometry("640x680")
+        # 弱网组合那一栏加上后控件变多，高度不够会把推送按钮顶出窗口底部
+        try:
+            sh = win.winfo_screenheight()
+        except Exception:
+            sh = 800
+        win.geometry("640x%d" % min(760, max(420, sh - 100)))
         win.configure(bg=BG)
         try:
             win.transient(self.root)
@@ -1326,15 +2065,21 @@ class App:
 
         self.share_mine = self._share_group(win, "我的自定义环境（可多选）", 5)
         self.share_mine.configure(selectmode=tk.EXTENDED)
+        self.share_mine.bind("<<ListboxSelect>>", lambda _e: self._share_sync_btns())
+
+        # 弱网组合单独一栏：里面的段可能引用本机才有的自定义场景，连同参数一起推过去
+        self.share_combo = self._share_group(win, "我的弱网组合（可多选）", 4)
+        self.share_combo.configure(selectmode=tk.EXTENDED)
+        self.share_combo.bind("<<ListboxSelect>>", lambda _e: self._share_sync_btns())
+
         bar2 = tk.Frame(win, bg=BG)
         bar2.pack(fill="x", padx=12, pady=(6, 0))
-        self.btn_push = tk.Button(bar2, text="→ 推送所选环境", font=FONT, bg=ACCENT,
+        self.btn_push = tk.Button(bar2, text="→ 推送所选内容", font=FONT, bg=ACCENT,
                                   fg="white", relief="flat", padx=14, pady=5,
                                   cursor="hand2", command=self.push_share)
         self.btn_push.pack(side="left")
-        self.share_mine.bind("<<ListboxSelect>>", lambda _e: self._share_sync_btns())
 
-        self.share_inbox = self._share_group(win, "收到的环境（同名待处理）", 4)
+        self.share_inbox = self._share_group(win, "收到的内容（同名待处理）", 4)
         bar3 = tk.Frame(win, bg=BG)
         bar3.pack(fill="x", padx=12, pady=(6, 0))
         self.btn_in_over = tk.Button(bar3, text="覆盖本地", font=FONT, bg="#eef2f7",
@@ -1403,6 +2148,7 @@ class App:
         pick_peer = _picked(self.share_peers, getattr(self, "share_peer_list", []), "id")
         pick_inbox = _picked(self.share_inbox, getattr(self, "share_inbox_list", []), "id")
         pick_mine = _picked(self.share_mine, getattr(self, "share_mine_list", []), "id")
+        pick_combo = _picked(self.share_combo, getattr(self, "share_combo_list", []), "id")
 
         self.share_peer_list = sorted(W.G.peers.values(), key=lambda x: x["name"].lower())
         self.share_peer_list = [p for p in self.share_peer_list
@@ -1427,14 +2173,26 @@ class App:
             if it["id"] in pick_mine:
                 self.share_mine.selection_set(i)
 
+        self.share_combo_list = W.get_combos()
+        self.share_combo.delete(0, "end")
+        for c in self.share_combo_list:
+            self.share_combo.insert("end", "%-20s %s"
+                                    % (c["name"][:20], W.combo_summary(c)))
+        if not self.share_combo_list:
+            self.share_combo.insert("end", "（还没有弱网组合：先在「🔀 弱网组合」里排一支）")
+        for i, c in enumerate(self.share_combo_list):
+            if c["id"] in pick_combo:
+                self.share_combo.selection_set(i)
+
         self.share_inbox_list = sorted(W.G.inbox.values(), key=lambda x: x["at"])
         self.share_inbox.delete(0, "end")
         for it in self.share_inbox_list:
+            kind = "组合" if (it.get("kind") or "preset") == "combo" else "环境"
             self.share_inbox.insert(
-                "end", "%-16s 推送「%s」 · %ds前"
-                % (it["from"][:16], it["name"], int(now - it["at"])))
+                "end", "[%s] %-12s 推送「%s」 · %ds前"
+                % (kind, it["from"][:12], it["name"], int(now - it["at"])))
         if not self.share_inbox_list:
-            self.share_inbox.insert("end", "（收件箱为空：别人推来同名环境时会出现在这里）")
+            self.share_inbox.insert("end", "（收件箱为空：别人推来同名内容时会出现在这里）")
         for i, it in enumerate(self.share_inbox_list):
             if it["id"] in pick_inbox:
                 self.share_inbox.selection_set(i)
@@ -1451,8 +2209,10 @@ class App:
             return
         peers = [i for i in self.share_peers.curselection() if i < len(self.share_peer_list)]
         mine = [i for i in self.share_mine.curselection() if i < len(self.share_mine_list)]
+        combos = [i for i in self.share_combo.curselection()
+                  if i < len(getattr(self, "share_combo_list", []))]
         inbox = [i for i in self.share_inbox.curselection() if i < len(self.share_inbox_list)]
-        self.btn_push.config(state="normal" if (peers and mine) else "disabled")
+        self.btn_push.config(state="normal" if (peers and (mine or combos)) else "disabled")
         for b in (getattr(self, "btn_in_over", None), getattr(self, "btn_in_keep", None),
                   getattr(self, "btn_in_save", None)):
             if b is not None:
@@ -1467,22 +2227,31 @@ class App:
     def push_share(self):
         selp = [i for i in self.share_peers.curselection() if i < len(self.share_peer_list)]
         selm = [i for i in self.share_mine.curselection() if i < len(self.share_mine_list)]
-        if not selp or not selm:
+        selc = [i for i in self.share_combo.curselection()
+                if i < len(getattr(self, "share_combo_list", []))]
+        if not selp or (not selm and not selc):
             return
         peer = self.share_peer_list[selp[0]]
         ids = [self.share_mine_list[i]["id"] for i in selm]
+        cids = [self.share_combo_list[i]["id"] for i in selc]
+        # 结果文案里把两类分开报：组合和环境同名判定各自一套，混在一起看不出推了啥
+        what = [self.share_mine_list[i]["name"] for i in selm] + \
+               ["🔀 " + self.share_combo_list[i]["name"] for i in selc]
         self.btn_push.config(state="disabled", text="推送中…")
         try:
-            res = self._run(W.push_to_peer(peer, ids))
+            res = self._run(W.push_to_peer(peer, ids, cids))
         except Exception as e:
             res = {"ok": False, "error": str(e)[:120]}
-        self.btn_push.config(text="→ 推送所选环境")
+        self.btn_push.config(text="→ 推送所选内容")
         # 结果文案：引擎已经写过事件日志，这里只补一句人能看懂的反馈
         if res and res.get("ok"):
             tip = "已推送给「%s」：%s" % (res.get("to") or peer.get("name") or "对方",
-                                       "、".join(self.share_mine_list[i]["name"] for i in selm))
+                                       "、".join(what))
             if res.get("pending"):
-                tip += "（对方有同名环境，等他确认）"
+                tip += "（对方有同名内容，等他确认）"
+            if res.get("dropped"):
+                names = "、".join(str(d.get("name") or "") for d in res["dropped"])
+                tip += "（对方那边收不下：%s）" % names
         else:
             tip = "推送失败：" + str((res or {}).get("error") or "未知错误")
         try:
@@ -1497,6 +2266,7 @@ class App:
         if not sel:
             return
         it = self.share_inbox_list[sel[0]]
+        kind = (it.get("kind") or "preset") == "combo"
         new_name = None
         if action == "rename":
             try:
@@ -1510,15 +2280,18 @@ class App:
                 return
         res = W.resolve_inbox(it["id"], action, new_name)
         if res.get("ok"):
-            self.lab_share_tip.config(text="已处理：「%s」→ %s"
-                                      % (res.get("name") or it["name"],
-                                         {"keep": "保留本地版本",
-                                          "rename": "另存为新环境",
-                                          "overwrite": "覆盖本地版本"}.get(action, action)))
+            acts = {"keep": "保留本地版本",
+                    "rename": "另存为新组合" if kind else "另存为新环境",
+                    "overwrite": "覆盖本地版本"}
+            self.lab_share_tip.config(text="已处理「%s%s」→ %s"
+                                      % ("🔀 " if kind else "",
+                                         res.get("name") or it["name"],
+                                         acts.get(action, action)))
         else:
             self.lab_share_tip.config(text="处理失败：" + str(res.get("error")))
         self.reload_share()
         self.reload_mine()        # 覆盖 / 另存都会改变自定义场景列表
+        self.reload_combo()       # 组合覆盖了 / 另存了，顺便也会新建一个自定义场景
         self.refresh()
 
     def close_share(self):
@@ -1902,6 +2675,22 @@ class App:
             return None
 
     def apply_preset(self, key):
+        # "c:<id>" = 弱网组合：选中它就开始按顺序播放若干段场景
+        if str(key).startswith(W.COMBO_KEY_PREFIX):
+            cid = key[len(W.COMBO_KEY_PREFIX):]
+            try:
+                applied = self._run(W.select_combo(cid))
+            except Exception:
+                messagebox.showerror("我的弱网组合", "这个组合已不存在，已刷新列表。")
+                self.reload_combo()
+                return
+            combo = W.find_combo(cid)
+            name = combo["name"] if combo else "组合"
+            W.log_event("config", ("开始播放组合：" if applied
+                                   else "选择组合（未开启限速，未生效）：") + name)
+            self.load_current()
+            self.refresh()
+            return
         # "u:<id>" = 自定义场景：与内置档位走同一条路径，只是名字要从存档里取
         if str(key).startswith("u:"):
             try:
@@ -1914,8 +2703,8 @@ class App:
         else:
             prof = W.build_preset_profile(key)
             name = W.PRESETS[key][0]
-        # 选中 ≠ 开始：没开限速时只把这支场景记下来（按钮照旧高亮），
-        # 必须用户点「▶ 开启限速」才真正落到流量上
+        # 点击即生效的前提是弱网已经开着：开着就直接切换，没开则只把这支场景
+        # 记下来（不能替用户开始测试，否则流量会在他没点头时被限住）
         applied = self._run(W.select_scene(prof, key))
         W.log_event("config", ("切换场景：" if applied else "选择场景（未开启限速，未生效）：") + name)
         self.load_current()
@@ -1935,7 +2724,7 @@ class App:
                 and prof["dns_fail_pct"] <= 0 and prof["reject_pct"] <= 0 \
                 and prof["flap_sec"] <= 0:
             prof["name"] = "直连（不限制）"
-        # 同上：没开限速时这组参数只是存下来并选中，点「▶ 开启限速」才生效
+        # 与场景按钮同一套规则：弱网开着才真的落到流量上，没开则只记下这组参数
         applied = self._run(W.select_scene(prof, "custom"))
         W.log_event("config", ("应用自定义参数：" if applied
                                else "记下自定义参数（未开启限速，未生效）：") + prof["name"])
@@ -2002,6 +2791,7 @@ class App:
         self.close_share()          # 先关二级窗口：它上面挂着定时刷新，别等主窗销毁才取消
         self.close_preset_notes()   # 场景说明只是只读参考，直接关掉即可
         self.close_param_note()     # 单个参数的「！」小窗同理
+        self.close_combo_editor()   # 组合编辑器可能还开着（没保存的内容随之丢弃）
         # 手机上还挂着代理就退出 = 手机直接断网，用户根本想不到是这边造成的。
         # 必须同步做完（wait=True）：主线程马上就要销毁窗口，等不到后台回调
         if getattr(self, "usb_on", False):
@@ -2058,6 +2848,15 @@ class App:
 
         self.refresh_header()
         self._sync_run_btn()      # 另一端（Web 控制台）也可能开关了限速
+        # 标签跟着选中项走：组合与自定义场景合成一张卡片后，
+        # 选中的东西不在当前这一页时用户会以为「没生效」——自动翻到对应的那页
+        key = g.preset_key or ""
+        if key != getattr(self, "_last_tab_key", None):
+            self._last_tab_key = key
+            if key.startswith(W.COMBO_KEY_PREFIX):
+                self.switch_tab("combo")
+            elif key.startswith("u:"):
+                self.switch_tab("scene")
         try:
             n = len(W.G.inbox)    # 收到的同名环境，没人管就别让按钮看着平平无奇
             self.btn_share.config(text="🔗 环境共享" + ("（%d 条待处理）" % n if n else ""))
@@ -2093,6 +2892,10 @@ class App:
         for key, btn in getattr(self, "mine_btns", {}).items():
             btn.config(bg=ACCENT if key == g.preset_key else "#eef2f7",
                        fg="white" if key == g.preset_key else TEXT)
+        # 组合按钮同理；下面再同步它的进度行（播放到第几段、还剩多久）
+        for key, btn in getattr(self, "combo_btns", {}).items():
+            btn.config(bg=ACCENT if key == g.preset_key else "#eef2f7",
+                       fg="white" if key == g.preset_key else TEXT)
         # 场景说明窗口开着时，切场景要同步正文里的「当前选中」标记，
         # 否则窗口里标的是打开那一刻的档位，跟界面上的高亮对不上
         try:
@@ -2112,6 +2915,14 @@ class App:
                 self.reload_mine()
             else:
                 self._sync_mine_del()
+        except Exception:
+            pass
+        # 组合同理：别处增删了要重画；没变则只刷播放进度与按钮行
+        try:
+            if ",".join(c["id"] for c in W.get_combos()) != self.combo_sig:
+                self.reload_combo()
+            else:
+                self._sync_combo_bar()
         except Exception:
             pass
 

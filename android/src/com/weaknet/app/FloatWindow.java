@@ -15,6 +15,7 @@ import android.view.View;
 import android.view.WindowManager;
 import android.widget.LinearLayout;
 import android.widget.TextView;
+import android.widget.Toast;
 
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -42,10 +43,32 @@ public class FloatWindow {
     private TextView tTitle;
     /** 已显示的每一行：id -> TextView，顺序与设置里的 lines 一致 */
     private final Map<String, TextView> rows = new LinkedHashMap<String, TextView>();
+    /** 浮层场景面板（点标题行「⇄」弹出），不接管流量时也不随 Activity 走 */
+    private FloatScenePanel scenePanel;
+    private TextView bSwitch;
+    /** 标题行的暂停按钮：⏸ 暂停 / ▶ 恢复 */
+    private TextView bPause;
     private WindowManager.LayoutParams lp;
     private volatile boolean shown = false;
 
     private long lastDown = 0, lastUp = 0, lastT = 0;
+    /** 最近一次实测出来的速率：刷新间隔太短时沿用，避免显示忽大忽小 */
+    private double lastRd = 0, lastRu = 0;
+    /** 场景名反查结果的缓存（见 {@link #nameOfKey}）；自定义场景改名/删除后要失效 */
+    private static volatile String cachedKey = null;
+    private static volatile String cachedName = null;
+
+    /** 自定义场景被改名/删除时由 MyPresets 调用：不清的话标题会一直挂着旧名字 */
+    static void invalidateSceneCache() {
+        cachedKey = null;
+        cachedName = null;
+    }
+    /** 参数变化时由 WeakNet 回调立刻重画一次，不用干等 500ms 轮询 */
+    private final Runnable uiWatcher = new Runnable() {
+        public void run() {
+            if (shown) update();
+        }
+    };
     private final Runnable tick = new Runnable() {
         public void run() {
             if (!shown) return;
@@ -145,6 +168,34 @@ public class FloatWindow {
                     LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
             top.addView(tTitle, tl);
 
+            // 「⇄」切换场景：直接在飘窗上换档位，不用切回 App（面板自己的 window）
+            bSwitch = new TextView(app);
+            bSwitch.setText("⇄");
+            bSwitch.setTextColor(0xFF9EC5FF);
+            bSwitch.setTextSize(TypedValue.COMPLEX_UNIT_SP, st.textSp + 3);
+            bSwitch.setPadding(dp(8), 0, dp(6), 0);
+            bSwitch.setOnClickListener(new View.OnClickListener() {
+                public void onClick(View v) {
+                    toggleScene();
+                }
+            });
+            top.addView(bSwitch);
+
+            // 「⏸ / ▶」暂停：按住当前这段不动，恢复后接着刚才的位置继续。
+            // 跟「⇄」并列放在标题行 —— 限速中的人最常做的就是「先按住，别动」
+            bPause = new TextView(app);
+            bPause.setText("⏸");
+            bPause.setTextColor(0xFF9EC5FF);
+            bPause.setTextSize(TypedValue.COMPLEX_UNIT_SP, st.textSp + 2);
+            bPause.setPadding(dp(6), 0, dp(6), 0);
+            bPause.setContentDescription("暂停弱网测试");
+            bPause.setOnClickListener(new View.OnClickListener() {
+                public void onClick(View v) {
+                    togglePause();
+                }
+            });
+            top.addView(bPause);
+
             TextView close = new TextView(app);
             close.setText("✕");
             close.setTextColor(0xFF9AA4B2);
@@ -161,7 +212,7 @@ public class FloatWindow {
             // 内容行：顺序完全由设置决定
             rows.clear();
             for (String id : new ArrayList<String>(st.lines)) {
-                if ("scene".equals(id)) continue;         // 场景名显示在标题行
+                if ("scene".equals(id)) continue;         // 场景名已在标题行常驻，不重复占一行
                 TextView t = new TextView(app);
                 t.setTextColor("limit".equals(id) ? 0xFF9EC5FF : 0xFF7BE3A6);
                 t.setTextSize(TypedValue.COMPLEX_UNIT_SP, st.textSp);
@@ -201,6 +252,9 @@ public class FloatWindow {
                             int dy = (int) (e.getRawY() - ty);
                             if (Math.abs(dx) > 4 || Math.abs(dy) > 4) moved = true;
                             if (moved && lp != null) {
+                                // 面板的位置是在「打开那一刻」算出来的，拖动后它会挂在错的地方：
+                                // 直接收起，用户要换场景时再点一下「⇄」即可
+                                if (scenePanel != null) scenePanel.close();
                                 lp.x = sx + dx;
                                 lp.y = sy + dy;
                                 try {
@@ -232,12 +286,66 @@ public class FloatWindow {
             shown = true;
             lastT = 0;
             update();
+            WeakNet.I.addUiWatcher(uiWatcher);   // 切场景/开关变化时会被即时唤醒
             h.removeCallbacks(tick);
             h.postDelayed(tick, 500);
         } catch (Exception e) {
             shown = false;
             WeakNet.I.log("error", "飘窗显示失败：" + e.getMessage());
         }
+    }
+
+    // ------------------------------------------------------------ 场景面板
+
+    private void toggleScene() {
+        if (root == null) return;
+        if (scenePanel == null) {
+            scenePanel = new FloatScenePanel(app, new Runnable() {
+                public void run() {
+                    syncSwitchBtn();          // 面板开了/关了，按钮颜色跟着变
+                }
+            });
+        }
+        int h = root.getHeight();
+        if (h <= 0) h = dp(40);               // 刚显示、还没测量出来时给个兜底高度
+        scenePanel.toggle(lp != null ? lp.x : 0, lp != null ? lp.y : 0, h);
+    }
+
+    private void syncSwitchBtn() {
+        if (bSwitch == null) return;
+        boolean on = scenePanel != null && scenePanel.isShown();
+        bSwitch.setTextColor(on ? 0xFF2F6FED : 0xFF9EC5FF);
+    }
+
+    /**
+     * 暂停 / 恢复。
+     *
+     * 没在测试时点了没意义（本来就没限速），给个提示而不是静默失败 ——
+     * 用户看到按钮没反应会以为程序卡了。
+     */
+    private void togglePause() {
+        try {
+            if (!WeakNet.I.limitOn && !WeakNet.I.paused) {
+                Toast.makeText(app, "当前没有在跑的弱网测试", Toast.LENGTH_SHORT).show();
+                return;
+            }
+            boolean resumed = WeakNet.I.togglePause();
+            Toast.makeText(app, resumed ? "已恢复" : "已暂停",
+                    Toast.LENGTH_SHORT).show();
+            update();
+        } catch (Exception e) {
+            // ignore
+        }
+    }
+
+    /** 暂停按钮的状态：⏸ / ▶，以及未生效时的灰掉 */
+    private void syncPauseBtn() {
+        if (bPause == null) return;
+        boolean paused = WeakNet.I.paused;
+        boolean running = WeakNet.I.limitOn;
+        bPause.setText(paused ? "▶" : "⏸");
+        bPause.setTextColor(paused ? 0xFF7BE3A6 : (running ? 0xFFFFC46B : 0xFF6B7280));
+        bPause.setContentDescription(paused ? "恢复弱网测试" : "暂停弱网测试");
     }
 
     private static int overlayType() {
@@ -261,7 +369,13 @@ public class FloatWindow {
         }
         rows.clear();
         tTitle = null;
+        bSwitch = null;
         shown = false;
+        // 飘窗收起/重建时把场景面板一并带走：它挂在飘窗位置上，飘窗没了它也没有落点
+        if (scenePanel != null) {
+            scenePanel.close();
+            scenePanel = null;
+        }
     }
 
     // ---------------------------------------------------------------- 数据
@@ -274,23 +388,41 @@ public class FloatWindow {
             long up = WeakNet.I.bytesUp.get();
             long now = System.currentTimeMillis();
             double rd = 0, ru = 0;
-            if (lastT > 0 && now > lastT) {
+            // 500ms 的 tick 之外还有「切场景即时推送」，两次间隔可能只有几毫秒：
+            // 那么短时间差做除法得到的全是噪声（0 或几个 MB/s），所以不满 300ms
+            // 就沿用上一次算好的值，字节累计也留着，等够时间了一起算差分
+            if (lastT == 0) {
+                lastDown = dn;             // 第一次只记基线：没有上一帧就谈不上差分
+                lastUp = up;
+                lastT = now;
+            } else if (now - lastT >= 300) {
                 rd = (dn - lastDown) * 1000.0 / (now - lastT);
                 ru = (up - lastUp) * 1000.0 / (now - lastT);
                 if (rd < 0) rd = 0;
                 if (ru < 0) ru = 0;
+                lastRd = rd;
+                lastRu = ru;
+                lastDown = dn;
+                lastUp = up;
+                lastT = now;
+            } else {
+                // 字节照样累计到下一次够时间的帧上，不会被这次刷新吞掉
+                rd = lastRd;
+                ru = lastRu;
             }
-            lastDown = dn;
-            lastUp = up;
-            lastT = now;
 
-            String state = WeakNet.I.gateOpen ? "" : " · 断网中";
-            // 标题恒显示产品标识；勾选「场景名」时才把当前场景拼上去
-            // （scene 不进 rows，它占的是标题行这一格）
-            tTitle.setText(hasLine("scene") ? "⚡ " + p.name + state : "⚡ WeakNet");
+            // 场景名固定在标题行常驻显示（不看「场景名」行有没有勾选）：
+            // 悬浮窗本来就是给「现在在测哪支场景」看的，藏在可选行里容易被关掉找不到
+            String scene = sceneName(p);
+            String state = "";
+            if (WeakNet.I.paused) state = " · 已暂停";
+            else if (!WeakNet.I.gateOpen) state = " · 断网中";
+            else if (!WeakNet.I.limitOn) state = " · 未生效";
+            tTitle.setText("⚡ " + scene + state);
+            syncPauseBtn();
 
             java.util.Map<String, String> v = new java.util.HashMap<String, String>();
-            v.put("scene", p.name + state);
+            v.put("scene", scene + state);
             v.put("down", kbps(p.downKbps));
             v.put("up", kbps(p.upKbps));
             v.put("rate_down", bps(rd));
@@ -311,8 +443,65 @@ public class FloatWindow {
         }
     }
 
-    private boolean hasLine(String id) {
-        return FloatSettings.get().lines.contains(id);
+    /**
+     * 标题行要显示的场景名。
+     *
+     * 限速开着时 profile 就是真正生效的那支，直接用它的名字（最权威）；
+     * 没开时 profile 已被重置成直连（见 {@link WeakNet#setLimitOn}），照着它显示
+     * 会永远停留在「直连（不限制）」，所以这时改按 presetKey 反查已选中的那支。
+     */
+    static String sceneName(Profile p) {
+        // 暂停期间参数已撤到直连，profile 里看不到原来那支场景了：
+        // 这时用暂停时记住的快照显示，标题才不会突然变成「直连（不限制）」
+        if (WeakNet.I.paused) {
+            String pp = WeakNet.I.pausedProgress();
+            if (pp != null && pp.length() > 0) return pp;
+            String pn = WeakNet.I.pausedSceneName();
+            if (pn != null && pn.trim().length() > 0) return pn.trim();
+        }
+        // 组合在播时优先显示「组合名 2/5」：此时 profile 只是序列里当前那一段，
+        // 光看它不知道整支走到哪了
+        String prog = WeakNet.I.comboProgress();
+        if (prog != null && prog.length() > 0) return prog;
+        String name = WeakNet.I.limitOn && p != null ? p.name : null;
+        if (name != null && name.trim().length() > 0) return name.trim();
+        return nameOfKey(WeakNet.I.presetKey);
+    }
+
+    /** 按场景 key 反查名字：内置预设查 {@link Profile#shortOf}，自定义（u:）查 {@link MyPresets} */
+    static String nameOfKey(String key) {
+        // 没开启弱网时标题每 500ms 都要走这里，自定义场景那一步会去读存储；
+        // key 没变就直接用上次的结果，别把这种轮询变成定时 IO
+        if (key != null && key.equals(cachedKey) && cachedName != null) return cachedName;
+        String n = resolveName(key);
+        cachedKey = key;
+        cachedName = n;
+        return n;
+    }
+
+    private static String resolveName(String key) {
+        if (key == null || key.length() == 0 || "direct".equals(key)) return "直连（不限制）";
+        if (key.startsWith("u:")) {
+            try {
+                MyPresets.Item it = MyPresets.find(key.substring(2));
+                if (it != null && it.name != null && it.name.length() > 0) return it.name;
+            } catch (Exception e) {
+                // ignore
+            }
+            return "自定义场景";
+        }
+        if (key.startsWith(MyCombos.KEY_PREFIX)) {
+            // 组合：选中/播完时标题也要显示它的名字，而不是把原始 key 甩给用户看
+            try {
+                MyCombos.Item c = MyCombos.find(key.substring(MyCombos.KEY_PREFIX.length()));
+                if (c != null && c.name != null && c.name.length() > 0) return c.name;
+            } catch (Exception e) {
+                // ignore
+            }
+            return "弱网组合";
+        }
+        String s = Profile.shortOf(key);
+        return s != null && s.length() > 0 ? s : key;
     }
 
     private String lineText(String id, Profile p, double rd, double ru,
