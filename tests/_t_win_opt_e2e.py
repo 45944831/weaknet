@@ -12,6 +12,14 @@
   B6  空闲连接回收（子引擎，TTL=3s / 扫描=1s）
   B7  atexit 把缓冲日志落盘（子引擎，SIGBREAK 优雅退出）
 """
+import os
+import sys
+
+# 仓库根：本文件在 <repo>/tests/ 下，向上两级即仓库根。
+# 用相对定位而不是写死绝对路径，换机器/换目录也能直接跑。
+HERE = os.path.dirname(os.path.abspath(__file__))
+ROOT = os.path.dirname(HERE)
+
 import json
 import os
 import socket
@@ -21,7 +29,8 @@ import threading
 import time
 import urllib.request
 
-HERE = os.path.dirname(os.path.abspath(__file__))
+
+
 CTRL = "http://127.0.0.1:8899"
 PROXY = ("127.0.0.1", 8888)
 SRV = ("192.168.1.49", 9126)

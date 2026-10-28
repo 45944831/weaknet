@@ -3,6 +3,14 @@
 
 对应方案：A-001 / A-002 / A-003 / A-004 / A-005，以及 E-06（VPN 被撤销后不假死）。
 """
+import os
+import sys
+
+# 仓库根：本文件在 <repo>/tests/ 下，向上两级即仓库根。
+# 用相对定位而不是写死绝对路径，换机器/换目录也能直接跑。
+HERE = os.path.dirname(os.path.abspath(__file__))
+ROOT = os.path.dirname(HERE)
+
 import json
 import subprocess
 import sys

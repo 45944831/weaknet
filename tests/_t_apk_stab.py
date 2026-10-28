@@ -4,6 +4,14 @@
 并发用设备内并行脚本（_wn_par.sh）：从 PC 并发调 adb shell 会被 adb 串行化，
 测不到真正的并发竞争。
 """
+import os
+import sys
+
+# 仓库根：本文件在 <repo>/tests/ 下，向上两级即仓库根。
+# 用相对定位而不是写死绝对路径，换机器/换目录也能直接跑。
+HERE = os.path.dirname(os.path.abspath(__file__))
+ROOT = os.path.dirname(HERE)
+
 import json
 import subprocess
 import sys

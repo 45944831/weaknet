@@ -16,6 +16,14 @@
 第一轮结论回顾：Pipe.Bucket 的 JDK 并发单测已证明 1/2/4/8 并发精确到
 0.5% 以内，Windows 引擎同样精确，所以 D7 是用干净探针在真机上复核。
 """
+import os
+import sys
+
+# 仓库根：本文件在 <repo>/tests/ 下，向上两级即仓库根。
+# 用相对定位而不是写死绝对路径，换机器/换目录也能直接跑。
+HERE = os.path.dirname(os.path.abspath(__file__))
+ROOT = os.path.dirname(HERE)
+
 import json
 import os
 import re
@@ -26,14 +34,12 @@ import threading
 import time
 import urllib.request
 
-# 仓库根：本文件在 <repo>/tests/ 下，向上两级即仓库根。
-HERE = os.path.dirname(os.path.abspath(__file__))
-ROOT = os.path.dirname(HERE)
-
 # 设备与 adb 路径复用 _t_dev_lib 的探测逻辑（环境变量优先 → 自动选唯一在线设备），
 # 不在这里再写死一份 —— 写死了换机器就跑不了。
 sys.path.insert(0, HERE)
 from _t_dev_lib import ADB, SERIAL  # noqa: E402
+
+
 
 CTRL = "http://127.0.0.1:18899"
 PKG = "com.weaknet.app"

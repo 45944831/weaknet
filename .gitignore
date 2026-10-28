@@ -20,8 +20,11 @@ _build/
 _t_*.py
 _t_*.cjs
 _t_*.log
+_t_*.json
 !tests/
 !tests/**
+# 测试脚本跑出来的结果快照（每次跑都变，属于运行产物，不入库）
+tests/*.json
 
 # ===== 自备的 Android SDK（269MB，需自行下载，见 README）=====
 android/sdk/
@@ -51,6 +54,8 @@ Thumbs.db
 
 # ===== 布局预览截图（临时）=====
 _shot_*.png
+# 图标候选对比图（python gen_icon.py --preview 生成，看完即弃）
+assets/_icon_preview.png
 # 真机回归脚本的截图输出目录（跑测试时自动生成，随机器而异）
 _shots/
 

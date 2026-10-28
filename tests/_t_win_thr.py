@@ -10,6 +10,14 @@
      10000kbps × 800ms ≈ 1MB，用 512KB 只跑到 4310kbps。
 本脚本用「≥4× 桶容量且 ≥2× BDP」的样本重测，判定稳态速率是否真的落在设定区间。
 """
+import os
+import sys
+
+# 仓库根：本文件在 <repo>/tests/ 下，向上两级即仓库根。
+# 用相对定位而不是写死绝对路径，换机器/换目录也能直接跑。
+HERE = os.path.dirname(os.path.abspath(__file__))
+ROOT = os.path.dirname(HERE)
+
 import json
 import socket
 import time

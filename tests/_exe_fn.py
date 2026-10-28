@@ -1,5 +1,13 @@
 # -*- coding: utf-8 -*-
 """EXE 冒烟：打包后的二进制 -> 限速 / 停止 / 空闲回收 全链路。"""
+import os
+import sys
+
+# 仓库根：本文件在 <repo>/tests/ 下，向上两级即仓库根。
+# 用相对定位而不是写死绝对路径，换机器/换目录也能直接跑。
+HERE = os.path.dirname(os.path.abspath(__file__))
+ROOT = os.path.dirname(HERE)
+
 import json, socket, time, urllib.request
 CTRL = "http://127.0.0.1:8899"; PROXY = ("127.0.0.1", 8888); SRV = ("192.168.1.49", 9125)
 R = []

@@ -7,18 +7,23 @@ Text 也有 wrap="word"，断行点跟 Label 一样是空格。
 """
 import os
 import sys
-import tkinter as tk
-from tkinter import font as tkfont
-
-HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, ROOT)
-
-import weaknet as W      # noqa: E402
 
 # 仓库根：本文件在 <repo>/tests/ 下，向上两级即仓库根。
 # 用相对定位而不是写死绝对路径，换机器/换目录也能直接跑。
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
+
+import os
+import sys
+import tkinter as tk
+from tkinter import font as tkfont
+
+sys.path.insert(0, ROOT)
+
+import weaknet as W      # noqa: E402
+
+
+
 
 
 def check(px, tips):

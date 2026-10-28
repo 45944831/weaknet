@@ -1,5 +1,13 @@
 # -*- coding: utf-8 -*-
 """批次 2 补测：上行限速（重试）、丢包效果（改用吞吐对比）、airplane/dns_fail、统计。"""
+import os
+import sys
+
+# 仓库根：本文件在 <repo>/tests/ 下，向上两级即仓库根。
+# 用相对定位而不是写死绝对路径，换机器/换目录也能直接跑。
+HERE = os.path.dirname(os.path.abspath(__file__))
+ROOT = os.path.dirname(HERE)
+
 import sys
 import threading
 import time

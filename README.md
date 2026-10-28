@@ -21,29 +21,50 @@
 
 ---
 
-## 下载（Release v1.1.8）
+## 下载（Release v1.1.9）
 
 > Windows 端 `WeakNet.exe` 以 GUI 子系统打包，双击直接出界面，**不会弹出 DOS 黑框**；Android 端安装 `WeakNet.apk` 即可。
 
 | 文件 | 平台 | 大小 | SHA-256 |
 | --- | --- | --- | --- |
-| [`WeakNet.exe`](https://github.com/45944831/weaknet/releases/latest/download/WeakNet.exe) | Windows（GUI 版，免装 Python） | 10.28 MB | `60a726f1…1cdd2` |
-| [`WeakNet.apk`](https://github.com/45944831/weaknet/releases/latest/download/WeakNet.apk) | Android 7.0+ | 141 KB | `5a17218a…7aa28` |
+| [`WeakNet.exe`](https://github.com/45944831/weaknet/releases/latest/download/WeakNet.exe) | Windows（GUI 版，免装 Python） | 10.30 MB | `dd1c85c5…16bcc5` |
+| [`WeakNet.apk`](https://github.com/45944831/weaknet/releases/latest/download/WeakNet.apk) | Android 7.0+ | 189 KB | `4a8efe85…1f46ec` |
 
 发布页：https://github.com/45944831/weaknet/releases/latest
 
 完整校验值：
 
 ```
-60a726f175b8e1d82d1ca1f1c0299eda6c19123b7734fe1da1b6dc784121cdd2  WeakNet.exe
-5a17218a3a3458fe10d6058a2714af9ac9179fc18a80042f33f1625ce177aa28  WeakNet.apk
+dd1c85c52ae5199a4241619d9b9ae125adc51c78f7a988e60c8b5b486a16bcc5  WeakNet.exe
+4a8efe8584e7a3703bfb6b0b3fc8c8f95cc41941ff0d9bfec71b26cf621f46ec  WeakNet.apk
 ```
 
-> v1.1.8 的改动两端都有（Windows 端是场景/组合标签合并与二级弹窗改造，Android 端是弱网组合编辑器重做），两个包都要重新下载。
-> APK 签名与 v1.1.7 完全一致（证书 SHA-256 `1c69f682…c1d8e`），可以直接覆盖安装，不用先卸载。
+> v1.1.9 是**修 bug + 换图标**的版本，两个包都要重新下载：Android 端修四处（共享服务收中文载荷挂死、删组合 API 不复位、抖动把小延迟压成零、控制接口不校验方法），Windows 端修其中三处同源缺陷（后三项）；两端同时换了新图标（见下文「图标」）。
+> APK 签名与 v1.1.8 完全一致（证书 SHA-256 `1c69f682…c1d8e`），可以直接覆盖安装，不用先卸载。
 
 > 若 GitHub 下载慢或打不开，可在链接前加 `https://ghproxy.net/` 走镜像加速，例如
 > `https://ghproxy.net/https://github.com/45944831/weaknet/releases/latest/download/WeakNet.exe`
+
+---
+
+## 图标
+
+EXE 与 APK 共用一套图形，由 `gen_icon.py` 一处生成：改脚本 → 重跑 → 三处一起变（不会出现「EXE 换了、APK 还是旧的」）。
+
+| 用途 | 文件 |
+| --- | --- |
+| EXE 文件图标 | `assets/weaknet.ico`（10 档：16/20/24/32/40/48/64/96/128/256，PNG 压缩条目） |
+| EXE 窗口 / 任务栏图标 | 以 base64 内嵌在 `weaknet_gui.py`（Tk 默认会挂自己的羽毛图标，这里显式覆盖；内嵌是为了单文件打包不用额外带资源） |
+| Android 各密度 | `android/res/mipmap-*/ic_launcher.png`（48 / 72 / 96 / 144 / 192） |
+| Android 自适应图标 | `drawable/ic_launcher_{background,foreground}.png` + `mipmap-anydpi-v26/ic_launcher.xml`（前景画在 108dp 画布的中央 70dp 内，圆形/方圆形遮罩都不裁） |
+
+设计：深蓝→靛的圆角方 + 四根白色信号格，**最高那格中间缺了一块**——整体一眼是「网络质量」，缺一块是「弱」。刻意没用闪电（那是测速/加速器的语言），也没用断开的图形（那是「完全断网」，只是本工具的其中一档）。全部粗笔画单色，缩到 16px 任务栏仍能认出是信号格。
+
+```bash
+python gen_icon.py            # 生成全部尺寸（需要 Pillow）
+python gen_icon.py wave       # 备选方案：W 波形（WeakNet 首字母）
+python gen_icon.py --preview  # 只出候选对比图 assets/_icon_preview.png
+```
 
 ---
 
@@ -323,6 +344,11 @@ bash build.sh
 输出 `android/WeakNet.apk`。版本号在 `build.sh` 顶部一处真值（`VERSION_CODE` / `VERSION_NAME`），
 `aapt2 link` 与 `AndroidManifest.xml` 都跟它走。
 
+> 坑（v1.1.9 才踩明白）：build-tools 34 的 `aapt2 link` **默认让 Manifest 里的 `versionCode` / `versionName`
+> 覆盖 `--version-code` / `--version-name`**，不加 `--replace-version` 时脚本里的版本号等于白写
+> （现象：内容明明变了，`aapt2 dump badging` 出来的版本号一直是旧值）。脚本已带上该参数，
+> 验证方式：`aapt2 dump badging WeakNet.apk | head -1` 应显示 `versionCode='119' versionName='1.1.9'`。
+
 **签名口令不入库**：脚本按 `KS_PASS` 环境变量 → `android/weaknet.keystore.pass` 文件的顺序取口令，
 两者都没有时，若 `weaknet.keystore` 也不存在就随机生成一个并写进那个文件（该文件已被 `.gitignore` 排除）；
 若 keystore 已存在却拿不到口令，会直接报错而不是猜。口令写在仓库里等于把签名私钥的访问方式公开出去，
@@ -352,7 +378,7 @@ weaknet/
 ├── weaknet.py            核心引擎（asyncio 代理 + HTTP 控制接口，无界面形态）
 ├── weaknet_gui.py        GUI 主程序（tkinter，唯一的图形界面）
 ├── usb_phone.py          USB 手机弱网：adb 查找 / 设备列举 / reverse 与全局代理的写入与还原
-├── gen_icon.py           图标生成脚本（PIL 纯代码绘制）
+├── gen_icon.py           图标生成脚本（EXE 与 APK 同一套图形，PIL 纯代码绘制，不依赖设计稿）
 ├── logserver.py          限速验证用的本地测速服务端
 ├── assets/               Windows 图标（ico / png）
 ├── WeakNet.exe           【产物】Windows GUI 版（CLI 形态跑源码：python weaknet.py）
@@ -421,7 +447,7 @@ weaknet/
 | **并发后连接长时间卡死（v1.1.7 修复）** | `Pipe.Bucket.consume()` 先预扣令牌再等待，会话关闭时 `worker.interrupt()` 打断等待，被 `catch (Exception)` 吞掉但**预扣的令牌没归还**——每中断一次留一笔"幽灵欠债"。8 并发后欠债累积到远超实际流量，单连接 256KB 卡 90s+。修复：`catch (InterruptedException)` 中补偿预扣（上限不超过桶容量）后原样抛出。实测同一负载下 256KB **2.87s** 完成 |
 | **自定义参数被上次场景覆盖（v1.1.7 修复）** | `hasLimits()` 对全 0 参数返回 false → `lastProfile` 不更新；`presetKey="custom"` 时 `buildKeyProfile()`/`profileOf()` 认不出该 key 而回落 `lastProfile`，把用户刚设的参数整个换掉（参数全 0 或只调 stall 这类非 limits 字段时触发）。修复：`custom` 时当前 profile 原样保留，`CtrlServer` 与 `MainActivity` 两处同源缺陷一并修 |
 | **v1.1.7 全量回归** | 真机深度测试 **149 项全过**：APK 接口 16 + 边界健壮性 20 + tun 数据面 13 + USB 代理深度 8 + 并发切换长稳 11 + Windows 引擎 44 + EXE 冒烟功能 12 + Python 单测 13 + Java 单测 12。精度：tun 延迟 1490/1400、830/800ms，限速 523/512、24094/20000、270/256kbps；USB 延迟 1220/1200ms，限速 509/512、2005/2000、252/256kbps |
-| **v1.1.7 已知偏差** | 并发总带宽偏高：设定 2000kbps 时单连接 1.06~1.13x（精确）、4 并发 1.15x、8 并发 1.29x，根因未定位；控制接口不校验 HTTP 方法（`DELETE /api/status` 返回 200 而非 405）。均不影响功能正确性 |
+| **v1.1.7 已知偏差** | 并发总带宽偏高：设定 2000kbps 时单连接 1.06~1.13x（精确）、4 并发 1.15x、8 并发 1.29x，根因未定位；控制接口不校验 HTTP 方法（`DELETE /api/status` 返回 200 而非 405）。均不影响功能正确性。**方法校验已在 v1.1.9 修复**（405 + `Allow: GET, POST`），并发带宽偏差的测量口径也在 v1.1.9 修正（预热 + 大载荷后 8 并发 0.96x，原先的 1.29x 主要是令牌桶突发额度未预热） |
 | **左栏无法下滑（v1.1.7 后修复）** | EXE 窗口模式下左栏是裸 Frame 直接 pack，没有滚动容器：窗口 700 高时左栏内容 782px、可视仅 361px，底部「断网间隔 / 断网时长 / 保存栏」被窗口下边缘裁掉，滚轮和拖拽都翻不出来。改为 Canvas + 滚动条（按需显隐、滚轮按事件源判定归属，右栏日志与范围列表不受影响），展开「自定义参数」后自动滚入视野；数字框滚轮改为翻页（ttk 默认会静默改值）。GUI 回归 **20 项全过**，13 个参数逐个验证可达 |
 | **场景说明「！」入口（新增）** | 两端预设标题右侧加「！」：17 支档位的**参数摘要 + 适用症状**，按分类分组并标注当前选中；参数摘要由档位定义现算，改档位不会漏更新文案。EXE 回归 17 项（含逐条全文比对注释、切场景标记跟随、窗口复用与关闭）+ Java 数据层单测 18 项（覆盖完整性、文案唯一、参数语义一致）全过 |
 | **参数说明「！」入口（新增）** | 两端参数**名字后面**各跟一个「！」：点开是这个参数的单位 / 取值范围 / 作用方向 / 易踩的坑（丢包≠报错、卡顿只在丢包后生效、黑洞挂住 vs 拒连立刻失败、带宽全局共享等）。入口刻意做淡（灰色小字、无边框、悬停才变蓝）；「紧跟名字」与「数字框对齐」冲突时把空白留在按钮右侧，列宽与每行空白都按字体实测宽度算，不写死。EXE 上贴着按钮弹小窗、再点即收起、换参数不叠窗、收起卡片自动关；文案两端同源逐条比对。EXE 回归 **26 项**、Python 一致性 **31 项**、Java 数据层 **19 项** 全过。顺手修掉两处：窗口缩到最小宽度 820 时参数两列溢出 30px（右侧单位被裁）、卫星链路注释把「单程 700ms」写成「往返 700ms」 |
@@ -434,8 +460,16 @@ weaknet/
 | **场景/组合标签合并（v1.1.8）** | 界面上「场景」与「组合」合并为一个标签页，两类内容不再分属两个入口 |
 | **二级弹窗按钮重复（v1.1.8）** | 二级弹窗里既有 ✕ 又有「返回/取消」，两者作用重复。去掉了重复的那个，只留 ✕ |
 | **签名口令不再入库（v1.1.8）** | `build.sh` 原先把 keystore 口令明文写在仓库里 —— 口令入库等于公开签名私钥的访问方式，哪怕 keystore 本身没提交。改为按 `KS_PASS` 环境变量 → 本地 `weaknet.keystore.pass`（已 gitignore）取；首次构建随机生成。另修掉 apksigner 主类名写死的问题（34.x 是 `com.android.apksigner`，早期是 `com.android.tools.apksigner`），改为自动探测，换 build-tools 版本不会直接 ClassNotFound |
-| **版本号第一次真正生效（v1.1.8）** | `build.sh` 里 `aapt2 link` 写死 `--version-code 1 --version-name 1.0`，`AndroidManifest.xml` 里改了不起作用，APK 装的版本一直是 1.0。改为脚本顶部一处真值，本版起 `versionCode=118 / versionName=1.1.8` |
+| **版本号第一次真正生效（v1.1.8）** | `build.sh` 里 `aapt2 link` 写死 `--version-code 1 --version-name 1.0`，`AndroidManifest.xml` 里改了不起作用，APK 装的版本一直是 1.0。改为脚本顶部一处真值，本版起 `versionCode=118 / versionName=1.1.8`。**注：v1.1.9 复测发现这版其实仍没生效**（缺 `--replace-version`），详见下方「版本号始终不生效」一行 |
 | **v1.1.8 回归** | 组合编辑器回归 **11/11**（场景名完整无省略号、行内无常驻删除按钮、每行一行、左滑露出删除、点删除生效、＋添加一段恢复三段、点名字弹 14 项单选、选完即时更新、保存后接口读回 `steps[].key` 全对）；组合播放切段实测 3 段各 3 秒**准点切换并循环**；EXE 冒烟 **7/7**（GUI 子系统无 DOS 窗口、进程起来、`/api/status` 有响应、`/api/run` 开关正常、无 conhost、主窗口标题正确）；新 APK 签名证书 SHA-256 `1c69f682…c1d8e` 与 v1.1.7 **完全一致**，可覆盖安装 |
+| **版本号始终不生效（v1.1.9 修复）** | v1.1.8 那条「版本号第一次真正生效」的结论是**错的**。build-tools 34 的 `aapt2 link` 默认让 Manifest 里的 `versionCode/versionName` 覆盖 `--version-code/--version-name`，`--replace-version` 不加就白写：两次内容不同的构建 dump 出来都是 `118 / 1.1.8`。加上 `--replace-version` 后实测 `119 / 1.1.9`，并把 Manifest 同步为同一组值做双保险。**版本号的真值仍是 `build.sh` 顶部一处** |
+| **共享服务中文载荷挂死（v1.1.9 修复，P0）** | `ShareNet.serve()` 用 `BufferedReader` 按 **Content-Length 字节数**去读 `char[]`：中文一字 3 字节，`len` 字节里只凑得出 `len/3` 个字符，循环永远读不满 → 卡满 5s SoTimeout → 静默 `close()`，手机端表现为「推送组合一直转圈然后失败」且日志无痕迹。对照实验确证：30 字节中文必挂、120 字节 ASCII 0.1s 完成，与长度无关只与字符/字节比有关。改为 `BufferedInputStream` 按字节读满 `len`（同时去掉原先 `Math.min(len, 65536)` 的静默截断），并补上 catch 日志 |
+| **组合 API 删除不复位（v1.1.9 修复，P1）** | 正在播放的组合被 `POST /api/combo/delete` 删掉后，时间轴仍在按已删除的 steps 跑，界面却已从列表里消失，用户无处可停。两端改为：删除的是当前正在播放的组合 → 先 `stop_combo()` 再 `set_profile(全零, "direct")`（`hasLimits()` 为 false 即直连），删别的组合不打断当前场景 |
+| **抖动把小延迟压成零（v1.1.9 修复，P2）** | 抖动按 `base ± jitter` 取值，`jitter > base` 时会算出负数延迟 —— 该包比直连还快，弱网测试里出现「零延迟包」直接污染 RTT 统计。两端改为抖动幅度以基础延迟封顶；`base = 0` 时按 `uniform(0, jitter)` 取值，不再出现负值 |
+| **控制接口不校验方法（v1.1.9 修复，P3）** | `DELETE /api/status`、`PUT /api/run` 之类一律返回 200，脚本里写错方法也看不出来（v1.1.7 已记为已知偏差）。两端在路由入口加 `GET/POST` 白名单：`/api/*` 的其它方法返回 **405 + `Allow: GET, POST`**，非 API 路径（`/`）不受影响 |
+| **v1.1.9 全量回归** | 修复验证 **19/19**（P0 四种载荷全 0.03s 完成且手机侧入库、中文名组合推送成功、两端删播放中组合均回直连、两端 40 次 PING 零延迟包 0 次、两端 405 + `Allow`）；Windows A 组 **31/31**、B 组 **31/31**；真机深度 **34/34**；APK 接口契约 **16/16**；Python 单测 13、参数文案一致性 31；GUI 滚动 20 / 参数 26 / 标签合并 33 / 二级窗口 34；JVM 单测 **36/36**；EXE 冒烟 **7/7** 且包内实测三处修复生效。吞吐稳态（8MB + 预热）：5G 1.05x、4G 1.04x、弱 Wi-Fi 0.99x、拥塞 0.87x、上行 0.91x、8 并发 0.96x |
+| **v1.1.9 测试口径修正** | 带宽精度用例改为「**先预热 ≈0.35s 配额，再传 ≥4 倍桶容量**」：令牌桶空闲会攒满 `速率×0.25s` 的突发额度（100 Mbps ≈ 3.1 MB），短样本测的是突发不是稳态，同一档位在 1MB 载荷下反复测出 1.4x / 1.59x / 2.71x。带 `disconnect_pct` 的档位（随机断连）移出带宽精度用例，其丢包/断连语义由 B 组与真机覆盖 |
+| **图标统一（v1.1.9）** | 一套图形两处落地：EXE 内嵌 10 档 ico（16~256，已核对最大档数据确实在 exe 内）、窗口与任务栏图标显式覆盖 Tk 默认的羽毛；APK 各密度 mipmap + 自适应图标（前景画在 108dp 画布的中央 70dp，圆形 / 方圆形 / 圆角遮罩下都不裁边）。逐档肉眼核对 16 / 24 / 32 / 48 / 192 / 1024，16px 仍能认出「四格缺一格」。生成器 `gen_icon.py` 复跑两次产物哈希一致（构建可复现）；真机 `install -r` 覆盖安装成功，`versionCode=119`、证书 `1c69f682…c1d8e` 均未变 |
 
 ---
 

@@ -15,8 +15,8 @@ cd "$(dirname "$0")"
 
 # ---------- 0. 版本号 ----------
 # 只有一处真值：改这里即可，aapt2 link 与 AndroidManifest.xml 都从这里取。
-VERSION_CODE="${VERSION_CODE:-118}"
-VERSION_NAME="${VERSION_NAME:-1.1.8}"
+VERSION_CODE="${VERSION_CODE:-119}"
+VERSION_NAME="${VERSION_NAME:-1.1.9}"
 
 # ---------- 1. 定位 JDK ----------
 if [ -n "$JAVA_HOME" ] && [ -x "$JAVA_HOME/bin/javac" ]; then
@@ -105,6 +105,7 @@ rm -f build/base.apk
   -R build/res.zip \
     --min-sdk-version 24 --target-sdk-version 29 \
     --version-code "${VERSION_CODE}" --version-name "${VERSION_NAME}" \
+    --replace-version \
     -o build/base.apk 2>&1 | tail -10
 
 echo "==> 4. 注入 classes.dex"
@@ -180,3 +181,20 @@ rm -f WeakNet.apk
 echo "==> 完成"
 ls -la WeakNet.apk
 "$JAVA_CMD" -cp "$BT/lib/apksigner.jar" "$APKSIGNER_CLS" verify WeakNet.apk
+
+# 记录「内容指纹」：APK 里的签名块带构建时刻，同一份源码两次构建的
+# SHA-256 必然不同（ZIP 条目时间戳变了）。所以对外只公布内容指纹 ——
+# 把所有条目按 CRC 排序后哈希，与构建时间无关，才是真正能用来核对
+# 「装的和我发的是同一个」的凭据。
+echo "==> 内容指纹（与构建时刻无关）"
+if command -v python >/dev/null 2>&1; then
+  python - <<'PYEOF'
+import hashlib, zipfile
+z = zipfile.ZipFile("WeakNet.apk")
+lines = sorted("%08x  %s" % (i.CRC, i.filename) for i in z.infolist())
+h = hashlib.sha256("\n".join(lines).encode()).hexdigest()
+print("  content-sha256: %s" % h)
+PYEOF
+else
+  echo "  (无 python，跳过内容指纹计算)"
+fi

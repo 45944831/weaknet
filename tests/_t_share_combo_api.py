@@ -12,6 +12,14 @@
   5. 组合不能嵌套（推过去的段里不带 c: 前缀）
   6. 边界：空 payload、没选任何东西、段引用不存在的场景
 """
+import os
+import sys
+
+# 仓库根：本文件在 <repo>/tests/ 下，向上两级即仓库根。
+# 用相对定位而不是写死绝对路径，换机器/换目录也能直接跑。
+HERE = os.path.dirname(os.path.abspath(__file__))
+ROOT = os.path.dirname(HERE)
+
 import asyncio
 import pathlib
 import sys

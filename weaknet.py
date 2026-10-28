@@ -761,8 +761,9 @@ PARAM_NOTES = {
         "一次往返 ≈ 上行 + 下行，所以两项都填 400 时 RTT 是 800ms。",
     "jitter_ms":
         "每个数据块的延迟在基础值上随机浮动 ±N 毫秒，让延迟忽快忽慢。\n"
-        "实际延迟 = 基础延迟 + (-N ~ +N) 的随机值，最小夹到 0。抖动主要影响实时音视频、"
-        "游戏、VoIP；纯下载几乎感觉不到。",
+        "实际延迟 = 基础延迟 + (-N ~ +N) 的随机值；抖动幅度不会超过基础延迟"
+        "（否则会算出负延迟，变成比直连还快的「零延迟包」），超出时按基础延迟封顶。"
+        "抖动主要影响实时音视频、游戏、VoIP；纯下载几乎感觉不到。",
     "down_kbps":
         "下行总带宽上限，单位 kbps（1 Mbps = 1000 kbps，1000 kbps ≈ 125 KB/s）。0 = 不限。\n"
         "注意是全局共享的一份带宽：同时开 5 条连接是 5 条一起分摊，不是每条各拿一份。",
@@ -1915,6 +1916,14 @@ class ConnCtx:
 def _latency_delay(prof, direction):
     base = prof["latency_up_ms"] if direction == "up" else prof["latency_down_ms"]
     jit = prof["jitter_ms"]
+    if base <= 0:
+        # 没有基础延迟时，「抖动」只能表现为 0~jit 的正向离散（不存在负延迟）
+        return (random.uniform(0, jit) / 1000.0) if jit > 0 else 0.0
+    # 抖动幅度不能超过基础延迟：base + (-jit) 会算出负延迟，而物理上不存在「比 0 还快」。
+    # 旧实现直接 max(0, ...) 压成 0，于是 jitter > base 时会有一批包变成零延迟
+    # （比直连还快，实测占 10%），同时把均值抬高（160ms 的场景均值到 198ms）。
+    # 把幅度夹到 base 后：分布落在 [0, 2·base]，均值仍等于 base，零延迟只剩测度 0 的端点。
+    jit = min(jit, base)
     return max(0.0, (base + random.uniform(-jit, jit)) / 1000.0)
 
 
@@ -3432,13 +3441,14 @@ def status_payload():
     }
 
 
-REASON = {200: "OK", 400: "Bad Request", 404: "Not Found"}
+REASON = {200: "OK", 400: "Bad Request", 404: "Not Found", 405: "Method Not Allowed"}
 
 
-def send_response(writer, code, ctype, body):
+def send_response(writer, code, ctype, body, extra=""):
     head = (f"HTTP/1.1 {code} {REASON.get(code, 'OK')}\r\n"
             f"Content-Type: {ctype}\r\n"
             f"Content-Length: {len(body)}\r\n"
+            f"{extra}"
             f"Connection: close\r\n\r\n").encode()
     writer.write(head + body)
 
@@ -3453,6 +3463,14 @@ async def handle_ctrl(reader, writer):
         if len(parts) < 2:
             return
         method, path = parts[0].upper(), parts[1].split("?")[0]
+
+        # 控制接口只接受 GET / POST。以前完全不看方法，DELETE /api/status 也会返回 200，
+        # 脚本里写错方法时会静默「成功」，很难发现。
+        if method not in ("GET", "POST") and path.startswith("/api/"):
+            send_response(writer, 405, JSON_CT,
+                          b'{"error":"method not allowed"}',
+                          extra="Allow: GET, POST\r\n")
+            return
 
         headers = []
         while True:
@@ -3528,10 +3546,18 @@ async def handle_ctrl(reader, writer):
                 send_response(writer, 400, JSON_CT, b'{"error":"bad request"}')
                 return
             combo = find_combo(cid)
+            # 删的这支是不是「当前这支」：正在播放（combo_id）或被选中（preset_key）
+            # 都要在删除后复位，否则 preset_key 悬挂指向已删除的组合、弱网参数无限期残留。
+            active = (str(G.combo_id) == str(cid)
+                      or G.preset_key == COMBO_KEY_PREFIX + str(cid))
             ok = bool(combo) and delete_combo(cid)[0]
             if ok:
-                # 删的正是正在播的那支：立刻停，别让它在后台继续改参数
-                await stop_combo()
+                if active:
+                    # 与界面删除同一条路径：停播放 + 回直连（set_profile 会同时把
+                    # preset_key 置 direct、limit_on 置 False）
+                    await stop_combo()
+                    await set_profile(default_profile(), "direct")
+                    log_event("config", "删除组合后切回直连")
                 log_event("config", "删除弱网组合：" + combo["name"])
             send_response(writer, 200, JSON_CT,
                           json.dumps({"ok": ok}, ensure_ascii=False).encode())

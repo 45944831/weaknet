@@ -1,5 +1,13 @@
 # -*- coding: utf-8 -*-
 """跨端终验：X-001 参数一致性 / X-003 快照还原 / X-004 手机→PC 混推。"""
+import os
+import sys
+
+# 仓库根：本文件在 <repo>/tests/ 下，向上两级即仓库根。
+# 用相对定位而不是写死绝对路径，换机器/换目录也能直接跑。
+HERE = os.path.dirname(os.path.abspath(__file__))
+ROOT = os.path.dirname(HERE)
+
 import json
 import socket
 import sys

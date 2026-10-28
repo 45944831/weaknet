@@ -12,21 +12,26 @@
   A8  W6  _LogSink 超限轮转
   A9  W6  flush_logs 把缓冲写下去
 """
+import os
+import sys
+
+# 仓库根：本文件在 <repo>/tests/ 下，向上两级即仓库根。
+# 用相对定位而不是写死绝对路径，换机器/换目录也能直接跑。
+HERE = os.path.dirname(os.path.abspath(__file__))
+ROOT = os.path.dirname(HERE)
+
 import asyncio
 import os
 import sys
 import tempfile
 import time
 
-HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, ROOT)
 
 import weaknet as W  # noqa: E402
 
-# 仓库根：本文件在 <repo>/tests/ 下，向上两级即仓库根。
-# 用相对定位而不是写死绝对路径，换机器/换目录也能直接跑。
-HERE = os.path.dirname(os.path.abspath(__file__))
-ROOT = os.path.dirname(HERE)
+
+
 
 RESULTS = []
 

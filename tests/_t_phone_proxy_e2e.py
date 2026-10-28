@@ -8,6 +8,14 @@
 VPN 路径（tun0）需要手机与 PC 三层可达，当前手机在隔离 Wi-Fi 上做不到，
 故本脚本专测 ProxyServer -> Pipe 这条数据面（延迟/限速/丢包/切场景立即生效）。
 """
+import os
+import sys
+
+# 仓库根：本文件在 <repo>/tests/ 下，向上两级即仓库根。
+# 用相对定位而不是写死绝对路径，换机器/换目录也能直接跑。
+HERE = os.path.dirname(os.path.abspath(__file__))
+ROOT = os.path.dirname(HERE)
+
 import http.server
 import json
 import socketserver

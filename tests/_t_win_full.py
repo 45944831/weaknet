@@ -5,6 +5,14 @@
       _w_srv.py 已监听 192.168.1.49:9126。
 结果同时写 _t_win_full.json 与 stdout。
 """
+import os
+import sys
+
+# 仓库根：本文件在 <repo>/tests/ 下，向上两级即仓库根。
+# 用相对定位而不是写死绝对路径，换机器/换目录也能直接跑。
+HERE = os.path.dirname(os.path.abspath(__file__))
+ROOT = os.path.dirname(HERE)
+
 import http.server
 import json
 import os

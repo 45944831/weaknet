@@ -11,6 +11,14 @@
   B. 保存后点「＋ 新建组合」→ 不该叠出第二扇编辑器窗口。
   C. 保存后想回去编辑刚存的那支 → 得能打开那支（而不是卡在新建模式）。
 """
+import os
+import sys
+
+# 仓库根：本文件在 <repo>/tests/ 下，向上两级即仓库根。
+# 用相对定位而不是写死绝对路径，换机器/换目录也能直接跑。
+HERE = os.path.dirname(os.path.abspath(__file__))
+ROOT = os.path.dirname(HERE)
+
 import asyncio
 import pathlib
 import sys

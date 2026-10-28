@@ -193,12 +193,21 @@ public class DelayLine {
         }
     }
 
-    /** 按当前场景算单向延迟：基准 + 抖动（可正可负） */
+    /** 按当前场景算单向延迟：基准 + 抖动（可正可负）
+     *
+     * 抖动幅度不能超过基准：base + (-jit) 会算出负延迟，物理上不存在「比 0 还快」。
+     * 旧实现直接夹到 0，于是 jitter > base 时会出现一批零延迟包（比直连还快），
+     * 均值也被抬高。把幅度夹到 base 后分布落在 [0, 2·base]，均值仍等于 base。
+     */
     static long delayMs(boolean up) {
         Profile p = WeakNet.I.profile;
         int base = up ? p.latencyUpMs : p.latencyDownMs;
         int jit = p.jitterMs;
-        if (base <= 0 && jit <= 0) return 0;
+        if (base <= 0) {
+            // 没有基础延迟时，抖动只能表现为 0~jit 的正向离散
+            return jit > 0 ? (long) (Math.random() * jit) : 0;
+        }
+        if (jit > base) jit = base;
         long d = base + (jit > 0 ? (long) ((Math.random() * 2 - 1) * jit) : 0);
         return d < 0 ? 0 : d;
     }

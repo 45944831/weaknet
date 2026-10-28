@@ -48,8 +48,12 @@ jitter_ms	body	0	每个数据块的延迟在基
 jitter_ms	body	1	础值上随机浮动 ±N 毫
 jitter_ms	body	2	秒，让延迟忽快忽慢。
 jitter_ms	tip1	0	实际延迟 = 基础延迟 +
-jitter_ms	tip1	1	(-N ~ +N) 的随机值，
-jitter_ms	tip1	2	最小夹到 0。
+jitter_ms	tip1	1	(-N ~ +N) 的随机值；
+jitter_ms	tip1	2	抖动幅度不会超过基础
+jitter_ms	tip1	3	延迟（否则会算出负延
+jitter_ms	tip1	4	迟，变成比直连还快的
+jitter_ms	tip1	5	「零延迟包」），超出
+jitter_ms	tip1	6	时按基础延迟封顶。
 jitter_ms	tip2	0	抖动主要影响实时音视
 jitter_ms	tip2	1	频、游戏、VoIP；纯下
 jitter_ms	tip2	2	载几乎感觉不到。

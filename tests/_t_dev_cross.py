@@ -7,6 +7,14 @@
     presence（与广播同格式，解析端不校验是否广播包），把 PC 注册进去。
 对应方案：X-001/002/003/004/005、W-503/508/510/511、A-403/406/407/408。
 """
+import os
+import sys
+
+# 仓库根：本文件在 <repo>/tests/ 下，向上两级即仓库根。
+# 用相对定位而不是写死绝对路径，换机器/换目录也能直接跑。
+HERE = os.path.dirname(os.path.abspath(__file__))
+ROOT = os.path.dirname(HERE)
+
 import json
 import socket
 import subprocess

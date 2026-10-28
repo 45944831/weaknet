@@ -22,19 +22,24 @@
 
 用法：python _t_note_golden.py [输出路径]
 """
-import io
 import os
 import sys
-
-HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, ROOT)
-
-import weaknet as W      # noqa: E402
 
 # 仓库根：本文件在 <repo>/tests/ 下，向上两级即仓库根。
 # 用相对定位而不是写死绝对路径，换机器/换目录也能直接跑。
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
+
+import io
+import os
+import sys
+
+sys.path.insert(0, ROOT)
+
+import weaknet as W      # noqa: E402
+
+
+
 
 # 粗糙测宽的单位：与安卓端 Profile.NoteRoughMeasurer 的用法一致
 UNIT = 20
@@ -59,7 +64,7 @@ def rough(text):
 
 def main():
     out = sys.argv[1] if len(sys.argv) > 1 else os.path.join(
-        HERE, "weaknet", "android", "_jw", "note_wrap_golden.txt")
+        ROOT, "android", "_jw", "note_wrap_golden.txt")
 
     lines_out = []
     lines_out.append("# 说明文案折行黄金文件（由 _t_note_golden.py 生成，别手改）")

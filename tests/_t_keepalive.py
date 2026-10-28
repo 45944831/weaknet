@@ -1,3 +1,12 @@
+import os
+import sys
+
+# 仓库根：本文件在 <repo>/tests/ 下，向上两级即仓库根。
+# 用相对定位而不是写死绝对路径，换机器/换目录也能直接跑。
+HERE = os.path.dirname(os.path.abspath(__file__))
+ROOT = os.path.dirname(HERE)
+
+import os
 # -*- coding: utf-8 -*-
 """WeakNet keep-alive 转发定向测试（自包含：自带源站 + 引擎，不依赖局域网）。
 
@@ -20,10 +29,8 @@ import threading
 import time
 import urllib.request
 
-# 仓库根：本文件在 <repo>/tests/ 下，向上两级即仓库根。
-# 用相对定位而不是写死绝对路径，换机器/换目录也能直接跑。
-HERE = os.path.dirname(os.path.abspath(__file__))
-ROOT = os.path.dirname(HERE)
+
+
 
 PROXY = ("127.0.0.1", 18888)
 CTRL = "http://127.0.0.1:18899"

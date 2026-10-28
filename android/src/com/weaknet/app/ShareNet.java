@@ -7,7 +7,9 @@ import android.os.Build;
 import org.json.JSONArray;
 import org.json.JSONObject;
 
+import java.io.BufferedInputStream;
 import java.io.BufferedReader;
+import java.io.ByteArrayOutputStream;
 import java.io.InputStreamReader;
 import java.io.OutputStream;
 import java.net.DatagramPacket;
@@ -910,8 +912,12 @@ public class ShareNet {
     private static void serve(Socket s) {
         try {
             s.setSoTimeout(5000);
-            BufferedReader in = new BufferedReader(new InputStreamReader(s.getInputStream(), "UTF-8"));
-            String line = in.readLine();
+            // 必须按「字节」读请求：Content-Length 是字节数，而 UTF-8 中文一个字占 3 个字节。
+            // 旧实现用 BufferedReader（字符流）按 len 个「字符」去读，中文载荷的字符数少于
+            // 字节数，读循环永远凑不满 → 卡满 5s SoTimeout → 静默断连，推送方只看到
+            // "Remote end closed connection without response"。ASCII 名字恰好一字一节才没暴露。
+            BufferedInputStream in = new BufferedInputStream(s.getInputStream());
+            String line = readLineBytes(in);
             if (line == null) {
                 s.close();
                 return;
@@ -921,7 +927,7 @@ public class ShareNet {
             String path = parts.length > 1 ? parts[1] : "";
             int len = 0;
             String h;
-            while ((h = in.readLine()) != null && h.length() > 0) {
+            while ((h = readLineBytes(in)) != null && h.length() > 0) {
                 if (h.toLowerCase().startsWith("content-length:")) {
                     try {
                         len = Integer.parseInt(h.substring(15).trim());
@@ -931,14 +937,15 @@ public class ShareNet {
             }
             String body = "";
             if (len > 0) {
-                char[] buf = new char[Math.min(len, 65536)];
+                // 按 Content-Length 读满 len 个「字节」（不截断：多支组合一起推可能超过 64KB）
+                byte[] buf = new byte[len];
                 int off = 0;
-                while (off < buf.length) {
-                    int rd = in.read(buf, off, buf.length - off);
+                while (off < len) {
+                    int rd = in.read(buf, off, len - off);
                     if (rd < 0) break;
                     off += rd;
                 }
-                body = new String(buf, 0, off);
+                body = new String(buf, 0, off, "UTF-8");
             }
             JSONObject res;
             if ("/api/hello".equals(path)) {
@@ -971,11 +978,26 @@ public class ShareNet {
             os.close();
             s.close();
         } catch (Exception e) {
+            // 以前这里静默 close：载荷读不满时推送方只看到"连接被对方关闭"，
+            // 手机端一行日志都没有，排查时完全不知道是谁把连接掐了。
+            WeakNet.I.log("share", "共享服务处理失败：" + e);
             try {
                 s.close();
             } catch (Exception ignore) {
             }
         }
+    }
+
+    /** 按字节读一行（去掉行尾 \r\n）。与 Content-Length 的字节语义一致，中文不会读不满。 */
+    private static String readLineBytes(BufferedInputStream in) throws Exception {
+        ByteArrayOutputStream bo = new ByteArrayOutputStream(128);
+        int c;
+        while ((c = in.read()) >= 0) {
+            if (c == '\n') break;
+            if (c != '\r') bo.write(c);
+        }
+        if (c < 0 && bo.size() == 0) return null;
+        return new String(bo.toByteArray(), "UTF-8");
     }
 
     private static JSONObject helloJson() {

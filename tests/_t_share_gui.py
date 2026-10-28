@@ -1,3 +1,12 @@
+import os
+import sys
+
+# 仓库根：本文件在 <repo>/tests/ 下，向上两级即仓库根。
+# 用相对定位而不是写死绝对路径，换机器/换目录也能直接跑。
+HERE = os.path.dirname(os.path.abspath(__file__))
+ROOT = os.path.dirname(HERE)
+
+import os
 """环境共享窗口：弱网组合那一栏的自检（不起端口、不真推送）
 
 跑 App 实例 → 打开共享窗口 → 看组合列表是否在、勾选中之后推送按钮是否亮、
@@ -12,14 +21,17 @@ import time
 import sys
 import tkinter as tk
 
+
 sys.path.insert(0, ROOT)
 import weaknet as W          # noqa: E402
+
 import weaknet_gui as GUI    # noqa: E402
+
+
+
 
 # 仓库根：本文件在 <repo>/tests/ 下，向上两级即仓库根。
 # 用相对定位而不是写死绝对路径，换机器/换目录也能直接跑。
-HERE = os.path.dirname(os.path.abspath(__file__))
-ROOT = os.path.dirname(HERE)
 
 PFILE = pathlib.Path(tempfile.mkdtemp()) / "weaknet_presets.json"
 W._preset_files = lambda: [PFILE]

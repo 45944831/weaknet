@@ -6,8 +6,10 @@ WeakNet —— App 弱网测试工具（桌面 GUI 版）
 
 用法：
     python weaknet_gui.py [--proxy-port 8888] [--ctrl-port 8899]
-打包：
-    pyinstaller --onefile --windowed --name WeakNet weaknet_gui.py
+打包（--icon 写 EXE 文件图标；窗口图标由本文件内嵌的 base64 提供，见 _apply_window_icon）：
+    python -m PyInstaller --onefile --windowed --clean --noconfirm --name WeakNet \\
+        --icon assets/weaknet.ico --distpath . --workpath _build_gui \\
+        --specpath _build_gui weaknet_gui.py
 """
 
 import argparse
@@ -29,6 +31,88 @@ if sys.stderr is None:
 
 import weaknet as W
 import usb_phone as UP
+
+# 窗口/任务栏图标：与 assets/weaknet.ico、APK 的 launcher 图标是同一套图形
+# （图形与配色由 assets/make_icon.py 生成，改那边再重跑即可）。
+# EXE 的**文件**图标由 PyInstaller --icon 写进资源，但 Tk 会给窗口挂自己的羽毛图标，
+# 所以这里再显式设一次。图片以 base64 内嵌：单文件打包不必额外带资源，也不会因为
+# 解压目录变化而找不到文件。
+_ICON_PNG_B64 = (
+    "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"
+    "AABJRU5ErkJggg=="
+)
+
+
+def _apply_window_icon(root):
+    """给主窗口装图标，并设为之后所有二级窗口的默认图标。"""
+    try:
+        img = tk.PhotoImage(data=_ICON_PNG_B64)
+        root.iconphoto(True, img)   # default=True：之后 new 出来的 Toplevel 都跟着用
+        root._wn_icon = img         # 必须留引用，被 GC 回收后图标会变空白
+    except Exception:
+        pass                        # 图标只是门面，任何异常都不能挡住启动
 
 BG = "#f4f6f9"
 CARD = "#ffffff"
@@ -206,6 +290,7 @@ class App:
         self.usb_q = queue.Queue()
 
         root.title("WeakNet —— App 弱网测试工具")
+        _apply_window_icon(root)
         root.configure(bg=BG)
         # 按屏幕自适应窗口高度并居中，避免小屏幕上底部内容被任务栏/屏幕边缘裁掉
         sw, sh = root.winfo_screenwidth(), root.winfo_screenheight()

@@ -16,13 +16,21 @@ B  APK 端：源码里标签结构齐全（编译已在 build.sh 里过一遍，
    这里只做结构级断言，不需要真机）
 C  两端文案一致：标签名、卡片标题、按钮文案逐字相同
 """
+import os
+import sys
+
+# 仓库根：本文件在 <repo>/tests/ 下，向上两级即仓库根。
+# 用相对定位而不是写死绝对路径，换机器/换目录也能直接跑。
+HERE = os.path.dirname(os.path.abspath(__file__))
+ROOT = os.path.dirname(HERE)
+
 import io
 import os
 import re
 import sys
 
-HERE = os.path.dirname(os.path.abspath(__file__))
-ROOT = os.path.dirname(HERE)
+
+
 sys.path.insert(0, ROOT)
 
 PASS = FAIL = 0

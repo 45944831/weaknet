@@ -15,6 +15,14 @@
   6. 组合段里不能套组合（引擎侧兜底）
   7. 删不存在的组合
 """
+import os
+import sys
+
+# 仓库根：本文件在 <repo>/tests/ 下，向上两级即仓库根。
+# 用相对定位而不是写死绝对路径，换机器/换目录也能直接跑。
+HERE = os.path.dirname(os.path.abspath(__file__))
+ROOT = os.path.dirname(HERE)
+
 import json
 import shutil
 import sys
@@ -24,7 +32,7 @@ import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-sys.path.insert(0, rROOT)
+sys.path.insert(0, ROOT)
 
 OK = 0
 FAIL = 0

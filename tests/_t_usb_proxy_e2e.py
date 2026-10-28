@@ -14,6 +14,14 @@
 4. 经 adb reverse 的 nc 必须保持 stdin 打开（(printf ...; sleep N) | nc）：
    reverse 连接建立极快，printf|nc 的 stdin EOF 竞态会丢待发数据。
 """
+import os
+import sys
+
+# 仓库根：本文件在 <repo>/tests/ 下，向上两级即仓库根。
+# 用相对定位而不是写死绝对路径，换机器/换目录也能直接跑。
+HERE = os.path.dirname(os.path.abspath(__file__))
+ROOT = os.path.dirname(HERE)
+
 import json
 import os
 import re

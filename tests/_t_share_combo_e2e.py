@@ -12,6 +12,14 @@
   5. 组合引用的自定义场景在对方机器上还原成了真实参数
   6. 对方收不下时有 dropped 回执
 """
+import os
+import sys
+
+# 仓库根：本文件在 <repo>/tests/ 下，向上两级即仓库根。
+# 用相对定位而不是写死绝对路径，换机器/换目录也能直接跑。
+HERE = os.path.dirname(os.path.abspath(__file__))
+ROOT = os.path.dirname(HERE)
+
 import asyncio
 import json
 import pathlib

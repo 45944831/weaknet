@@ -7,19 +7,30 @@ B 机什么都不存在。重点验三件事：
   2. 组合与自定义环境同名判定互不相干，同名都进收件箱
   3. 收件箱三种处理（覆盖 / 保留 / 另存）对两类都一样有效
 """
+import os
+import sys
+
+# 仓库根：本文件在 <repo>/tests/ 下，向上两级即仓库根。
+# 用相对定位而不是写死绝对路径，换机器/换目录也能直接跑。
+HERE = os.path.dirname(os.path.abspath(__file__))
+ROOT = os.path.dirname(HERE)
+
 import json
 import os
 import shutil
 import sys
 import tempfile
 
+
 sys.path.insert(0, ROOT)
 import weaknet as W                                            # noqa: E402
 
+
+
+
+
 # 仓库根：本文件在 <repo>/tests/ 下，向上两级即仓库根。
 # 用相对定位而不是写死绝对路径，换机器/换目录也能直接跑。
-HERE = os.path.dirname(os.path.abspath(__file__))
-ROOT = os.path.dirname(HERE)
 
 BOX = None
 FAILS = []

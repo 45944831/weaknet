@@ -1,3 +1,12 @@
+import os
+import sys
+
+# 仓库根：本文件在 <repo>/tests/ 下，向上两级即仓库根。
+# 用相对定位而不是写死绝对路径，换机器/换目录也能直接跑。
+HERE = os.path.dirname(os.path.abspath(__file__))
+ROOT = os.path.dirname(HERE)
+
+import os
 """弱网组合 GUI 自检：不打包、不起服务端口，只实例化 App 走一遍组合流程。
 
 弹窗（messagebox）会被替换成打印，否则无人值守时会卡在模态框上。
@@ -11,14 +20,17 @@ import time
 import sys
 import tkinter as tk
 
+
 sys.path.insert(0, ROOT)
 import weaknet as W          # noqa: E402
+
 import weaknet_gui as GUI    # noqa: E402
+
+
+
 
 # 仓库根：本文件在 <repo>/tests/ 下，向上两级即仓库根。
 # 用相对定位而不是写死绝对路径，换机器/换目录也能直接跑。
-HERE = os.path.dirname(os.path.abspath(__file__))
-ROOT = os.path.dirname(HERE)
 
 PFILE = pathlib.Path(tempfile.mkdtemp()) / "weaknet_presets.json"
 W._preset_files = lambda: [PFILE]          # 隔离存档，别动用户真实的组合

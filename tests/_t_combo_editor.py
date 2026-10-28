@@ -3,16 +3,24 @@
 
 覆盖：行内小 ✕ 删除 / ＋添加一段 / 场景名选择 / 保存落盘 / 左滑删除。
 """
+import os
+import sys
+
+# 仓库根：本文件在 <repo>/tests/ 下，向上两级即仓库根。
+# 用相对定位而不是写死绝对路径，换机器/换目录也能直接跑。
+HERE = os.path.dirname(os.path.abspath(__file__))
+ROOT = os.path.dirname(HERE)
+
 import json
 import os
 import re
 import sys
 import time
 
-HERE = os.path.dirname(os.path.abspath(__file__))
-ROOT = os.path.dirname(HERE)
 sys.path.insert(0, HERE)
 import _t_dev_lib as L
+
+
 
 XML = os.path.join(ROOT, "_shots", "ui_z.xml")
 
@@ -23,9 +31,13 @@ def dump_tree(retries=4):
     dump 抓的是「当前前台窗口」的控件树。前台若被别的 App 抢走（设备上常驻着
     悬浮时钟、系统设置弹窗这类），拿到的就是那个 App 的界面，元素定位全落空。
     所以每次抓树前先确认前台是本 App。
+
+    另外，第三方悬浮窗（毫秒悬浮时钟之类）会盖在界面上，且 **不出现在控件树里** ——
+    点它等于点空气。这类干扰要先清掉。
     """
     for _ in range(retries):
         L.ensure_foreground()
+        L.dismiss_overlays()
         L.sh("uiautomator dump /sdcard/ui_z.xml")
         time.sleep(0.6)
         out = L.sh("cat /sdcard/ui_z.xml")

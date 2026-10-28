@@ -12,21 +12,26 @@
   · Android 端查源码，确认底部没有「取消」，且都有 ✕
 """
 import os
-import re
 import sys
-
-HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, ROOT)
-
-import tkinter as tk          # noqa: E402
-import weaknet_gui as G        # noqa: E402
 
 # 仓库根：本文件在 <repo>/tests/ 下，向上两级即仓库根。
 # 用相对定位而不是写死绝对路径，换机器/换目录也能直接跑。
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 
-ANDROID = os.path.join(HERE, "weaknet", "android", "src", "com", "weaknet", "app")
+import os
+import re
+import sys
+
+sys.path.insert(0, ROOT)
+
+import tkinter as tk          # noqa: E402
+import weaknet_gui as G        # noqa: E402
+
+
+
+
+ANDROID = os.path.join(ROOT, "android", "src", "com", "weaknet", "app")
 
 pass_n = 0
 fail_n = 0

@@ -5,19 +5,24 @@
 """
 import os
 import sys
-import time
-import tkinter as tk
-
-HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, ROOT)
-
-import weaknet_gui as G   # noqa: E402
-import _shot_win as SW    # noqa: E402
 
 # 仓库根：本文件在 <repo>/tests/ 下，向上两级即仓库根。
 # 用相对定位而不是写死绝对路径，换机器/换目录也能直接跑。
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
+
+import os
+import sys
+import time
+import tkinter as tk
+
+sys.path.insert(0, ROOT)
+
+import weaknet_gui as G   # noqa: E402
+import _shot_win as SW    # noqa: E402
+
+
+
 
 
 def main():

@@ -13,6 +13,14 @@ PC 在 192.168.1.49/24，且该 Wi-Fi 不路由到 192.168.1.0/24），
   - 对照组：客户端直连 **127.0.0.1:8888**（127.0.0.0/8 走 lo，不进 tun0）
   - 两者唯一差别就是「有没有过 tun」，差额即 tun 数据面注入的效果
 """
+import os
+import sys
+
+# 仓库根：本文件在 <repo>/tests/ 下，向上两级即仓库根。
+# 用相对定位而不是写死绝对路径，换机器/换目录也能直接跑。
+HERE = os.path.dirname(os.path.abspath(__file__))
+ROOT = os.path.dirname(HERE)
+
 import http.server
 import json
 import socketserver

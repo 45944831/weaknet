@@ -17,16 +17,24 @@ B  Java 侧数据：能从源码解析出 13 条，且与 Python 逐条一字不
 C  界面接线：安卓参数行（MainPanels.FIELDS）与注释表的 key 完全对应
 D  预设注释里被顺手修正的一处数字（卫星链路的往返时间）
 """
+import os
+import sys
+
+# 仓库根：本文件在 <repo>/tests/ 下，向上两级即仓库根。
+# 用相对定位而不是写死绝对路径，换机器/换目录也能直接跑。
+HERE = os.path.dirname(os.path.abspath(__file__))
+ROOT = os.path.dirname(HERE)
+
 import io
 import os
 import re
 import sys
 
-HERE = os.path.dirname(os.path.abspath(__file__))
-ROOT = os.path.dirname(HERE)
 sys.path.insert(0, ROOT)
 
 import weaknet as W      # noqa: E402
+
+
 
 PASS = FAIL = 0
 

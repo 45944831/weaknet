@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 """校验 WeakNet.exe 内嵌的引擎代码是否与当前 weaknet.py 源码一致。
+import os
 
 背景：EXE 是 PyInstaller 单文件产物，源码改了但忘了重新打包时，功能测试仍可能
 大部分通过（改动往往是边角逻辑），发布物却已经和仓库对不上。这里直接解包
@@ -9,14 +10,22 @@ CArchive -> PYZ -> marshal，把每个 code object 的语义逐属性比对。
 code object 在不同序列化顺序下字节不同，字节比对会大量假阳性。必须递归比
 co_code / co_names / co_varnames / co_consts / co_lnotab 等语义属性。
 """
+import os
+import sys
+
+# 仓库根：本文件在 <repo>/tests/ 下，向上两级即仓库根。
+# 用相对定位而不是写死绝对路径，换机器/换目录也能直接跑。
+HERE = os.path.dirname(os.path.abspath(__file__))
+ROOT = os.path.dirname(HERE)
+
 import marshal
 import struct
 import sys
 import types
 import zlib
 
-HERE = os.path.dirname(os.path.abspath(__file__))
-ROOT = os.path.dirname(HERE)
+
+
 
 EXE = os.path.join(ROOT, "dist", "WeakNet.exe")
 SRC = os.path.join(ROOT, "weaknet.py")

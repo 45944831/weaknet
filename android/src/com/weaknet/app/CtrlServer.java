@@ -135,6 +135,12 @@ public class CtrlServer implements Runnable {
         }
 
         private void route(String method, String path, String body) throws Exception {
+            // 控制接口只接受 GET / POST。以前完全不看方法，DELETE /api/status 也会返回 200，
+            // 脚本里写错方法时会静默「成功」，很难发现。
+            if (!"GET".equals(method) && !"POST".equals(method) && path.startsWith("/api/")) {
+                respond(405, JSON_CT, "{\"error\":\"method not allowed\"}".getBytes("UTF-8"));
+                return;
+            }
             // 网页控制台已下线，界面在 App 原生 MainActivity 里。
             // 这里只保留 HTTP API（脚本/自动化仍可调用），访问根路径给一句说明而不是空白页。
             if ("/".equals(path) || "/index.html".equals(path)) {
@@ -487,8 +493,18 @@ public class CtrlServer implements Runnable {
                 } catch (Exception e) {
                     // ignore
                 }
+                // 删的这支是不是「当前这支」：正在播放（comboId）或被选中（presetKey）
+                // 都要复位，否则 presetKey 悬挂指向已删除的组合、弱网参数无限期残留。
+                boolean active = (cid != null && cid.equals(WeakNet.I.comboId))
+                        || (cid != null && ("c:" + cid).equals(WeakNet.I.presetKey));
                 boolean ok = MyCombos.delete(cid);
-                WeakNet.I.stopCombo();
+                if (active) {
+                    // 与界面删除（ComboSheet.doDelete）同一条路径：停播放 + 回直连 + 关总开关
+                    WeakNet.I.stopCombo();
+                    WeakNet.I.setProfile(new Profile(), "direct");
+                    WeakNet.I.limitOn = false;
+                    WeakNet.I.log("config", "删除组合后切回直连");
+                }
                 respond(200, JSON_CT, ("{\"ok\":" + ok + "}").getBytes("UTF-8"));
                 return;
             }

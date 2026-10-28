@@ -18,16 +18,24 @@ A  Python 侧数据：结构完整、例子够多、字段齐全、无空串
 B  Java 侧数据：能从源码解析出三份，且与 Python 逐条一字不差
 C  两端覆盖的语义关键词都在（防止文案被改到丢信息）
 """
+import os
+import sys
+
+# 仓库根：本文件在 <repo>/tests/ 下，向上两级即仓库根。
+# 用相对定位而不是写死绝对路径，换机器/换目录也能直接跑。
+HERE = os.path.dirname(os.path.abspath(__file__))
+ROOT = os.path.dirname(HERE)
+
 import io
 import os
 import re
 import sys
 
-HERE = os.path.dirname(os.path.abspath(__file__))
-ROOT = os.path.dirname(HERE)
 sys.path.insert(0, ROOT)
 
 import weaknet as W      # noqa: E402
+
+
 
 PASS = FAIL = 0
 

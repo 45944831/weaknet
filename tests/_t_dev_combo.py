@@ -4,6 +4,14 @@
 对应方案：A-301..A-308（API 可驱动部分）、W-411 对应端、A-207/208/209。
 UI 观感（编辑器、面板分组、进度标题）以截图为证据，人工判读。
 """
+import os
+import sys
+
+# 仓库根：本文件在 <repo>/tests/ 下，向上两级即仓库根。
+# 用相对定位而不是写死绝对路径，换机器/换目录也能直接跑。
+HERE = os.path.dirname(os.path.abspath(__file__))
+ROOT = os.path.dirname(HERE)
+
 import json
 import sys
 import time

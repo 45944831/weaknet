@@ -1,5 +1,13 @@
 # -*- coding: utf-8 -*-
 """稳定性补测：S-02 段推进采样法 + 修正后的 P-01/P-05。"""
+import os
+import sys
+
+# 仓库根：本文件在 <repo>/tests/ 下，向上两级即仓库根。
+# 用相对定位而不是写死绝对路径，换机器/换目录也能直接跑。
+HERE = os.path.dirname(os.path.abspath(__file__))
+ROOT = os.path.dirname(HERE)
+
 import json
 import sys
 import time

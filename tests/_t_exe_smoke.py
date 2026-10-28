@@ -1,6 +1,14 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """WeakNet.exe 冒烟测试：无控制台（PE subsystem=2）+ 能起来 + 控制接口可用 + GUI 窗口存在"""
+import os
+import sys
+
+# 仓库根：本文件在 <repo>/tests/ 下，向上两级即仓库根。
+# 用相对定位而不是写死绝对路径，换机器/换目录也能直接跑。
+HERE = os.path.dirname(os.path.abspath(__file__))
+ROOT = os.path.dirname(HERE)
+
 import json
 import os
 import struct
@@ -8,6 +16,7 @@ import subprocess
 import sys
 import time
 import urllib.request
+
 
 EXE = sys.argv[1] if len(sys.argv) > 1 else os.path.join(ROOT, "WeakNet.exe")
 CTRL = "http://127.0.0.1:8899"
@@ -72,8 +81,9 @@ except Exception:
 import ctypes
 from ctypes import wintypes
 
-HERE = os.path.dirname(os.path.abspath(__file__))
-ROOT = os.path.dirname(HERE)
+
+
+
 
 time.sleep(1.5)
 

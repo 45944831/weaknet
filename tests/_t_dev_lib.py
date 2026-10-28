@@ -10,6 +10,14 @@
   * 设备与 adb 路径都不写死：先看环境变量 WEAKNET_SERIAL / WEAKNET_ADB，
     再退到「adb devices 只有一台」的自动探测，换机器不用改代码。
 """
+import os
+import sys
+
+# 仓库根：本文件在 <repo>/tests/ 下，向上两级即仓库根。
+# 用相对定位而不是写死绝对路径，换机器/换目录也能直接跑。
+HERE = os.path.dirname(os.path.abspath(__file__))
+ROOT = os.path.dirname(HERE)
+
 import json
 import os
 import re
@@ -17,10 +25,10 @@ import subprocess
 import time
 import urllib.request
 
+
+
 os.environ["MSYS_NO_PATHCONV"] = "1"
 
-HERE = os.path.dirname(os.path.abspath(__file__))
-ROOT = os.path.dirname(HERE)
 
 PKG = "com.weaknet.app"
 CTRL = "http://127.0.0.1:18899"
@@ -112,6 +120,47 @@ def adb(*args, timeout=120):
     p = subprocess.run([ADB, "-s", SERIAL] + list(args), capture_output=True,
                        text=True, encoding="utf-8", errors="ignore", timeout=timeout)
     return (p.stdout or "").strip(), (p.stderr or "").strip(), p.returncode
+
+
+def overlay_windows():
+    """当前盖在本 App 上面的悬浮窗（系统级窗口）列表。
+
+    这类窗口（悬浮时钟、录屏工具等）不属于前台 App，但会盖在界面上，
+    而且 **uiautomator 的控件树里根本看不到它们** —— 于是：
+      * 点击落到悬浮窗上，被它吃掉，界面纹丝不动；
+      * 脚本却「正常跑完」，看起来像功能坏了。
+    实测踩过：设备上的毫秒悬浮时钟正好盖住「组合」标签页，
+    点它十次没反应，最后靠截图才看出是被浮窗挡了。
+
+    返回窗口列表（每项含包名），非空就说明当前有东西挡着。
+    """
+    out = sh("dumpsys window windows | grep -E 'Window\\{|mOwnerUid'")
+    # 更直接：只看 TYPE_ 属于悬浮窗类型且当前可见的
+    out = sh("dumpsys window | grep -E 'mCurrentFocus|mFocusedApp'")
+    names = []
+    for line in (out or "").splitlines():
+        m = re.search(r"(?:Window|ActivityRecord)\{[^}]*\s+\S+\s+([A-Za-z0-9_.]+)/", line)
+        if m:
+            names.append(m.group(1))
+    return [n for n in names if n and n != PKG]
+
+
+def dismiss_overlays():
+    """把挡在上面的第三方悬浮窗关掉。
+
+    优先用「禁用用户」——悬浮窗 App 通常有守护机制，force-stop 会被拉回来，
+    禁用则一劳永逸（只在测试期间有效，测完可以 pm enable 恢复）。
+    """
+    pkgs = set(overlay_windows())
+    # 已知爱抢前台的常驻悬浮窗，主动一并处理
+    pkgs |= {"com.wb.msclock"}
+    for p in sorted(pkgs):
+        if p in ("com.android.launcher", "com.android.systemui",
+                 "com.android.settings", PKG):
+            continue
+        sh("am force-stop %s" % p)
+        sh("pm disable-user %s" % p)
+    return sorted(pkgs)
 
 
 def ensure_foreground(retries=4):
