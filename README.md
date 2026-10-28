@@ -7,27 +7,40 @@
 - **Windows** — 本地代理 + 一键接管系统代理，提供 GUI（tkinter）与 CLI 两种形态，已打包 `WeakNet.exe`（GUI 版；CLI 形态用源码 `python weaknet.py` 运行）
 - **Android** — 基于 `VpnService` 接管整机全部 App 流量（无需手动配代理），已打包 `WeakNet.apk`，带实时限速悬浮窗
 
+### 它能做什么
+
+| 能力 | 说明 |
+| --- | --- |
+| **17 支内置弱网场景** | 常规 / 弱网 / 极端三组，每支都有参数摘要与适用症状说明 |
+| **13 项参数全可调** | 带宽、延迟、抖动、丢包、卡顿、随机断连、黑洞、DNS 故障、拒连、周期断网……每一项都能单独调，并能存成自己的场景 |
+| **弱网组合（时间轴编排）** | 把多支场景按「先 30 秒 5G、再 1 分钟黑洞、最后 10 秒直连」排成一条时间轴，到点自动切换、可循环 |
+| **接入范围可选** | 全量接管 / 只接管指定 App / 排除指定 App（Android 按包名、Windows 按进程名） |
+| **一键接管与还原** | Windows 自动改系统代理并登记退出还原；Android 一个按钮接管整机，停止即刻恢复 |
+| **环境共享** | 同一局域网的机器互推场景与组合，对方不用手抄参数 |
+| **免装即用** | Windows 双击 EXE 出界面（无 DOS 黑框）；Android 装 APK 即可，均不依赖 Python / SDK |
+
 ---
 
-## 下载（Release v1.1.7）
+## 下载（Release v1.1.8）
 
 > Windows 端 `WeakNet.exe` 以 GUI 子系统打包，双击直接出界面，**不会弹出 DOS 黑框**；Android 端安装 `WeakNet.apk` 即可。
 
 | 文件 | 平台 | 大小 | SHA-256 |
 | --- | --- | --- | --- |
-| [`WeakNet.exe`](https://github.com/45944831/weaknet/releases/latest/download/WeakNet.exe) | Windows（GUI 版，免装 Python） | 10.26 MB | `43f478ae…abb13` |
-| [`WeakNet.apk`](https://github.com/45944831/weaknet/releases/latest/download/WeakNet.apk) | Android 7.0+ | 101 KB | `7cffe649…6f0928` |
+| [`WeakNet.exe`](https://github.com/45944831/weaknet/releases/latest/download/WeakNet.exe) | Windows（GUI 版，免装 Python） | 10.28 MB | `60a726f1…1cdd2` |
+| [`WeakNet.apk`](https://github.com/45944831/weaknet/releases/latest/download/WeakNet.apk) | Android 7.0+ | 141 KB | `5a17218a…7aa28` |
 
 发布页：https://github.com/45944831/weaknet/releases/latest
 
 完整校验值：
 
 ```
-43f478ae4316e5b777578982bcfedca644edd08ef40e909e10c6dbb6a8eabb13  WeakNet.exe
-7cffe6492c2142066661ebda3bda2b3fc3752d3976a6362de757bdc5e56f0928  WeakNet.apk
+60a726f175b8e1d82d1ca1f1c0299eda6c19123b7734fe1da1b6dc784121cdd2  WeakNet.exe
+5a17218a3a3458fe10d6058a2714af9ac9179fc18a80042f33f1625ce177aa28  WeakNet.apk
 ```
 
-> v1.1.7 的修复全在 Android 端，`WeakNet.exe` 与 v1.1.6 二进制完全相同（SHA-256 一致），Windows 用户无需重新下载。
+> v1.1.8 的改动两端都有（Windows 端是场景/组合标签合并与二级弹窗改造，Android 端是弱网组合编辑器重做），两个包都要重新下载。
+> APK 签名与 v1.1.7 完全一致（证书 SHA-256 `1c69f682…c1d8e`），可以直接覆盖安装，不用先卸载。
 
 > 若 GitHub 下载慢或打不开，可在链接前加 `https://ghproxy.net/` 走镜像加速，例如
 > `https://ghproxy.net/https://github.com/45944831/weaknet/releases/latest/download/WeakNet.exe`
@@ -202,6 +215,36 @@ App 固定竖屏，不随手机方向旋转；设置浮层点 ✕、点外部或
 
 对应接口：`GET /api/upresets`（列表）、`POST /api/upreset`（保存 / 按 id 覆盖）、`POST /api/upreset/del`（删除），应用时仍走 `/api/preset`，key 形如 `u:<id>`。
 
+### 弱网组合（📋 组合）
+
+场景解决的是「现在这一秒是什么网络」，组合解决的是「**这一整段测试里网络怎么变**」——
+把多支场景按时间轴排成一条，到点自动切换。
+
+一支组合 = **名称 + 循环开关 + 最多 5 段**，每段 = **选一支场景 + 填这段跑多久**。
+
+| 操作 | 位置 |
+| --- | --- |
+| 新建 | 「📋 组合」标签页 →「➕ 新建」 |
+| 编辑 | **长按**组合卡片 → 打开编辑器（新增、删除、重排、换场景、改时长） |
+| 删除整支 | 组合卡片上的「🗑 删除当前组合」 |
+| 删掉某一段 | 编辑器里**左滑那一行**，会露出红色「删除」按钮 |
+| 开始播放 | 点组合卡片**选中**它，再点总开关 **「▶ 开启限速」**（APK 为「▶ 开始弱网测试」） |
+
+举例，「地铁通勤」这支组合可以排成：`4G 弱网 30 秒 → 电梯（完全断网）20 秒 → 4G 弱网 30 秒 → 直连 10 秒`，
+勾上循环后每次进电梯都会真实复现一遍断网。
+
+排版与行为上刻意做了这些决定：
+
+- **每段一行**：场景名 + 分 + 秒。场景名是排组合时最需要一眼看清的东西，跟两个输入框抢宽度就会被截成「5G 良…」，反而看不出这段排的是什么
+- **场景名点开是一张单选列表**，不是系统下拉框 —— 系统 `Spinner` 在部分 ROM（OPPO / ColorOS 实测）的收起态只画得出下拉箭头，选中的场景名一个字都不显示，展开后的列表里倒是有名字，看着像没选中
+- **时长用「分 + 秒」两格**填，单段最长 10 分钟，秒这一格只收 0~59
+- **段里不能选另一支组合**：播放是按步骤线性推进的，套一层既不会展开也不会报错，只会在运行时把这一段跳过，用户排的第 2 段凭空消失最难排查
+- **新增的一段默认选第一支真正的弱网场景**，不默认「直连」——组合里放直连等于那段时间不做弱网，很容易被当成已经排好了
+- **存档引用的自定义场景被删掉后**，编辑器会补一条「已删除的自定义场景」占位并保留原 key，不会趁你一保存就把那一段悄悄换成别的场景
+- 走完最后一段：勾了循环就回到第一段继续，没勾就停在直连
+
+对应接口：`GET /api/combos`（列表，含每段 steps 与一行摘要）、`POST /api/combo`（新增/覆盖）、`POST /api/combo/delete`（删除）。
+
 ### 接管范围（二级界面）
 
 主界面上是两个并排入口：**「接管一切」**（一键回到全部接管）和**「接管范围」**（打开二级界面勾选）。当前生效的那个会高亮并带 ✔。
@@ -234,6 +277,7 @@ App 固定竖屏，不随手机方向旋转；设置浮层点 ✕、点外部或
 
 - 窗口每 3 秒自动刷新设备与收件箱，**已勾选的对象不会被刷新冲掉**
 - 用户名与本机标识存在 `weaknet_settings.json`；标识只生成一次，改名不会换身份（否则对方会看到幽灵设备）
+- **默认名字取设备型号**（Android 是 `Build.MODEL`，Windows 是主机名），会随 UDP 广播发给同一局域网的其它设备。介意的话在「环境共享」窗口里改成一个不带个人信息的名字
 - 共享端口默认 `8900`，对局域网开放，只认 `/api/hello` 与 `/api/share` 两个路径
 - 发现用 UDP `18899` 起的 8 个端口：同机跑多个实例时各占一个，广播时整段都发一份
 - 环境共享目前只有 Windows 桌面版，App 端不提供
@@ -276,7 +320,13 @@ export ANDROID_HOME=/path/to/android-sdk
 bash build.sh
 ```
 
-输出 `android/WeakNet.apk`。首次构建会自动生成自签名 keystore（`weaknet.keystore`，已被 `.gitignore` 排除）。
+输出 `android/WeakNet.apk`。版本号在 `build.sh` 顶部一处真值（`VERSION_CODE` / `VERSION_NAME`），
+`aapt2 link` 与 `AndroidManifest.xml` 都跟它走。
+
+**签名口令不入库**：脚本按 `KS_PASS` 环境变量 → `android/weaknet.keystore.pass` 文件的顺序取口令，
+两者都没有时，若 `weaknet.keystore` 也不存在就随机生成一个并写进那个文件（该文件已被 `.gitignore` 排除）；
+若 keystore 已存在却拿不到口令，会直接报错而不是猜。口令写在仓库里等于把签名私钥的访问方式公开出去，
+哪怕 keystore 本身没提交。想让发布包与旧版签名一致（用户可直接覆盖安装），就保住原来的 keystore 与口令。
 
 > 注：`android/sdk/` 与 `cmdline.zip` 是本地下载的 SDK，体积数百 MB，未纳入仓库，请自行通过 Android Studio 或 sdkmanager 安装。
 
@@ -311,6 +361,10 @@ weaknet/
     │                           MainActivity = 原生界面；MainPanels = 主界面三块面板
     │                           ScopeSheet = 指定程序接管；ShareNet = 局域网环境共享
     │                           MyPresets = 自定义场景持久化
+    │                           ComboPlan / ComboStep / MyCombos = 弱网组合（时间轴编排）
+    │                           ComboSheet = 组合编辑器；ComboNotesSheet = 组合说明页
+    │                           SwipeDeleteRow = 左滑露出删除按钮的行容器
+    ├── _jw/                   JVM 可跑的回归单测（不依赖真机）
     ├── res/                    应用图标（mipmap 各密度 + adaptive icon）
     ├── AndroidManifest.xml
     ├── build.sh                手工构建脚本
@@ -342,7 +396,7 @@ weaknet/
 | 环境共享窗口 | 28 项：改名、设备列表、推送（勾选不会被 3 秒自动刷新冲掉）、收件箱三种处理、按钮禁用态、关闭时停掉定时刷新 |
 | 自定义场景 | 36 项：保存 / 重名加序号 / 与内置预设同款按钮 / 删除跟随选中项 / 外部新增自动重画 |
 | 自定义参数越界值 | 丢包率等百分比字段夹到 0~100（修复前 999% 会变成「全丢」，与断网难区分） |
-| USB 手机弱网（adb 层） | 真机 OPPO PEYM00 / Android 13：`adb devices` 识别、`reverse` 映射建立与撤销、`settings get` 回读全部正确；手机 → 电脑的 TCP 连接经 reverse 隧道打通（PC 侧收到握手） |
+| USB 手机弱网（adb 层） | 真机（Android 13）：`adb devices` 识别、`reverse` 映射建立与撤销、`settings get` 回读全部正确；手机 → 电脑的 TCP 连接经 reverse 隧道打通（PC 侧收到握手） |
 | USB 手机弱网（权限受限路径） | 同一台真机上 `settings put global` 被 ROM 拒绝时：如实报错、给出 4 条替代途径，并自动回滚已建的 reverse 映射，手机上无残留 |
 | EXE 冒烟（v1.1.0） | 7/7：GUI 子系统无 DOS 窗口、无 conhost、主窗口标题、`/api/status` 响应、`/api/run` 开关正常 |
 | **Android 上行吞吐（v1.1.1 修复）** | VPN 接管后上行 **0.03 Mbps → 206 Mbps**（物理基准 515 Mbps、下行同期 180 Mbps）。修复前只有 3~5 KB/s 且与限速档位无关 |
@@ -363,7 +417,7 @@ weaknet/
 | **数据面性能优化（v1.1.6）** | 13 项热路径优化全部落地：Android 端每包 IP 字符串解析/冗余拷贝/会话 key 拼接归零、DelayLine 空转唤醒消除、CtrlServer 固定线程池；Windows 端令牌桶睡眠移出锁（停止响应 142ms）、nap 等满 remain、PID 快照缓存、HTTP keep-alive 中继、请求头 30s 超时 + 空闲回收、日志 4MB 轮转。弱网语义零变化 |
 | **tun 路径两个回退缺陷（v1.1.6 修复）** | 优化引入的 `portIdx()` 下标越界（异常被 catch 吞掉，SYN 全丢）与 `sameFlow()` 漏核端口（新连接撞残留会话挂死），真机测试发现并修复；配套 1717 万组端口组合 + 363 例四元组穷举单测 |
 | **Windows 引擎两个真实缺陷（v1.1.6 修复）** | `_LogSink` 传 str 路径时日志静默不轮转（AttributeError 被吞）；半截请求头的连接永不回收关闭（ConnCtx 登记时序），修复后 3.0s 回收 |
-| **v1.1.6 全量回归** | 单测 21 + APK 接口 16 + ProxyServer 数据面 11 + tun 数据面 6 + USB 代理路径 7 = **61 项全过**，全部跑在本次构建包上（真机 OnePlus PEYM00 / Android 13）；EXE 冒烟 5/5、内嵌引擎与源码逐代码对象比对一致 |
+| **v1.1.6 全量回归** | 单测 21 + APK 接口 16 + ProxyServer 数据面 11 + tun 数据面 6 + USB 代理路径 7 = **61 项全过**，全部跑在本次构建包上（真机 Android 13）；EXE 冒烟 5/5、内嵌引擎与源码逐代码对象比对一致 |
 | **并发后连接长时间卡死（v1.1.7 修复）** | `Pipe.Bucket.consume()` 先预扣令牌再等待，会话关闭时 `worker.interrupt()` 打断等待，被 `catch (Exception)` 吞掉但**预扣的令牌没归还**——每中断一次留一笔"幽灵欠债"。8 并发后欠债累积到远超实际流量，单连接 256KB 卡 90s+。修复：`catch (InterruptedException)` 中补偿预扣（上限不超过桶容量）后原样抛出。实测同一负载下 256KB **2.87s** 完成 |
 | **自定义参数被上次场景覆盖（v1.1.7 修复）** | `hasLimits()` 对全 0 参数返回 false → `lastProfile` 不更新；`presetKey="custom"` 时 `buildKeyProfile()`/`profileOf()` 认不出该 key 而回落 `lastProfile`，把用户刚设的参数整个换掉（参数全 0 或只调 stall 这类非 limits 字段时触发）。修复：`custom` 时当前 profile 原样保留，`CtrlServer` 与 `MainActivity` 两处同源缺陷一并修 |
 | **v1.1.7 全量回归** | 真机深度测试 **149 项全过**：APK 接口 16 + 边界健壮性 20 + tun 数据面 13 + USB 代理深度 8 + 并发切换长稳 11 + Windows 引擎 44 + EXE 冒烟功能 12 + Python 单测 13 + Java 单测 12。精度：tun 延迟 1490/1400、830/800ms，限速 523/512、24094/20000、270/256kbps；USB 延迟 1220/1200ms，限速 509/512、2005/2000、252/256kbps |
@@ -372,6 +426,16 @@ weaknet/
 | **场景说明「！」入口（新增）** | 两端预设标题右侧加「！」：17 支档位的**参数摘要 + 适用症状**，按分类分组并标注当前选中；参数摘要由档位定义现算，改档位不会漏更新文案。EXE 回归 17 项（含逐条全文比对注释、切场景标记跟随、窗口复用与关闭）+ Java 数据层单测 18 项（覆盖完整性、文案唯一、参数语义一致）全过 |
 | **参数说明「！」入口（新增）** | 两端参数**名字后面**各跟一个「！」：点开是这个参数的单位 / 取值范围 / 作用方向 / 易踩的坑（丢包≠报错、卡顿只在丢包后生效、黑洞挂住 vs 拒连立刻失败、带宽全局共享等）。入口刻意做淡（灰色小字、无边框、悬停才变蓝）；「紧跟名字」与「数字框对齐」冲突时把空白留在按钮右侧，列宽与每行空白都按字体实测宽度算，不写死。EXE 上贴着按钮弹小窗、再点即收起、换参数不叠窗、收起卡片自动关；文案两端同源逐条比对。EXE 回归 **26 项**、Python 一致性 **31 项**、Java 数据层 **19 项** 全过。顺手修掉两处：窗口缩到最小宽度 820 时参数两列溢出 30px（右侧单位被裁）、卫星链路注释把「单程 700ms」写成「往返 700ms」 |
 | **`_jw/run.sh` classpath 缺陷（新增修复）** | Git Bash 下 `java` 不认 `/c/...` 形式的绝对路径（`javac` 认），`-cp` 里的 android.jar 被静默忽略：测试类一碰 `android.*` 就 `NoClassDefFoundError`，看着像代码坏了。改用 `cygpath -w` 转换（无 cygpath 的平台原样使用） |
+| **弱网组合（v1.1.8 新增，两端）** | 把多支场景按时间轴排成一条，最多 5 段，每段 = 场景 + 时长（分/秒），到点自动切下一段，可循环。播放是按 steps 线性推进的，段里**不允许**再选另一支组合（套一层不会展开也不报错，只会在运行时把那一段跳过，用户排的第 2 段凭空消失最难排查）。接口 `GET /api/combos` / `POST /api/combo` / `POST /api/combo/delete` |
+| **组合编辑器场景名不显示（v1.1.8 修复）** | 根因是系统 `Spinner` 的收起态在 OPPO/ColorOS 只画得出下拉箭头，选中的场景名一个字都不画（展开后的列表里名字是正常的 → 不是数据问题，看着像没选中）。改成自绘名字块 + 单选弹层，不再依赖 ROM 行为 |
+| **组合编辑器排版重做（v1.1.8）** | 每段一行「场景名 + 分 + 秒」，场景名完整不截断；删除统一走**左滑露出删除按钮**（同时只留一行是滑开的）。踩过的坑：ScrollView 默认给子视图 WRAP_CONTENT 宽度会让整行量成「不确定宽度」，`weight=1` 完全不生效；`Button` 自带 elevation 会被 Android 按 Z 顺序画到内容层上面，把「秒」字盖住 |
+| **新增段默认选中「直连」（v1.1.8 修复）** | 组合里放直连等于那段时间不做弱网，很容易被当成已经排好了。改为默认选第一支真正的弱网场景 |
+| **存档场景被删后静默改写（v1.1.8 修复）** | 自定义场景被删掉后再编辑该组合并保存，原来那一段会悄悄变成别的场景。现在补一条「已删除的自定义场景」占位并保留原 key |
+| **场景/组合标签合并（v1.1.8）** | 界面上「场景」与「组合」合并为一个标签页，两类内容不再分属两个入口 |
+| **二级弹窗按钮重复（v1.1.8）** | 二级弹窗里既有 ✕ 又有「返回/取消」，两者作用重复。去掉了重复的那个，只留 ✕ |
+| **签名口令不再入库（v1.1.8）** | `build.sh` 原先把 keystore 口令明文写在仓库里 —— 口令入库等于公开签名私钥的访问方式，哪怕 keystore 本身没提交。改为按 `KS_PASS` 环境变量 → 本地 `weaknet.keystore.pass`（已 gitignore）取；首次构建随机生成。另修掉 apksigner 主类名写死的问题（34.x 是 `com.android.apksigner`，早期是 `com.android.tools.apksigner`），改为自动探测，换 build-tools 版本不会直接 ClassNotFound |
+| **版本号第一次真正生效（v1.1.8）** | `build.sh` 里 `aapt2 link` 写死 `--version-code 1 --version-name 1.0`，`AndroidManifest.xml` 里改了不起作用，APK 装的版本一直是 1.0。改为脚本顶部一处真值，本版起 `versionCode=118 / versionName=1.1.8` |
+| **v1.1.8 回归** | 组合编辑器回归 **11/11**（场景名完整无省略号、行内无常驻删除按钮、每行一行、左滑露出删除、点删除生效、＋添加一段恢复三段、点名字弹 14 项单选、选完即时更新、保存后接口读回 `steps[].key` 全对）；组合播放切段实测 3 段各 3 秒**准点切换并循环**；EXE 冒烟 **7/7**（GUI 子系统无 DOS 窗口、进程起来、`/api/status` 有响应、`/api/run` 开关正常、无 conhost、主窗口标题正确）；新 APK 签名证书 SHA-256 `1c69f682…c1d8e` 与 v1.1.7 **完全一致**，可覆盖安装 |
 
 ---
 

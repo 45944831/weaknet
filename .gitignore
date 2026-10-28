@@ -27,6 +27,8 @@ android/cmdline.zip
 *.keystore
 *.jks
 *.idsig
+# 签名口令（build.sh 读取它来签名；口令入库等于公开签名私钥的访问方式）
+android/weaknet.keystore.pass
 
 # ===== 运行时产物 =====
 *.log

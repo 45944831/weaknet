@@ -13,6 +13,11 @@
 set -e
 cd "$(dirname "$0")"
 
+# ---------- 0. 版本号 ----------
+# 只有一处真值：改这里即可，aapt2 link 与 AndroidManifest.xml 都从这里取。
+VERSION_CODE="${VERSION_CODE:-118}"
+VERSION_NAME="${VERSION_NAME:-1.1.8}"
+
 # ---------- 1. 定位 JDK ----------
 if [ -n "$JAVA_HOME" ] && [ -x "$JAVA_HOME/bin/javac" ]; then
   JAVAC="$JAVA_HOME/bin/javac"; JAVA_CMD="$JAVA_HOME/bin/java"; KEYTOOL="$JAVA_HOME/bin/keytool"
@@ -98,8 +103,9 @@ echo "==> 3b. aapt2 link"
 rm -f build/base.apk
 "$AAPT2" link -I "$ANDROID_JAR" --manifest AndroidManifest.xml \
   -R build/res.zip \
-  --min-sdk-version 24 --target-sdk-version 29 --version-code 1 --version-name 1.0 \
-  -o build/base.apk 2>&1 | tail -10
+    --min-sdk-version 24 --target-sdk-version 29 \
+    --version-code "${VERSION_CODE}" --version-name "${VERSION_NAME}" \
+    -o build/base.apk 2>&1 | tail -10
 
 echo "==> 4. 注入 classes.dex"
 if [ -n "$PY" ]; then
@@ -126,17 +132,51 @@ rm -f build/aligned.apk
 "$ZIPALIGN" -p -f 4 build/base.apk build/aligned.apk
 
 echo "==> 6. 签名"
-# 无 keystore 时自动生成一个自签名调试证书（首次构建会创建 weaknet.keystore，已被 .gitignore 排除）
+# 签名口令不入库：
+#   优先读环境变量 KS_PASS；否则读本地文件 weaknet.keystore.pass（已被 .gitignore 排除）。
+#   两者都没有时 —— 若 keystore 也不存在，就随机生成一个口令并写进那个文件；
+#   若 keystore 已存在却拿不到口令，直接报错（不猜、不试默认口令）。
+#   口令写在仓库里等于把签名私钥的访问方式公开出去，哪怕 keystore 本身没提交。
+# apksigner 的主类包名随 build-tools 版本变过
+#   （34.x 是 com.android.apksigner，早期是 com.android.tools.apksigner），
+# 写死一个会在换版本时直接 ClassNotFound。这里探测一次，两种都认。
+APKSIGNER_CLS=""
+for _c in com.android.apksigner.ApkSignerTool com.android.tools.apksigner.ApkSignerTool; do
+  if "$JAVA_CMD" -cp "$BT/lib/apksigner.jar" "$_c" --version >/dev/null 2>&1; then
+    APKSIGNER_CLS="$_c"; break
+  fi
+done
+[ -n "$APKSIGNER_CLS" ] || { echo "错误：$BT/lib/apksigner.jar 里找不到 apksigner 主类"; exit 1; }
+echo "  apksigner 主类：$APKSIGNER_CLS"
+KS_PASS_FILE="weaknet.keystore.pass"
+if [ -n "${KS_PASS:-}" ]; then
+  KS_PASS="$KS_PASS"
+elif [ -f "$KS_PASS_FILE" ]; then
+  KS_PASS="$(tr -d '\r\n' < "$KS_PASS_FILE")"
+else
+  KS_PASS=""
+fi
+
 if [ ! -f weaknet.keystore ]; then
+  if [ -z "$KS_PASS" ]; then
+    # 首次构建：随机口令，十六进制无特殊字符，避免 apksigner 的 pass: 解析歧义
+    KS_PASS="$(head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+    printf '%s' "$KS_PASS" > "$KS_PASS_FILE"
+    echo "  新建签名口令，已写入 $KS_PASS_FILE（该文件不入库，请勿丢失）"
+  fi
   "$KEYTOOL" -genkeypair -v -keystore weaknet.keystore -alias weaknet \
-    -keyalg RSA -keysize 2048 -validity 10950 -storepass weaknet123 -keypass weaknet123 \
+    -keyalg RSA -keysize 2048 -validity 10950 -storepass "$KS_PASS" -keypass "$KS_PASS" \
     -dname "CN=WeakNet, OU=Dev, O=WeakNet, C=CN" >/dev/null 2>&1 || true
+elif [ -z "$KS_PASS" ]; then
+  echo "错误：weaknet.keystore 已存在但拿不到口令。"
+  echo "      请设置环境变量 KS_PASS，或把口令写进 android/$KS_PASS_FILE（一行，无换行）。"
+  exit 1
 fi
 rm -f WeakNet.apk
-"$JAVA_CMD" -cp "$BT/lib/apksigner.jar" com.android.apksigner.ApkSignerTool sign \
+"$JAVA_CMD" -cp "$BT/lib/apksigner.jar" "$APKSIGNER_CLS" sign \
   --ks weaknet.keystore --ks-key-alias weaknet \
-  --ks-pass pass:weaknet123 --key-pass pass:weaknet123 --out WeakNet.apk build/aligned.apk
+  --ks-pass "pass:$KS_PASS" --key-pass "pass:$KS_PASS" --out WeakNet.apk build/aligned.apk
 
 echo "==> 完成"
 ls -la WeakNet.apk
-"$JAVA_CMD" -cp "$BT/lib/apksigner.jar" com.android.apksigner.ApkSignerTool verify WeakNet.apk
+"$JAVA_CMD" -cp "$BT/lib/apksigner.jar" "$APKSIGNER_CLS" verify WeakNet.apk
