@@ -6,18 +6,18 @@ import android.content.DialogInterface;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
 import android.text.InputType;
+import android.text.TextUtils;
 import android.util.TypedValue;
 import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.Window;
-import android.widget.ArrayAdapter;
 import android.widget.Button;
 import android.widget.CheckBox;
 import android.widget.EditText;
+import android.widget.FrameLayout;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
-import android.widget.Spinner;
 import android.widget.TextView;
 import android.widget.Toast;
 
@@ -51,6 +51,7 @@ public class ComboSheet {
     private EditText edName;
     private CheckBox cbLoop;
     private LinearLayout stepBox;
+    private SwipeDeleteRow openRow;   // 当前滑开着的行（同时只留一行）
     private Button btnAdd;
     private TextView tvTitle;                // 标题：保存后切成「新建弱网组合」
     private final List<Row> rows = new ArrayList<Row>();
@@ -503,20 +504,28 @@ public class ComboSheet {
         TextView tip = new TextView(a);
         tip.setText("每段的「分」「秒」至少填一个且大于 0，到点自动切下一段；"
                 + "最多 " + ComboPlan.MAX_STEPS + " 段，且不能选别的组合。"
-                + "保存后可以接着排下一支，不用关窗。");
+                + "保存后可以接着排下一支，不用关窗。"
+                + "删掉某一段：左滑那一行，会露出「删除」按钮。");
         tip.setTextSize(11);
         tip.setTextColor(0xFF8A94A6);
         card.addView(tip, full(0, 8, 0, 0));
 
-        sv.addView(card);
+        // 卡片必须撑满 ScrollView 的宽度：ScrollView 默认给子视图的是 WRAP_CONTENT 宽度，
+        // 那样这一行量出来是「不确定宽度」，weight=1 完全不生效 ——
+        // 表现就是场景名被压到最小宽度（截成「5G 良…」），右边还空一大块。
+        // 显式给 MATCH_PARENT，整行才会按「左：场景 / 中：时长 / 右：删除」铺开。
+        sv.addView(card, new ScrollView.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
         dlg.setContentView(sv);
         dlg.show();
     }
 
     private static final class Row {
         View view;
-        Spinner sp;
+        TextView sp;                     // 显示这一段选中的场景名（自绘，不是系统 Spinner）
         List<String> keys;
+        List<String> labels;
+        int sel = -1;                    // 当前选中的下标
         EditText em;
         EditText es;
     }
@@ -548,60 +557,176 @@ public class ComboSheet {
             r.keys.add("u:" + it.id);
         }
 
-        LinearLayout row = new LinearLayout(a);
-        row.setOrientation(LinearLayout.HORIZONTAL);
-        row.setGravity(Gravity.CENTER_VERTICAL);
-
-        r.sp = new Spinner(a);
-        ArrayAdapter<String> ad = new ArrayAdapter<String>(a,
-                android.R.layout.simple_spinner_dropdown_item, labels);
-        r.sp.setAdapter(ad);
+        // 这一段原来指向的场景可能已经不在了（自定义场景被删掉最常见）。
+        // 那样就把它补进候选里并标出来 —— 免得用户一进来看到的是别的场景，
+        // 一保存就把原来那一段悄悄换掉了。
         int idx = 0;
-        if (seed != null && seed.key != null) {
+        if (seed != null && seed.key != null && seed.key.length() > 0) {
             int found = r.keys.indexOf(seed.key);
-            if (found >= 0) idx = found;
+            if (found >= 0) {
+                idx = found;
+            } else {
+                labels.add(WeakNet.nameOfStepKey(seed.key));
+                r.keys.add(seed.key);
+                idx = r.keys.size() - 1;
+            }
+        } else {
+            // 新加的一段默认给一个真正的弱网场景。
+            // 直连放进组合里等于「这一段不做弱网」，摆在那儿很容易被当成
+            // 已经排好了，其实这一段是白排的。
+            for (int i = 0; i < r.keys.size(); i++) {
+                if (!"direct".equals(r.keys.get(i))) {
+                    idx = i;
+                    break;
+                }
+            }
         }
-        r.sp.setSelection(idx);
-        row.addView(r.sp, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        r.labels = labels;
+        r.sel = idx;
 
+        // 一段一行：场景名 + 时长 + 删除。
+        //
+        // 场景名用 weight=1 吃掉剩下的宽度。权重要生效，整条宽度链路都得是确定的：
+        // ScrollView → card → stepBox → 本行，全是 MATCH_PARENT。
+        // 之前就是这条链上有一环宽度不定，权重全丢，名字被压成「5G 良…」。
+        SwipeDeleteRow row = new SwipeDeleteRow(a);
+        // 每段给它一张浅底小卡片：三段挨在一起不至于糊成一片，
+        // 段与段的边界一眼能看出来（原来只有间距，看着像散着的三行）。
+        row.setBackground(box(0xFFF7F9FC, 0xFFE7ECF3, 10));
+        row.setPadding(dp(10), dp(8), dp(8), dp(8));
+
+        // 场景选择自己画，不用系统的 Spinner。
+        // 系统 Spinner 的收起态在部分 ROM（OPPO/ColorOS 实测）只画得出下拉箭头，
+        // 选中的场景名一个字都不显示 —— 展开后的列表里倒是有名字，看着像没选中。
+        // 自己画成可点的名字块：名字一定看得见，点它弹单选列表。
+        r.sp = new TextView(a);
+        r.sp.setTextSize(13);
+        r.sp.setTextColor(0xFF2F3F52);
+        r.sp.setSingleLine(true);
+        r.sp.setEllipsize(TextUtils.TruncateAt.END);
+        r.sp.setGravity(Gravity.CENTER_VERTICAL);
+        r.sp.setBackground(box(0xFFFFFFFF, 0xFFD7DEEA, 8));
+        // 右边多留 26dp 给「▾」箭头，文字再长也不会顶到箭头上去
+        r.sp.setPadding(dp(12), dp(8), dp(26), dp(8));
+        r.sp.setContentDescription("选择这一段用的场景");
+        paintSceneName(r);
+        r.sp.setOnClickListener(new View.OnClickListener() {
+            public void onClick(View v) {
+                pickScene(r);
+            }
+        });
+
+        // 箭头单独一个 view 叠在名字框右端，而不是跟在文字后面。
+        // 跟在文字后面的话，名字一变长箭头就跟着往右跑，最后跑到框外面去。
+        FrameLayout nameBox = new FrameLayout(a);
+        nameBox.addView(r.sp, new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+        TextView arrow = new TextView(a);
+        arrow.setText("▾");
+        arrow.setTextSize(11);
+        arrow.setTextColor(0xFF8A94A6);
+        arrow.setGravity(Gravity.CENTER);
+        nameBox.addView(arrow, new FrameLayout.LayoutParams(
+                dp(22), ViewGroup.LayoutParams.MATCH_PARENT,
+                Gravity.END | Gravity.CENTER_VERTICAL));
+
+        // 时长输入：分 + 秒
         r.em = new EditText(a);
         r.em.setInputType(InputType.TYPE_CLASS_NUMBER);
         r.em.setText(seed == null ? "0" : String.valueOf(seed.minutes));
         r.em.setTextSize(13);
-        row.addView(r.em, new LinearLayout.LayoutParams(dp(48), ViewGroup.LayoutParams.WRAP_CONTENT));
-        row.addView(unitLabel("分"));
+        r.em.setGravity(Gravity.CENTER_VERTICAL);
+        r.em.setBackground(box(0xFFFFFFFF, 0xFFD7DEEA, 6));
+        r.em.setPadding(dp(6), dp(3), dp(6), dp(3));
+        r.em.setMinWidth(0);
+        markFocus(r.em);
 
         r.es = new EditText(a);
         r.es.setInputType(InputType.TYPE_CLASS_NUMBER);
         r.es.setText(seed == null ? "30" : String.valueOf(seed.seconds));
         r.es.setTextSize(13);
-        row.addView(r.es, new LinearLayout.LayoutParams(dp(48), ViewGroup.LayoutParams.WRAP_CONTENT));
-        row.addView(unitLabel("秒"));
+        r.es.setGravity(Gravity.CENTER_VERTICAL);
+        r.es.setBackground(box(0xFFFFFFFF, 0xFFD7DEEA, 6));
+        r.es.setPadding(dp(6), dp(3), dp(6), dp(3));
+        r.es.setMinWidth(0);
+        markFocus(r.es);
 
-        Button del = new Button(a);
-        del.setAllCaps(false);
-        del.setText("✕");
-        del.setTextSize(13);
-        del.setTextColor(0xFF8A94A6);
-        del.setBackground(box(0x00000000, 0x00000000, 6));
-        del.setPadding(dp(8), dp(4), dp(8), dp(4));
-        del.setOnClickListener(new View.OnClickListener() {
+        // 行内容：场景名（吃掉剩余宽度） + 分 + 秒
+        //
+        // 这里不放行尾的小 ✕：左滑时它会跟着内容一起滑过去，正好压在滑出来的
+        // 「删除」块上，两个删除入口叠在一起既难看又容易误点。
+        // 删一段统一走左滑 —— 行里只留「这一段排的是什么、跑多久」两件事。
+        LinearLayout line = new LinearLayout(a);
+        line.setOrientation(LinearLayout.HORIZONTAL);
+        line.setGravity(Gravity.CENTER_VERTICAL);
+
+        line.addView(nameBox, new LinearLayout.LayoutParams(0,
+                ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        line.addView(r.em, new LinearLayout.LayoutParams(dp(34),
+                ViewGroup.LayoutParams.WRAP_CONTENT));
+        line.addView(unitLabel("分"));
+        line.addView(r.es, new LinearLayout.LayoutParams(dp(34),
+                ViewGroup.LayoutParams.WRAP_CONTENT));
+        line.addView(unitLabel("秒"));
+
+        // 底层：左滑这一行才露出来的红色删除块。
+        // 先加的是底层，后加的内容层盖在上面。
+        Button delBig = new Button(a);
+        delBig.setAllCaps(false);
+        delBig.setText("删除");
+        delBig.setTextSize(12);
+        delBig.setTextColor(0xFFFFFFFF);
+        delBig.setBackground(box(0xFFD64545, 0xFFC0392B, 8));
+        delBig.setPadding(dp(6), dp(4), dp(6), dp(4));
+        delBig.setMinimumWidth(0);
+        delBig.setMinWidth(0);
+        delBig.setContentDescription("删除这一段");
+        delBig.setOnClickListener(new View.OnClickListener() {
             public void onClick(View v) {
-                try {
-                    stepBox.removeView(r.view);
-                } catch (Exception e) {
-                    // ignore
-                }
-                rows.remove(r);
-                syncAddRow();
+                removeRow(r);
             }
         });
-        row.addView(del);
+        row.setDeleteView(delBig);
+        row.setContentView(line);
+        // 内容层要有不透明底色，不然底下的红色删除块会从「秒」字缝里透出来
+        row.setContentBackground(0xFFF7F9FC);
+        // 同时只留一行是滑开的：滑动新的一行时把上一行收回去
+        row.setOnSlideListener(new SwipeDeleteRow.OnSlideListener() {
+            public void onSlideStart(SwipeDeleteRow r) {
+                if (openRow != null && openRow != r) openRow.close();
+                openRow = r;
+            }
+        });
 
         r.view = row;
         rows.add(r);
-        stepBox.addView(row, full(0, 0, 0, 4));
+        stepBox.addView(row, full(0, 0, 0, 8));
         syncAddRow();
+    }
+
+    /** 删掉一段：按钮上的 ✕ 和左滑露出的删除块走同一条路 */
+    private void removeRow(Row r) {
+        try {
+            stepBox.removeView(r.view);
+        } catch (Exception e) {
+            // ignore
+        }
+        if (openRow != null && openRow == r.view) openRow = null;
+        rows.remove(r);
+        syncAddRow();
+    }
+
+    /** 输入框拿到焦点时把边框描蓝，跟场景名块的交互感保持一致 */
+    private void markFocus(final EditText et) {
+        et.setOnFocusChangeListener(new View.OnFocusChangeListener() {
+            public void onFocusChange(View v, boolean has) {
+                try {
+                    et.setBackground(box(0xFFFFFFFF, has ? 0xFF3B82F6 : 0xFFD7DEEA, 6));
+                } catch (Exception e) {
+                    // ignore
+                }
+            }
+        });
     }
 
     private TextView unitLabel(String s) {
@@ -609,8 +734,46 @@ public class ComboSheet {
         t.setText(s);
         t.setTextSize(12);
         t.setTextColor(0xFF8A94A6);
-        t.setPadding(dp(4), 0, dp(6), 0);
+        t.setPadding(dp(2), 0, dp(5), 0);
         return t;
+    }
+
+    /**
+     * 把这一段选中的场景名写到选择块上。
+     *
+     * 名字后面那个「▾」是另一个 view 叠在框的右端，不在这里拼字符串 ——
+     * 拼在文字后面的话，名字一变长箭头就被顶到框外面去了。
+     */
+    private void paintSceneName(Row r) {
+        if (r.sp == null || r.labels == null) return;
+        int i = r.sel;
+        if (i < 0 || i >= r.labels.size()) {
+            r.sp.setText("选场景");
+            return;
+        }
+        r.sp.setText(r.labels.get(i));
+    }
+
+    /**
+     * 点场景名 → 弹单选列表挑这一段用哪个场景。
+     *
+     * 选完就地改这一行的显示，保存时才按 r.sel 取 key。
+     */
+    private void pickScene(final Row r) {
+        if (r.labels == null || r.labels.isEmpty()) return;
+        final CharSequence[] items = r.labels.toArray(new CharSequence[0]);
+        new AlertDialog.Builder(a)
+                .setTitle("这一段用哪个场景")
+                .setSingleChoiceItems(items, Math.max(0, r.sel),
+                        new DialogInterface.OnClickListener() {
+                            public void onClick(DialogInterface d, int which) {
+                                r.sel = which;
+                                paintSceneName(r);
+                                d.dismiss();
+                            }
+                        })
+                .setNegativeButton("取消", null)
+                .show();
     }
 
     private void syncAddRow() {
@@ -629,7 +792,7 @@ public class ComboSheet {
         List<MyCombos.Step> steps = new ArrayList<MyCombos.Step>();
         for (int i = 0; i < rows.size(); i++) {
             Row r = rows.get(i);
-            int idx = r.sp.getSelectedItemPosition();
+            int idx = r.sel;
             if (idx < 0 || idx >= r.keys.size()) {
                 Toast.makeText(a, "第 " + (i + 1) + " 段还没选场景。", Toast.LENGTH_SHORT).show();
                 return;
@@ -668,6 +831,7 @@ public class ComboSheet {
     /** 把编辑器清成「新建」状态：名字、循环开关、段列表都回到初始值 */
     private void resetToNew() {
         editing = "";
+        openRow = null;
         try {
             edName.setText("");
             cbLoop.setChecked(false);
