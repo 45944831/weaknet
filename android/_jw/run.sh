@@ -36,6 +36,14 @@ echo "使用 android.jar: $AJAR"
 OUT="_jw/out"
 SRCPATH="src"
 
+# classpath 分隔符：Windows 是 ';'，Linux/macOS 是 ':'。
+# 写死 ';' 的话，CI 的 linux runner 会把整串当成一个不存在的路径，
+# 表现是「测试类全找不到」，看着像代码坏了。
+case "$(uname -s 2>/dev/null || echo unknown)" in
+  MINGW*|MSYS*|CYGWIN*) CPSEP=";" ;;
+  *) CPSEP=":" ;;
+esac
+
 rm -rf "$OUT"
 mkdir -p "$OUT"
 
@@ -56,20 +64,22 @@ javac -encoding UTF-8 -nowarn \
       -cp "$AJAR" \
       -d "$OUT" \
       src/com/weaknet/app/ComboStep.java \
+      src/com/weaknet/app/Profile.java \
+      src/com/weaknet/app/SpecGen.java \
       src/com/weaknet/app/ComboPlan.java
 
 javac -encoding UTF-8 -nowarn \
-      -cp "$AJAR;$OUTW" \
+      -cp "$AJAR$CPSEP$OUTW" \
       -sourcepath "$SRCPATH" \
       -d "$OUT" \
       src/com/weaknet/app/*.java \
       _jw/com/weaknet/app/_*Test.java
 
 FAIL=0
-for T in _PortIdxTest _FlowMatchTest _ScopeTest _BucketConcTest _PresetNotesTest _ParamNotesTest _NoteWrapTest _ComboNewAgainTest _PauseResumeTest; do
+for T in _PortIdxTest _FlowMatchTest _ScopeTest _BucketConcTest _PresetNotesTest _ParamNotesTest _NoteWrapTest _ComboNewAgainTest _PauseResumeTest _DelayLineTest; do
   echo ""
   echo "== $T =="
-  if java -cp "$OUT;$AJAR" "com.weaknet.app.$T"; then
+  if java -cp "$OUT$CPSEP$AJAR" "com.weaknet.app.$T"; then
     :
   else
     echo "!! $T 未通过"

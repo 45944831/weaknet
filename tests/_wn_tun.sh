@@ -1,14 +1,11 @@
 #!/system/bin/sh
-# 用法: wn_tun.sh <host> <port> [nbytes] [tag]
-# tag 用于隔离输出文件：并发跑多个探针时每个必须写自己的文件，
-# 否则共用一个文件会让探针读到别人的字节而提前退出（见 _wn_par.sh 说明）。
-#
+# 用法: wn_tun.sh <host> <port> [nbytes]
 # 计时口径：从发起连接到「收满预期字节」的墙钟，不含任何人为 sleep 等待。
 # 为什么不用 wc -c 收尾：toybox nc 在 stdin EOF 时立即退出，printf|nc 会丢掉
 # 尚未读到的响应（实测 BYTES 0 / 20ms）。改成后台跑 nc + 轮询输出文件大小，
 # 服务端 9126 的响应头固定 37+len(N) 字节，故 EXPECT 可精确算出来。
-H=$1; P=$2; N=${3:-0}; TAG=${4:-0}
-O=/data/local/tmp/wn_out_${TAG}.bin
+H=$1; P=$2; N=${3:-0}
+O=/data/local/tmp/wn_out
 rm -f $O
 HDR=$((37 + ${#N}))
 EXP=$((HDR + N))
@@ -40,7 +37,4 @@ done
 E=$(now)
 kill $BG 2>/dev/null
 pkill -f "$SL" 2>/dev/null
-# BYTES <本连接收到字节> <绝对起始ms> <绝对结束ms> <期望字节>
-# 用绝对时间戳（/proc/uptime 毫秒）而不是相对 ms，父脚本才能算真正的重叠窗口
-echo "BYTES $SZ $S $E $EXP"
-rm -f $O
+echo "BYTES $SZ $((E-S)) $EXP"

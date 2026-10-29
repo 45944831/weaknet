@@ -70,7 +70,7 @@ public class DelayLine {
             boolean inline = false;
             synchronized (lock) {
                 // inFlight>0 = 已出队的包 job 还在锁外跑，此时内联会让顺序颠倒，必须入队
-                inline = q.isEmpty() && inFlight == 0;
+                inline = !closed && q.isEmpty() && inFlight == 0;
                 if (inline) lastDue = 0;
             }
             if (inline) {
@@ -84,7 +84,6 @@ public class DelayLine {
                 return;
             }
         }
-        long due = System.currentTimeMillis() + Math.max(0, delayMs);
         synchronized (lock) {
             if (closed) return;
             while (maxPending > 0 && pendingBytes > maxPending) {
@@ -95,36 +94,61 @@ public class DelayLine {
                 }
                 if (closed) return;
             }
-            // 单调保序：新包不得早于已在队/在途的包到期（抖动是 ±jitter 的，
-            // 放任的话后发的包可能先到期，投递顺序乱了 TCP 会当成重传全丢掉）
-            if (q.isEmpty() && inFlight == 0) lastDue = 0;   // 基准已过去，重置
-            if (due < lastDue) due = lastDue;
-            lastDue = due;
-            q.add(new Item(due, seqGen++, job, bytes));
-            pendingBytes += bytes;
-            if (worker == null || !worker.isAlive()) {
-                worker = new Thread(new Runnable() {
-                    public void run() {
-                        loop();
-                    }
-                }, name);
-                worker.setDaemon(true);
-                worker.start();
-            }
-            lock.notifyAll();
+            enqueueLocked(delayMs, job, bytes);
         }
     }
 
     /**
      * UDP 用：积压满了就丢弃而不是阻塞。UDP 没有拥塞控制，对端不会因为你不收就降速，
      * 死等只会把队列撑爆；真实网络里路由器队列满了同样是丢包，行为一致。
+     *
+     * 容量判断与入队必须在同一个 synchronized 内完成。旧实现先在锁内查、出锁后再调
+     * post()，两个发送线程可以同时通过检查，后到的那个会掉进 post() 的 wait 循环被
+     * 卡住 —— 与「满了就丢、绝不阻塞」的约定正好相反。
      */
     boolean tryPost(long delayMs, Runnable job, int bytes) {
+        boolean inline;
         synchronized (lock) {
-            if (closed || pendingBytes > maxPending) return false;
+            if (closed) return false;
+            if (maxPending > 0 && pendingBytes + bytes > maxPending) return false;
+            inline = delayMs <= 0 && q.isEmpty() && inFlight == 0;
+            if (inline) {
+                lastDue = 0;
+            } else {
+                enqueueLocked(delayMs, job, bytes);
+            }
         }
-        post(delayMs, job, bytes);
+        if (inline) {
+            // 与 post() 同理：job 必须在锁外跑，否则会和会话锁形成 AB-BA 死锁
+            try {
+                job.run();
+            } catch (Exception e) {
+                // ignore
+            }
+        }
         return true;
+    }
+
+    /** 调用方必须持有 lock */
+    private void enqueueLocked(long delayMs, Runnable job, int bytes) {
+        long due = System.currentTimeMillis() + Math.max(0, delayMs);
+        // 单调保序：新包不得早于已在队/在途的包到期（抖动是 ±jitter 的，
+        // 放任的话后发的包可能先到期，投递顺序乱了 TCP 会当成重传全丢掉）
+        if (q.isEmpty() && inFlight == 0) lastDue = 0;   // 基准已过去，重置
+        if (due < lastDue) due = lastDue;
+        lastDue = due;
+        q.add(new Item(due, seqGen++, job, bytes));
+        pendingBytes += bytes;
+        if (worker == null || !worker.isAlive()) {
+            worker = new Thread(new Runnable() {
+                public void run() {
+                    loop();
+                }
+            }, name);
+            worker.setDaemon(true);
+            worker.start();
+        }
+        lock.notifyAll();
     }
 
     int pendingBytes() {

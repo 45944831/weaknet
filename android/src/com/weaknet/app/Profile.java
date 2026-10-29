@@ -1,36 +1,29 @@
 package com.weaknet.app;
 
-import java.util.HashMap;
 import java.util.Locale;
-import java.util.Map;
 
 import org.json.JSONObject;
 
-/** 弱网参数模型 + 内置场景预设（与桌面版一致） */
+/** 弱网参数模型 + 内置场景预设（规格来自 SpecGen ← spec/spec.json） */
 public class Profile {
-    public String name = "直连（不限制）";
-    public int latencyUpMs = 0;
-    public int latencyDownMs = 0;
-    public int jitterMs = 0;
-    public int downKbps = 0;   // 0 = 不限
-    public int upKbps = 0;
-    public double lossPct = 0;
-    public int stallMs = 600;
-    public double disconnectPct = 0;
-    public double timeoutPct = 0;
-    public double dnsFailPct = 0;
-    public double rejectPct = 0;
-    public int flapSec = 0;
-    public int flapBlackoutSec = 2;
+    public String name = SpecGen.DEFAULT_PROFILE_NAME;
+    public int latencyUpMs = SpecGen.paramDefault("latency_up_ms");
+    public int latencyDownMs = SpecGen.paramDefault("latency_down_ms");
+    public int jitterMs = SpecGen.paramDefault("jitter_ms");
+    public int downKbps = SpecGen.paramDefault("down_kbps");   // 0 = 不限
+    public int upKbps = SpecGen.paramDefault("up_kbps");
+    public double lossPct = SpecGen.paramDefault("loss_pct");
+    public int stallMs = SpecGen.paramDefault("stall_ms");
+    public double disconnectPct = SpecGen.paramDefault("disconnect_pct");
+    public double timeoutPct = SpecGen.paramDefault("timeout_pct");
+    public double dnsFailPct = SpecGen.paramDefault("dns_fail_pct");
+    public double rejectPct = SpecGen.paramDefault("reject_pct");
+    public int flapSec = SpecGen.paramDefault("flap_sec");
+    public int flapBlackoutSec = SpecGen.paramDefault("flap_blackout_sec");
 
     // 2026-10 起去掉 3g / edge / gprs / dialup：这几种制式与拨号上网已退网，
     // 不再是有意义的测试档位；需要极慢网时直接用自定义参数压带宽。
-    public static final String[] KEYS = {
-            "direct", "wifi", "4g", "4g_weak", "5g",
-            "5g_weak", "wifi_weak", "congestion", "satellite",
-            "high_loss", "high_latency",
-            "highspeed_rail", "elevator", "flapping", "blackhole", "dns_fail", "airplane"
-    };
+    public static final String[] KEYS = SpecGen.PRESET_KEYS;
 
     /** key 是不是本机认识的某一档内置预设（别人推来的组合里可能有我们没有的档位） */
     public static boolean known(String key) {
@@ -43,203 +36,36 @@ public class Profile {
 
     /** 按钮上的短名（手机屏窄，全名会把按钮撑出卡片；与桌面版 SHORT 保持一致） */
     public static String shortOf(String key) {
-        if ("direct".equals(key)) return "直连";
-        if ("wifi".equals(key)) return "Wi-Fi 良好";
-        if ("4g".equals(key)) return "4G LTE";
-        if ("4g_weak".equals(key)) return "4G 弱网";
-        if ("5g".equals(key)) return "5G 良好";
-        if ("5g_weak".equals(key)) return "5G 弱覆盖";
-        if ("wifi_weak".equals(key)) return "弱 Wi-Fi";
-        if ("congestion".equals(key)) return "网络拥塞";
-        if ("satellite".equals(key)) return "卫星链路";
-        if ("highspeed_rail".equals(key)) return "高铁/地铁";
-        if ("elevator".equals(key)) return "电梯/地下室";
-        if ("flapping".equals(key)) return "频繁断连";
-        if ("blackhole".equals(key)) return "黑洞无响应";
-        if ("dns_fail".equals(key)) return "DNS 故障";
-        if ("airplane".equals(key)) return "完全断网";
-        if ("high_loss".equals(key)) return "高丢包";
-        if ("high_latency".equals(key)) return "高延迟";
-        return "";
+        return SpecGen.presetShort(key);
     }
 
     public static String catOf(String key) {
-        if ("direct".equals(key) || "wifi".equals(key) || "4g".equals(key)
-                || "5g".equals(key)) return "常规网络";
-        if ("4g_weak".equals(key) || "5g_weak".equals(key) || "wifi_weak".equals(key)
-                || "congestion".equals(key) || "satellite".equals(key)
-                || "high_loss".equals(key) || "high_latency".equals(key)) return "弱网环境";
-        return "极端环境";
-    }
-
-    /**
-     * 每支内置档位的注释：界面上的「！」入口把它们列出来（见 NotesSheet）。
-     *
-     * 为什么不复用参数值自动生成：光看数字（延迟 110ms / 3Mbps / 丢包 4%）分不清
-     * 「4G 弱网」和「弱 Wi-Fi」到底差在哪，也看不出该用哪一支去复现某个 bug。
-     * 这里写的是「模拟的什么现场 + 典型症状」，参数摘要由 {@link #detail()} 现算。
-     * 文案与桌面版 weaknet.py 的 PRESET_NOTES 保持一致，两端别各说一套。
-     */
-    private static final Map<String, String> NOTES = new HashMap<String, String>();
-
-    static {
-        NOTES.put("direct",
-                "不做任何处理，流量原样直通。用来确认「接管本身没问题」，也是跟其它场景对比的基线。");
-        NOTES.put("wifi",
-                "家用 / 办公 Wi-Fi 的典型值：延迟几十毫秒、带宽几十 Mbps。功能验证和性能对比的基准环境。");
-        NOTES.put("4g",
-                "移动网络常规体验：RTT 40~60ms、下行 20Mbps。模拟户外 / 地铁里信号正常的 4G。");
-        NOTES.put("5g",
-                "空口延迟比 4G 低一个量级（RTT 10~20ms），下行 100Mbps。能触发「秒开」级体验，"
-                        + "也够跑满多数 App 的预加载。");
-        NOTES.put("4g_weak",
-                "地下车库 / 城中村 / 演唱会现场这类「有 4G 图标但速率塌了」的现场。"
-                        + "速率比 5G 弱覆盖再低一档，丢包与偶发断流更明显 —— 4G 的重传比 5G 慢。");
-        NOTES.put("5g_weak",
-                "室内深处 / 小区边缘 / 地铁口：还能驻留，但速率塌到几 Mbps，伴随少量丢包与偶发断流。"
-                        + "比弱 Wi-Fi 更容易出现「看着有信号、实际传不动」。");
-        NOTES.put("wifi_weak",
-                "隔墙 / 离路由器远：信号还在，但速率与稳定性一起掉，抖动明显（±60ms）。"
-                        + "适合复现「Wi-Fi 满格却一直转圈」。");
-        NOTES.put("congestion",
-                "晚高峰 / 多人共享带宽：延迟翻倍、下行被压到 512kbps。复现「点一下要转半天圈」。");
-        NOTES.put("satellite",
-                "单程 700ms（一次往返约 1.4 秒）、带宽 2Mbps。典型表现是「每个请求都要等好几秒才回来」，"
-                        + "用来验证加载态、超时与重试。");
-        NOTES.put("high_loss",
-                "带宽看着够（能起连、能握手），但每三个包丢一个。典型症状：视频卡成 PPT、"
-                        + "图片加载一半、长连接反复重试。");
-        NOTES.put("high_latency",
-                "带宽正常、也不丢包，纯粹往返慢（跨境链路、卫星回传、代理中转）。"
-                        + "复现的是「慢但有结果」，不是「传不动」。");
-        NOTES.put("highspeed_rail",
-                "高速移动下频繁切换基站：抖动极大（±150ms）、偶发断流、带宽低。"
-                        + "适合验证重连与断点续传。");
-        NOTES.put("elevator",
-                "信号极差：延迟接近秒级、20% 丢包、10% 断连，常伴超时。"
-                        + "最容易触发「请求卡死」的一档。");
-        NOTES.put("flapping",
-                "每 8 秒断网 3 秒，模拟网络反复切换 / 弱信号掉线。"
-                        + "专门用来验证重连、重试与断线提示逻辑。");
-        NOTES.put("blackhole",
-                "请求发出去没有任何响应，连接挂住不返回 —— 不是报错，是一直等。"
-                        + "用来验证超时、取消与兜底 UI。");
-        NOTES.put("dns_fail",
-                "域名解析全部失败，但直接用 IP 的连接仍然通 —— 只拦 DNS 查询，不拦已建立的数据通道。");
-        NOTES.put("airplane",
-                "所有新连接立即被拒绝（是立刻失败，不是挂住）。模拟飞行模式 / 完全无网络，"
-                        + "验证快速失败与降级路径。");
+        return SpecGen.presetCat(key);
     }
 
     /** 档位注释；没有注释时返回空串（界面据此跳过这一行） */
     public static String noteOf(String key) {
-        String s = key == null ? null : NOTES.get(key);
-        return s == null ? "" : s;
-    }
-
-    /**
-     * 每个参数的注释：参数编辑界面上每行末尾的「！」把它们显示出来。
-     *
-     * 为什么需要：13 个参数里有一半光看名字猜不出行为 —— 「丢包率」填 30 到底会让
-     * 请求报错还是变慢？「黑洞率」和「拒连率」都是连不上，差别在哪？「卡顿时长」
-     * 单独填为什么没效果？这些都得翻引擎源码才能确定，写在这里让用户点一下就看到。
-     * 文案与桌面版 weaknet.py 的 PARAM_NOTES 保持一致（由 _t_param_notes.py 逐条比对）。
-     */
-    private static final Map<String, String> PARAM_NOTES = new HashMap<String, String>();
-
-    static {
-        PARAM_NOTES.put("latency_down_ms",
-                "给「服务器 → 本机」方向每块数据加的固定延迟，用来拉长响应回来的时间。\n"
-                        + "每块数据都会加，不是只在建连时加一次 —— 否则 keep-alive / WebSocket 这类长连接里"
-                        + "只有第一个请求慢，后面的全是零延迟。一次往返 ≈ 上行延迟 + 下行延迟。");
-        PARAM_NOTES.put("latency_up_ms",
-                "给「本机 → 服务器」方向加的固定延迟，影响请求发出去要多久才到服务器。\n"
-                        + "「点了按钮迟迟不发请求」看这项，「请求回来了但界面不刷新」看下行延迟。"
-                        + "一次往返 ≈ 上行 + 下行，所以两项都填 400 时 RTT 是 800ms。");
-        PARAM_NOTES.put("jitter_ms",
-                "每个数据块的延迟在基础值上随机浮动 ±N 毫秒，让延迟忽快忽慢。\n"
-                        + "实际延迟 = 基础延迟 + (-N ~ +N) 的随机值；抖动幅度不会超过基础延迟"
-                        + "（否则会算出负延迟，变成比直连还快的「零延迟包」），超出时按基础延迟封顶。"
-                        + "抖动主要影响实时音视频、游戏、VoIP；纯下载几乎感觉不到。");
-        PARAM_NOTES.put("down_kbps",
-                "下行总带宽上限，单位 kbps（1 Mbps = 1000 kbps，1000 kbps ≈ 125 KB/s）。0 = 不限。\n"
-                        + "注意是全局共享的一份带宽：同时开 5 条连接是 5 条一起分摊，不是每条各拿一份。");
-        PARAM_NOTES.put("up_kbps",
-                "上行总带宽上限（本机 → 服务器），单位 kbps。0 = 不限。\n"
-                        + "上传大文件、发图片、提交大请求体时先卡在这里；只测「页面加载慢」时通常不用改它。");
-        PARAM_NOTES.put("loss_pct",
-                "每块数据按这个概率「丢掉」，表现不是报错，而是一段停顿（模拟 TCP 等重传）。\n"
-                        + "停多久由下面的「卡顿时长」决定，丢包率本身不决定停多久。填 100 会表现为完全传不动。");
-        PARAM_NOTES.put("stall_ms",
-                "每次「丢包」命中后停顿多久，实际会在 0.5~1.5 倍之间随机。\n"
-                        + "只在丢包率 > 0 时生效 —— 丢包率为 0 时这项填什么都不影响结果。默认 600。");
-        PARAM_NOTES.put("disconnect_pct",
-                "每块数据按概率直接掐断整条连接（两侧 RST/FIN），App 看到的是「连接被重置」。\n"
-                        + "和丢包的区别：丢包是慢，断连是断，必须重连才能继续。只影响已建立的连接；"
-                        + "能不能建连由「拒连率」管。");
-        PARAM_NOTES.put("timeout_pct",
-                "新连接按概率「发出去没有回应」，先挂住不返回，过一会儿才继续处理。\n"
-                        + "最容易触发「请求卡死、转圈不停」。和「拒连率」的区别：这个是挂住等，那个是立刻失败。");
-        PARAM_NOTES.put("dns_fail_pct",
-                "按概率让域名解析失败（返回 502 DNS resolution failed）。\n"
-                        + "只拦「需要解析域名」的连接：用 IP 直连的（HTTPDNS、写死 IP 的 App）不受影响 —— "
-                        + "所以填 100% 也可能看到部分请求正常。");
-        PARAM_NOTES.put("reject_pct",
-                "新连接按概率立刻被拒绝（直接返回 502），是「马上失败」而不是挂住。\n"
-                        + "模拟飞行模式 / 完全没网，用来验证 App 的快速失败与降级路径。");
-        PARAM_NOTES.put("flap_sec",
-                "每隔 N 秒把当前所有连接全部掐断，持续「断网时长」后恢复。0 = 关闭。\n"
-                        + "这是周期性的整体断网，跟「断连率」随机掐单条不是一回事；两项可以叠加。");
-        PARAM_NOTES.put("flap_blackout_sec",
-                "每次周期断网持续多久，到点自动恢复。\n"
-                        + "只在「断网间隔」> 0 时生效，单独填没有作用。");
+        return SpecGen.presetNote(key);
     }
 
     /** 单个参数的说明；未知 key 返回空串（界面据此不显示「！」） */
     public static String noteOfParam(String key) {
-        String s = key == null ? null : PARAM_NOTES.get(key);
-        return s == null ? "" : s;
+        return SpecGen.paramNote(key);
     }
 
     // ---------------------------------------------------------------- 弱网组合说明
     //
-    // 与桌面版 weaknet.py 的 COMBO_DOC 逐字一致（由 _t_combo_notes.py 两端比对）。
-    // 文案放引擎里而不是各写一份：两端各写必然漂移 ——
-    // 改了一端忘了另一端，同一个功能说出来的话就不一样了。
-    //
-    // 三块内容（机制 / 例子 / 提醒）拼成一份文档串，用 \u001F 分隔：
-    // 拆成 String[][] 的话，测试要解析 Java 源码来比对，
-    // 在「多行拼接的字符串」上极易出错 —— 表现是两边明明一样、测试却说不一样。
+    // 文案与桌面版 weaknet.py 的 COMBO_DOC 逐字一致：两者都来自 spec/spec.json 的
+    // combo 段（安卓侧由 tools/gen_spec.py 生成到 SpecGen）。
 
     /** 块与块之间的分隔符（U+001F 单元分隔符，正常文本里不会出现） */
-    public static final String COMBO_DOC_SEP = "\u001F";
+    public static final String COMBO_DOC_SEP = "";
 
     /** 例子条数（分界用：前 N 块是例子，之后是提醒） */
-    public static final int COMBO_EXAMPLE_COUNT = 5;
+    public static final int COMBO_EXAMPLE_COUNT = SpecGen.COMBO_EXAMPLE_COUNT;
 
     /** 完整文档：第 1 块是机制，之后每 4 行一个例子，剩下的是提醒 */
-    public static final String COMBO_DOC =
-                        "弱网组合 = 把几支场景按时长排成一条链，选中后自动一段段播过去。\n"
-            +             "· 顺序播放：一段跑完自动切下一段，中间不用你操作。\n"
-            +             "· 可循环：末尾再回到第一段，一直循环下去（不勾就播完一遍停住）。\n"
-            +             "· 最多 5 段：再多就不好在界面上按顺序核对了。\n"
-            +             "· 组合里不能再套组合：段只能选预设或自定义场景。\n"
-            +             "· 弱网没开着时点组合只「选中」，不会替你偷偷开始限速；开着才会立刻播。\u001F通勤路上\n"
-            +             "从有信号走进信号差的地方，再彻底没信号，最后恢复。\n"
-            +             "复现「地铁进隧道」这类真实链路：先正常加载，走到弱覆盖区开始卡，进隧道后请求挂住，出站后恢复。适合测弱网下的加载中状态与恢复逻辑。\n"
-            +             "5G 良好 30 秒 → 4G 弱网 1 分 → 完全断网 30 秒 → 5G 良好 30 秒\u001F抢购秒杀\n"
-            +             "平时流畅，一到高峰就抢不到，失败后快速重试。\n"
-            +             "高并发下服务端限流或网络拥塞的典型表现：请求变慢、部分直接失败。适合验证 App 的失败提示、重试与降级路径。\n"
-            +             "5G 良好 20 秒 → 弱 Wi-Fi 1 分 → 黑洞（无响应）15 秒 → 弱 Wi-Fi 1 分\u001F网络抖动\n"
-            +             "信号时好时坏，延迟忽大忽小。\n"
-            +             "模拟电梯、隧道口、拥挤场所的信号抖动。适合测实时音视频、语音通话、在线协作这类对延迟敏感的链路。\n"
-            +             "5G 良好 20 秒 → 弱 5G 20 秒 → 5G 良好 20 秒 → 弱 5G 20 秒（循环）\u001F定时断网\n"
-            +             "每隔一会儿断一次，过一会儿自己恢复。\n"
-            +             "模拟周期性网络中断（如基站切换、家庭路由重启）。适合验证长连接断了能不能自己重连、心跳与超时逻辑。\n"
-            +             "4G 良好 1 分 → 黑洞（无响应）20 秒（循环）\u001F加载渐变\n"
-            +             "从慢到快再到慢，模拟带宽被逐步放开。\n"
-            +             "测大文件 / 长列表的渐进加载表现：首屏慢、之后提速、快结束时又慢下来。适合验证进度条与分片下载逻辑。\n"
-            +             "极慢（100kbps）20 秒 → 4G 弱网 20 秒 → 5G 良好 20 秒 → 极慢（100kbps）20 秒\u001F组合播到一半可以随时切走或暂停：切换后原组合停在原地，不会偷偷继续改参数。\u001F每一段都是完整的一支场景，段与段之间参数是整套替换的 —— 不会把上一段的丢包率带进下一段。\u001F循环组合会一直播下去，测完记得切走或暂停，别忘了它在后台改着参数。";
+    public static final String COMBO_DOC = SpecGen.COMBO_DOC;
 
     /**
      * 把文档串拆成三块：说明、例子列表、提醒列表。
@@ -330,30 +156,14 @@ public class Profile {
         return out;
     }
 
-    /** 参数取值上限：与桌面版 weaknet.py 的 PROF_LIMITS 保持一致 */
+    /** 参数取值上限（与桌面版同一份 SPEC 的 max） */
     public static int limitOfParam(String key) {
-        if (key == null) return 0;
-        if ("latency_up_ms".equals(key) || "latency_down_ms".equals(key)) return 10000;
-        if ("jitter_ms".equals(key)) return 5000;
-        if ("down_kbps".equals(key) || "up_kbps".equals(key)) return 1000000;
-        if ("stall_ms".equals(key)) return 60000;
-        if ("flap_sec".equals(key)) return 3600;
-        if ("flap_blackout_sec".equals(key)) return 600;
-        return 100;                       // 各项百分比
+        return SpecGen.paramMax(key);
     }
 
-    /** 参数单位：从显示名里括起来的那段取（如「下行带宽 (kbps)」-> kbps） */
+    /** 参数单位（如「下行带宽 (kbps)」-> kbps） */
     public static String unitOfParam(String key) {
-        if (key == null) return "";
-        for (String[] f : MainPanels.FIELDS) {
-            if (!f[0].equals(key)) continue;
-            String name = f[1] == null ? "" : f[1];
-            int a = name.indexOf('(');
-            int b = name.lastIndexOf(')');
-            if (a >= 0 && b > a) return name.substring(a + 1, b).trim();
-            return "";
-        }
-        return "";
+        return SpecGen.paramUnit(key);
     }
 
     // ---------------------------------------------------------------- 说明文案的排版
@@ -722,101 +532,43 @@ public class Profile {
         }
     }
 
+    /**
+     * 内置预设 -> Profile。名字与参数都来自 SpecGen（spec/spec.json 的 presets），
+     * 未知 key 回落到默认的「直连」。
+     */
     public static Profile build(String key) {
         Profile p = new Profile();
-        if ("wifi".equals(key)) {
-            p.name = "Wi-Fi 良好";
-            p.latencyUpMs = 10; p.latencyDownMs = 30; p.jitterMs = 5;
-            p.downKbps = 50000; p.upKbps = 20000;
-        } else if ("4g".equals(key)) {
-            p.name = "4G LTE";
-            p.latencyUpMs = 40; p.latencyDownMs = 60; p.jitterMs = 15;
-            p.downKbps = 20000; p.upKbps = 10000;
-        } else if ("4g_weak".equals(key)) {
-            // 4G 弱覆盖：地下车库 / 城中村 / 演唱会现场这类「有 4G 图标但速率塌了」的场景，
-            // 速率比 5G 弱覆盖再低一档，丢包与偶发断流更明显（4G 的重传比 5G 慢）
-            p.name = "4G 弱网（边缘/室内）";
-            p.latencyUpMs = 70; p.latencyDownMs = 110; p.jitterMs = 45;
-            p.downKbps = 3000; p.upKbps = 800; p.lossPct = 4;
-            p.disconnectPct = 1; p.stallMs = 1200;
-        } else if ("5g".equals(key)) {
-            p.name = "5G（良好覆盖）";
-            p.latencyUpMs = 12; p.latencyDownMs = 20; p.jitterMs = 8;
-            p.downKbps = 100000; p.upKbps = 40000;
-        } else if ("5g_weak".equals(key)) {
-            p.name = "5G 弱覆盖（室内/边缘）";
-            p.latencyUpMs = 50; p.latencyDownMs = 80; p.jitterMs = 35;
-            p.downKbps = 6000; p.upKbps = 1500; p.lossPct = 2;
-            p.disconnectPct = 1; p.stallMs = 1000;
-        } else if ("wifi_weak".equals(key)) {
-            p.name = "弱 Wi-Fi（隔墙/远端）";
-            p.latencyUpMs = 60; p.latencyDownMs = 120; p.jitterMs = 60;
-            p.downKbps = 5000; p.upKbps = 2000; p.lossPct = 3;
-        } else if ("congestion".equals(key)) {
-            p.name = "网络拥塞";
-            p.latencyUpMs = 200; p.latencyDownMs = 400; p.jitterMs = 100;
-            p.downKbps = 512; p.upKbps = 256; p.lossPct = 5;
-        } else if ("satellite".equals(key)) {
-            p.name = "卫星链路（高延迟）";
-            p.latencyUpMs = 700; p.latencyDownMs = 700; p.jitterMs = 80;
-            p.downKbps = 2000; p.upKbps = 512;
-        } else if ("high_loss".equals(key)) {
-            // 高丢包：带宽看着够（能起连、能握手），但每三个包就丢一个 ——
-            // 典型症状是视频卡成 PPT、图片加载到一半、长连接反复重试
-            p.name = "高丢包（30% 丢包）";
-            p.latencyUpMs = 100; p.latencyDownMs = 150; p.jitterMs = 80;
-            p.downKbps = 8000; p.upKbps = 3000; p.lossPct = 30; p.stallMs = 800;
-        } else if ("high_latency".equals(key)) {
-            // 高延迟：带宽正常、也不丢包，纯粹是往返慢（跨境链路、卫星回传、代理中转），
-            // 用来复现「点一下要等半天才有反应」而不是「传不动」
-            p.name = "高延迟（RTT 800ms）";
-            p.latencyUpMs = 400; p.latencyDownMs = 400; p.jitterMs = 60;
-            p.downKbps = 10000; p.upKbps = 5000;
-        } else if ("highspeed_rail".equals(key)) {
-            p.name = "高铁 / 地铁（高速移动）";
-            p.latencyUpMs = 60; p.latencyDownMs = 100; p.jitterMs = 150;
-            p.downKbps = 1500; p.upKbps = 512; p.lossPct = 8;
-            p.disconnectPct = 2; p.stallMs = 1200;
-        } else if ("elevator".equals(key)) {
-            p.name = "电梯 / 地下室（信号极差）";
-            p.latencyUpMs = 500; p.latencyDownMs = 800; p.jitterMs = 300;
-            p.downKbps = 256; p.upKbps = 128; p.lossPct = 20;
-            p.disconnectPct = 10; p.stallMs = 2000;
-        } else if ("flapping".equals(key)) {
-            p.name = "频繁断连（网络切换）";
-            p.latencyUpMs = 80; p.latencyDownMs = 120; p.jitterMs = 50;
-            p.downKbps = 8000; p.upKbps = 4000; p.disconnectPct = 5;
-            p.flapSec = 8; p.flapBlackoutSec = 3;
-        } else if ("blackhole".equals(key)) {
-            p.name = "黑洞（请求无响应）"; p.timeoutPct = 100;
-        } else if ("dns_fail".equals(key)) {
-            p.name = "DNS 故障（无法解析域名）"; p.dnsFailPct = 100;
-        } else if ("airplane".equals(key)) {
-            p.name = "完全断网（立即拒连）"; p.rejectPct = 100;
-        } else {
-            p.name = "直连（不限制）";
-        }
+        if (!SpecGen.hasPreset(key)) return p;
+        p.name = SpecGen.presetName(key);
+        SpecGen.applyPreset(key, p);
         return p;
     }
 
-    /** 从自定义参数 JSON 构建（字段缺失则保持默认，越界值夹到合理区间） */
+    /** 从自定义参数 JSON 构建（字段缺失则保持默认，越界值夹到 spec 的 max） */
     public static Profile custom(JSONObject o) {
         Profile p = new Profile();
         p.name = "自定义";
-        p.latencyUpMs = num(o.optInt("latency_up_ms", 0), 10000);
-        p.latencyDownMs = num(o.optInt("latency_down_ms", 0), 10000);
-        p.jitterMs = num(o.optInt("jitter_ms", 0), 5000);
-        p.downKbps = num(o.optInt("down_kbps", 0), 1000000);
-        p.upKbps = num(o.optInt("up_kbps", 0), 1000000);
-        p.stallMs = num(o.optInt("stall_ms", 600), 60000);
-        p.flapSec = num(o.optInt("flap_sec", 0), 3600);
-        p.flapBlackoutSec = num(o.optInt("flap_blackout_sec", 2), 600);
-        p.lossPct = pct(o.optDouble("loss_pct", 0));
-        p.disconnectPct = pct(o.optDouble("disconnect_pct", 0));
-        p.timeoutPct = pct(o.optDouble("timeout_pct", 0));
-        p.dnsFailPct = pct(o.optDouble("dns_fail_pct", 0));
-        p.rejectPct = pct(o.optDouble("reject_pct", 0));
+        p.apply(o);
         return p;
+    }
+
+    /** 只覆盖 JSON 里出现的字段；夹取上限来自 spec，避免两端各写一套 */
+    private void apply(JSONObject o) {
+        if (o == null) return;
+        latencyUpMs = num(o.optInt("latency_up_ms", latencyUpMs), SpecGen.paramMax("latency_up_ms"));
+        latencyDownMs = num(o.optInt("latency_down_ms", latencyDownMs), SpecGen.paramMax("latency_down_ms"));
+        jitterMs = num(o.optInt("jitter_ms", jitterMs), SpecGen.paramMax("jitter_ms"));
+        downKbps = num(o.optInt("down_kbps", downKbps), SpecGen.paramMax("down_kbps"));
+        upKbps = num(o.optInt("up_kbps", upKbps), SpecGen.paramMax("up_kbps"));
+        stallMs = num(o.optInt("stall_ms", stallMs), SpecGen.paramMax("stall_ms"));
+        flapSec = num(o.optInt("flap_sec", flapSec), SpecGen.paramMax("flap_sec"));
+        flapBlackoutSec = num(o.optInt("flap_blackout_sec", flapBlackoutSec),
+                SpecGen.paramMax("flap_blackout_sec"));
+        lossPct = pct(o.optDouble("loss_pct", lossPct));
+        disconnectPct = pct(o.optDouble("disconnect_pct", disconnectPct));
+        timeoutPct = pct(o.optDouble("timeout_pct", timeoutPct));
+        dnsFailPct = pct(o.optDouble("dns_fail_pct", dnsFailPct));
+        rejectPct = pct(o.optDouble("reject_pct", rejectPct));
     }
 
     /**

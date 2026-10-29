@@ -1,17 +1,14 @@
 # -*- coding: utf-8 -*-
-"""真机 tun 数据面实测（VpnNetService -> TcpSession -> DelayLine）。
+"""真机代理路径 E2E（回环 127.0.0.1:8888）。
 
-难点：手机与 PC 不在同一三层网络（手机在隔离 Wi-Fi 172.16.3.10/16，
-PC 在 192.168.1.49/24，且该 Wi-Fi 不路由到 192.168.1.0/24），
-所以「PC 架服务 + 手机过 VPN 访问」的标准路子走不通。
+历史：本文件原名「tun 数据面实测」，靠连 10.8.0.2:8888（tun0 地址）来
+制造「过 tun」的假象。实际上 10.8.0.2 是本机地址，内核在 local 表就交付，
+根本不会进 tun0；1.1.8 之前代理绑 0.0.0.0 才让这条探针能通，测到的是
+代理路径而非 tun。1.1.9 起代理只绑回环（P0-2），连 10.8.0.2 会被直接拒连。
 
-解法：让流量打进 tun0 再回环。
-  - PC 起 HTTP 服务在 127.0.0.1:9126，adb reverse 把它暴露给手机的 127.0.0.1:9126
-  - 手机客户端连 **10.8.0.2:8888**（tun0 地址）-> 包进 tun0 -> VpnNetService
-    -> TcpSession（上游 socket 已 protect，走真实网络）-> 10.8.0.2:8888
-    -> 应用自己的 ProxyServer -> 127.0.0.1:9126 -> adb reverse -> PC
-  - 对照组：客户端直连 **127.0.0.1:8888**（127.0.0.0/8 走 lo，不进 tun0）
-  - 两者唯一差别就是「有没有过 tun」，差额即 tun 数据面注入的效果
+现在定位改为：**代理路径**的端到端量化（延迟/限速/上行/切场景/断网档），
+tun 数据面由 _t_apk_tun_real.py 用非本机目的地址单独覆盖。
+服务端仍是 PC 上的 127.0.0.1:9126，经 adb reverse 暴露给手机。
 """
 import os
 import sys
@@ -177,31 +174,31 @@ def main():
     set_scene("direct")
     b1, t1 = probe("127.0.0.1", 8888, 0)
     rec("对照组：127.0.0.1:8888 直连代理可达", b1 and b1 > 0, "%s B / %s ms" % (b1, t1))
-    b2, t2 = probe("10.8.0.2", 8888, 0)
-    rec("实验组：10.8.0.2:8888 过 tun0 可达", b2 and b2 > 0, "%s B / %s ms" % (b2, t2))
+    b2, t2 = probe("127.0.0.1", 8888, 0)
+    rec("代理端口再测一次（稳定性）", b2 and b2 > 0, "%s B / %s ms" % (b2, t2))
     if not (b1 and b2):
         print("    回环不通，终止")
         return 1
 
-    # tun0 地址是否真的是 tun 设备
-    tun_addr = sh("ip -o addr show tun0 2>/dev/null | grep -o 'inet [0-9.]*'").strip()
-    rec("tun0 地址确认为 10.8.0.2", "10.8.0.2" in tun_addr, tun_addr or "(取不到)")
+    st = api("/api/status")
+    rec("代理只绑回环", (st.get("listen") or {}).get("host") == "127.0.0.1",
+        str(st.get("listen")))
 
     base_tun = t2
-    print("    tun 路径基线 %d ms（直连档）" % base_tun, flush=True)
+    print("    代理路径基线 %d ms（直连档）" % base_tun, flush=True)
 
     # ---- 延迟注入：卫星 1400ms RTT ----
     set_scene("satellite")
-    b, t = probe("10.8.0.2", 8888, 0)
+    b, t = probe("127.0.0.1", 8888, 0)
     inj = max(0, t - base_tun)
-    rec("tun 路径 卫星档注入延迟", inj >= 1400 * 0.6,
+    rec("代理路径 卫星档注入延迟", inj >= 1400 * 0.6,
         "往返 %d ms，注入 %d ms（设定 1400）" % (t, inj))
 
     # ---- 延迟注入：高延迟 800ms ----
     set_scene("high_latency")
-    b, t = probe("10.8.0.2", 8888, 0)
+    b, t = probe("127.0.0.1", 8888, 0)
     inj = max(0, t - base_tun)
-    rec("tun 路径 高延迟档注入延迟", inj >= 800 * 0.6,
+    rec("代理路径 高延迟档注入延迟", inj >= 800 * 0.6,
         "往返 %d ms，注入 %d ms（设定 800）" % (t, inj))
 
     # ---- 限速：4g 20000 kbps ----
@@ -209,16 +206,16 @@ def main():
     # 桶上限 = rate = kbps*128 字节/秒，4g 档即 2.56MB；2MB 样本能整个塞进
     # 空闲时已攒满的桶里瞬间放行（实测 290ms 收完 2MB ≈ 57Mbps 假象）。
     set_scene("4g")
-    b, t = probe("10.8.0.2", 8888, 8 * 1024 * 1024)
+    b, t = probe("127.0.0.1", 8888, 8 * 1024 * 1024)
     kbps = b * 8 / 1024 / (t / 1000.0) if t else 0
-    rec("tun 路径 4g 20000kbps 限速", b >= 8 * 1024 * 1024 and 0.5 * 20000 <= kbps <= 1.35 * 20000,
+    rec("代理路径 4g 20000kbps 限速", b >= 8 * 1024 * 1024 and 0.5 * 20000 <= kbps <= 1.35 * 20000,
         "%.0f kbps（设定 20000）%d B / %d ms" % (kbps, b, t))
 
     # ---- 限速：拥塞 512 kbps（大样本避开桶突发）----
     set_scene("congestion")
-    b, t = probe("10.8.0.2", 8888, 512 * 1024)
+    b, t = probe("127.0.0.1", 8888, 512 * 1024)
     kbps = b * 8 / 1024 / (t / 1000.0) if t else 0
-    rec("tun 路径 拥塞 512kbps 限速", b >= 512 * 1024 and 0.5 * 512 <= kbps <= 1.5 * 512,
+    rec("代理路径 拥塞 512kbps 限速", b >= 512 * 1024 and 0.5 * 512 <= kbps <= 1.5 * 512,
         "%.0f kbps（设定 512）%d B / %d ms" % (kbps, b, t))
 
     # ---- 上行限速：256 kbps（512KB POST，理论 ~16s）----
@@ -226,19 +223,19 @@ def main():
     api("/api/profile", {"name": "tun上行256", "up_kbps": 256})
     api("/api/run", {"enable": True})
     time.sleep(0.5)
-    up = sh("sh %s 10.8.0.2 8888 524288" % PHONE_UP, t=220)
+    up = sh("sh %s 127.0.0.1 8888 524288" % PHONE_UP, t=220)
     parts = up.split()
     if len(parts) >= 3 and parts[0] == "UP":
         got, ms = int(parts[1]), int(parts[2])
         kbps = 524288 * 8 / 1024 / (ms / 1000.0) if ms else 0
-        rec("tun 路径 上行限速 256kbps", got > 0 and 0.5 * 256 <= kbps <= 1.6 * 256,
+        rec("代理路径 上行限速 256kbps", got > 0 and 0.5 * 256 <= kbps <= 1.6 * 256,
             "%.0f kbps（设定 256）512KB / %d ms" % (kbps, ms))
     else:
-        rec("tun 路径 上行限速 256kbps", False, "探针输出异常：%r" % up[:80])
+        rec("代理路径 上行限速 256kbps", False, "探针输出异常：%r" % up[:80])
 
     # ---- 会话记账：tun 路径确实建了 TcpSession ----
     s = (api("/api/status").get("stats") or {})
-    rec("tun 路径产生连接记账", (s.get("total", 0) or 0) > 0,
+    rec("代理路径产生连接记账", (s.get("total", 0) or 0) > 0,
         "total=%s active=%s up=%s down=%s"
         % (s.get("total"), s.get("active"), s.get("up"), s.get("down")))
 
@@ -247,7 +244,7 @@ def main():
     r = {}
 
     def worker():
-        r["x"] = probe("10.8.0.2", 8888, 4 * 1024 * 1024)
+        r["x"] = probe("127.0.0.1", 8888, 4 * 1024 * 1024)
 
     th = threading.Thread(target=worker)
     th.start()
@@ -257,22 +254,22 @@ def main():
     th.join(timeout=180)
     sw = time.time() - t0
     b, t = r.get("x", (None, None))
-    rec("tun 路径 限速中切直连立即放行", b >= 4 * 1024 * 1024 and sw < 8.0,
+    rec("代理路径 限速中切直连立即放行", b >= 4 * 1024 * 1024 and sw < 8.0,
         "切换后 %.2fs 收完 4MB（512kbps 下需 ~64s）bytes=%s" % (sw, b))
 
     # ---- 停止限速 ----
     set_scene("congestion")
     api("/api/run", {"enable": False})
-    b, t = probe("10.8.0.2", 8888, 1024 * 1024)
-    rec("tun 路径 停止后恢复直连", b >= 1024 * 1024 and t < 4000,
+    b, t = probe("127.0.0.1", 8888, 1024 * 1024)
+    rec("代理路径 停止后恢复直连", b >= 1024 * 1024 and t < 4000,
         "1MB 耗时 %s ms" % t)
 
     # ---- 完全断网：airplane 档应连不上 ----
     # reject_pct=100 的语义是「立即拒连」：代理拒绝建上游连接，回 502 后关闭。
     # 客户端拿不到任何正常内容即为生效，不能要求字节数为 0（502 响应头本身就有 66B）。
     set_scene("airplane")
-    b, t = probe("10.8.0.2", 8888, 0)
-    rec("tun 路径 完全断网档拒连", not b or b < 200,
+    b, t = probe("127.0.0.1", 8888, 0)
+    rec("代理路径 完全断网档拒连", not b or b < 200,
         "bytes=%s（502 拒连响应 66B / 无响应 0B 均算生效）" % b)
     api("/api/run", {"enable": False})
 
@@ -281,7 +278,7 @@ def main():
     except Exception:
         pass
     bad = [x for x in RESULTS if not x[1]]
-    print("\n===== 真机 tun 数据面：%d/%d 通过 ====="
+    print("\n===== 真机代理路径 E2E：%d/%d 通过 ====="
           % (len(RESULTS) - len(bad), len(RESULTS)))
     for n, _o, d in bad:
         print("FAILED: %s | %s" % (n, d))

@@ -47,6 +47,8 @@ public class WeakNet {
     public final AtomicInteger connActive = new AtomicInteger();
     public final AtomicLong bytesUp = new AtomicLong();
     public final AtomicLong bytesDown = new AtomicLong();
+    /** UDP 延迟队列满导致丢弃的包数：供事件日志观察，不参与 /api 契约 */
+    public final AtomicLong udpDropped = new AtomicLong();
 
     public final List<String[]> events = Collections.synchronizedList(new ArrayList<String[]>());
     public final Set<Object> active = Collections.synchronizedSet(new HashSet<Object>());

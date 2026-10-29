@@ -13,10 +13,15 @@ import java.util.List;
 
 /** 弱网代理服务器：CONNECT 隧道 + 普通 HTTP 转发，注入延迟/抖动/限速/丢包/断连/故障 */
 public class ProxyServer implements Runnable {
+    /** 头部阶段最多等 30s：空闲连接不能一直占着线程 */
+    private static final int HEAD_TIMEOUT_MS = 30000;
+
     private ServerSocket server;
     private volatile String host;
     private final int port;
     private volatile boolean stopped = false;
+    /** 绑定非回环地址时要求 Proxy-Authorization；回环上不需要（别的机器也连不进来） */
+    private volatile String token = "";
 
     public ProxyServer(String host, int port) throws IOException {
         this.host = host;
@@ -25,9 +30,31 @@ public class ProxyServer implements Runnable {
     }
 
     private void open() throws IOException {
+        if (!loopback(host) && token.length() == 0) token = newToken();
         server = new ServerSocket();
         server.setReuseAddress(true);
         server.bind(new InetSocketAddress(host, port));
+    }
+
+    static boolean loopback(String h) {
+        return h == null || "localhost".equals(h) || "::1".equals(h)
+                || h.startsWith("127.");
+    }
+
+    static String newToken() {
+        String chars = "abcdefghijkmnpqrstuvwxyz23456789";
+        java.security.SecureRandom r = new java.security.SecureRandom();
+        StringBuilder sb = new StringBuilder(8);
+        for (int i = 0; i < 8; i++) sb.append(chars.charAt(r.nextInt(chars.length())));
+        return sb.toString();
+    }
+
+    public String token() {
+        return token;
+    }
+
+    public void setToken(String t) {
+        token = t == null ? "" : t;
     }
 
     public String host() {
@@ -51,6 +78,8 @@ public class ProxyServer implements Runnable {
         stop();
         stopped = false;
         host = newHost;
+        // 换绑时同步换 token：回环不需要，局域网模式必须有一个，否则等于开放代理
+        token = loopback(newHost) ? "" : newToken();
         open();
     }
 
@@ -67,6 +96,35 @@ public class ProxyServer implements Runnable {
         }
     }
 
+    private static String reason(int code) {
+        switch (code) {
+            case 400: return "Bad Request";
+            case 407: return "Proxy Authentication Required";
+            case 408: return "Request Timeout";
+            case 413: return "Payload Too Large";
+            case 431: return "Request Header Fields Too Large";
+            default: return "Bad Request";
+        }
+    }
+
+    /** Proxy-Authorization: 认 raw token、Basic token、Basic base64(user:token) 三种写法 */
+    static boolean authorized(String value, String token) {
+        if (value == null || token.length() == 0) return false;
+        String v = value.trim();
+        if (v.equals(token)) return true;
+        if (!v.regionMatches(true, 0, "Basic ", 0, 6)) return false;
+        String raw = v.substring(6).trim();
+        if (raw.equals(token)) return true;
+        try {
+            String dec = new String(android.util.Base64.decode(raw, android.util.Base64.NO_WRAP), "UTF-8");
+            if (dec.equals(token)) return true;
+            int c = dec.indexOf(':');
+            return c >= 0 && dec.substring(c + 1).equals(token);
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
     class Conn implements Runnable {
         private final Socket client;
 
@@ -79,6 +137,7 @@ public class ProxyServer implements Runnable {
             WeakNet.I.connActive.incrementAndGet();
             ConnCtx ctx = new ConnCtx(client);
             try {
+                client.setSoTimeout(HEAD_TIMEOUT_MS);
                 handle(ctx);
             } catch (Exception e) {
                 // 连接异常，忽略
@@ -95,19 +154,33 @@ public class ProxyServer implements Runnable {
                 return;
             }
             BufferedInputStream in = new BufferedInputStream(client.getInputStream());
-            String line = Util.readLine(in);
-            if (line == null) return;
-            String[] parts = line.split(" ");
-            if (parts.length < 2) return;
-            String method = parts[0].toUpperCase();
-            String target = parts[1];
-
-            List<String> headers = new ArrayList<String>();
-            while (true) {
-                String h = Util.readLine(in);
-                if (h == null || h.length() == 0) break;
-                headers.add(h);
+            HttpIn.Req req;
+            try {
+                req = HttpIn.readHead(in);
+            } catch (HttpIn.Bad bad) {
+                Util.writeAscii(client, "HTTP/1.1 " + bad.code + " " + reason(bad.code)
+                        + "\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+                WeakNet.I.log("error", "代理请求头被拒（" + bad.getMessage() + "）");
+                return;
+            } catch (java.net.SocketTimeoutException e) {
+                Util.writeAscii(client, "HTTP/1.1 408 Request Timeout\r\nContent-Length: 0\r\n"
+                        + "Connection: close\r\n\r\n");
+                return;
             }
+            if (req == null) return;
+            if (!loopback(host) && token.length() > 0
+                    && !authorized(req.header("proxy-authorization"), token)) {
+                Util.writeAscii(client, "HTTP/1.1 407 Proxy Authentication Required\r\n"
+                        + "Proxy-Authenticate: Basic realm=\"WeakNet\"\r\n"
+                        + "Content-Length: 0\r\nConnection: close\r\n\r\n");
+                WeakNet.I.log("reject", "局域网代理拒绝未授权请求");
+                return;
+            }
+            // 头部读完，后面是长连接/隧道：清掉超时，交给空闲回收
+            client.setSoTimeout(0);
+            String method = req.method;
+            String target = req.path;
+            List<String> headers = req.head.subList(1, req.head.size());
 
             Profile p = WeakNet.I.profile;
 

@@ -780,21 +780,7 @@ public class MainPanels {
      * 包可见而不是 private：_ParamNotesTest 要拿它跟 {@link Profile#noteOfParam}
      * 做一致性校验（每个参数行都必须有对应的注释，否则「！」点开是空白）。
      */
-    static final String[][] FIELDS = {
-            {"down_kbps", "下行带宽 (kbps)", "0"},
-            {"up_kbps", "上行带宽 (kbps)", "0"},
-            {"latency_up_ms", "上行延迟 (ms)", "0"},
-            {"latency_down_ms", "下行延迟 (ms)", "0"},
-            {"jitter_ms", "抖动 (ms)", "0"},
-            {"loss_pct", "丢包 (%)", "0"},
-            {"disconnect_pct", "随机断连 (%)", "0"},
-            {"timeout_pct", "黑洞：无响应 (%)", "0"},
-            {"dns_fail_pct", "DNS 故障 (%)", "0"},
-            {"reject_pct", "拒连 (%)", "0"},
-            {"stall_ms", "卡顿时长 (ms)", "600"},
-            {"flap_sec", "网络切换周期 (s，0=关)", "0"},
-            {"flap_blackout_sec", "切换黑窗时长 (s)", "2"},
-    };
+    static final String[][] FIELDS = SpecGen.fields();
 
     /** @param id 要编辑的自定义场景 id；null = 新建 */
     void openEditor(String id) {

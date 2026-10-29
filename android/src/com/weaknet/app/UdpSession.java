@@ -88,7 +88,7 @@ public class UdpSession {
                 final InetAddress addr = remoteAddr;
                 final byte[] data = payload;
                 final int len = payloadLen;
-                delay.tryPost(DelayLine.delayMs(true), new Runnable() {
+                if (!delay.tryPost(DelayLine.delayMs(true), new Runnable() {
                     public void run() {
                         try {
                             ds.send(new DatagramPacket(data, len, addr, remotePort));
@@ -96,7 +96,7 @@ public class UdpSession {
                             // ignore
                         }
                     }
-                }, len);
+                }, len)) noteDrop();
             }
         } catch (Exception e) {
             // ignore
@@ -115,12 +115,12 @@ public class UdpSession {
                         lastActive = System.currentTimeMillis();
                         byte[] data = new byte[dp.getLength()];
                         System.arraycopy(dp.getData(), dp.getOffset(), data, 0, dp.getLength());
-                        delay.tryPost(DelayLine.delayMs(false), new Runnable() {
+                        if (!delay.tryPost(DelayLine.delayMs(false), new Runnable() {
                             public void run() {
                                 vpn.write(IpUtil.buildUdp(remoteIpB, remotePort,
                                         clientIpB, clientPort, data, data.length));
                             }
-                        }, data.length);
+                        }, data.length)) noteDrop();
                     } catch (Exception e) {
                         if (System.currentTimeMillis() - lastActive > 60000) break;
                     }
@@ -130,6 +130,14 @@ public class UdpSession {
         }, "udp-recv");
         t.setDaemon(true);
         t.start();
+    }
+
+    /** 队列满丢包：计总并做指数退避提示（第 1/2/4/8… 次各记一条），避免刷屏 */
+    private void noteDrop() {
+        long n = WeakNet.I.udpDropped.incrementAndGet();
+        if ((n & (n - 1)) == 0) {
+            WeakNet.I.log("loss", "UDP 队列已满，累计丢弃 " + n + " 个包");
+        }
     }
 
     void close() {

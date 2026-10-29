@@ -34,8 +34,9 @@ import urllib.request
 CTRL = "http://127.0.0.1:8899"
 PROXY = ("127.0.0.1", 8888)
 SRV = ("192.168.1.49", 9126)
-SUB_PORTS = (8889, 8900)
-LOG = os.path.join(HERE, "weaknet", "weaknet.log")
+SUB_PORTS = (8889, 8905)   # 避开主引擎的共享服务端口 8900/8901
+LOG = os.environ.get("WN_LOG_PATH") or os.path.join(ROOT, "weaknet.log")
+SUB_LOG = os.path.join(HERE, "weaknet_sub.log")
 RESULTS = []
 
 
@@ -88,13 +89,19 @@ def tunnel(port, timeout=30):
 
 
 def download(nbytes, timeout=180, port=8888):
-    s = tunnel(port, timeout)
     t0 = time.time()
+    try:
+        s = tunnel(port, timeout)
+    except OSError:
+        return 0, max(time.time() - t0, 1e-6)   # 断连档可能在 CONNECT 阶段就被掐断
     got = 0
     try:
         s.sendall(("DOWN %d\n" % nbytes).encode())
         while got < nbytes:
-            d = s.recv(min(65536, nbytes - got))
+            try:
+                d = s.recv(min(65536, nbytes - got))
+            except OSError:
+                break                            # disconnect_pct 主动断流，按已收字节计
             if not d:
                 break
             got += len(d)
@@ -147,8 +154,14 @@ def b1():
             # 丢包/断连档的瓶颈是 TCP 重传或连接被主动掐断，不是限速器
             # （Mathis: 30% 丢包理论上限 ~85kbps；disconnect_pct 本来就会截断传输）。
             # 这里只验「有数据在流动」，带宽与完整性都不作为通过条件。
+            tries = 1
+            while got == 0 and tries < 3:
+                got, el = download(size)
+                got_kbps = got * 8 / 1024 / el
+                ratio = got_kbps / kbps
+                tries += 1
             ok = got > 0
-            note = "丢包 %d%% / 断连 %d%%，不判定带宽与完整性" % (loss, disc)
+            note = "丢包 %d%% / 断连 %d%%，不判定带宽与完整性（尝试 %d 次）" % (loss, disc, tries)
         else:
             ok = (got == size) and 0.80 <= ratio <= 1.25
             note = "" if ok else "超出 0.80~1.25x 稳态区间或数据不完整"
@@ -259,10 +272,14 @@ def b5():
 # ---------------------------------------------------------------- B6/B7 子引擎
 class SubEngine:
     def __enter__(self):
+        env = dict(os.environ)
+        env["WN_IDLE_SEC"] = "3"
+        env["WN_REAP_SEC"] = "1"
+        env["WN_LOG"] = SUB_LOG
         self.p = subprocess.Popen(
             [sys.executable, os.path.join(HERE, "_eng_sub.py"),
              "--proxy-port", str(SUB_PORTS[0]), "--ctrl-port", str(SUB_PORTS[1])],
-            cwd=os.path.join(HERE, "weaknet"),
+            cwd=ROOT, env=env,
             creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         for _ in range(60):
@@ -274,11 +291,14 @@ class SubEngine:
 
     def __exit__(self, *a):
         try:
-            self.p.send_signal(getattr(__import__("signal"), "SIGBREAK", 15))
+            # Windows 只有 CTRL_BREAK_EVENT 能被 send_signal 接受（SIGBREAK=21 会 ValueError）
+            sig = getattr(__import__("signal"), "CTRL_BREAK_EVENT", 15)
+            self.p.send_signal(sig)
             self.p.wait(timeout=8)
         except Exception:
             try:
                 self.p.kill()
+                self.p.wait(timeout=5)
             except Exception:
                 pass
 
@@ -349,30 +369,28 @@ def b6():
 
 def b7():
     pp, cp = SUB_PORTS
-    before = os.path.getsize(LOG) if os.path.exists(LOG) else 0
+    try:
+        os.remove(SUB_LOG)
+    except OSError:
+        pass
     with SubEngine():
         api(cp, "/api/preset", {"key": "satellite"})   # 触发 log_event
         time.sleep(0.3)                                # < flush loop 的 2s，事件还在缓冲里
         api(cp, "/api/run", {"enable": True})
         time.sleep(0.3)
     time.sleep(0.5)
-    grew = False
-    try:
-        with open(LOG, "rb") as f:
-            f.seek(max(0, before - 8192))
-            grew = len(f.read()) > 0 and os.path.getsize(LOG) != before
-    except Exception:
-        pass
-    # atexit 落盘的判据：退出后文件里能读到子引擎这次运行时产生的事件
+    # atexit 落盘的判据：子引擎退出后，它自己的日志里能读到这次运行产生的事件
     ok = False
+    size = 0
     try:
-        with open(LOG, "rb") as f:
+        size = os.path.getsize(SUB_LOG)
+        with open(SUB_LOG, "rb") as f:
             txt = f.read().decode("utf-8", "ignore")
-        ok = ("切换场景" in txt or "开启限速" in txt or "停止限速" in txt)
+        ok = size > 0 and ("切换场景" in txt or "开启限速" in txt or "停止限速" in txt)
     except Exception:
         pass
     rec("B7 atexit 把缓冲日志落盘", ok,
-        "退出后 weaknet.log 可见本次事件（size 变化=%s）" % grew)
+        "退出后 weaknet_sub.log 可见本次事件（size=%d）" % size)
 
 
 def main():

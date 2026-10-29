@@ -365,9 +365,11 @@ public class VpnNetService extends VpnService {
         dlog("readLoop: EXIT running=" + running);
     }
 
-    private TcpSession tcpFastGet(int idx) {
+    /** 快路径查表：一次进入监视器，命中且 IP 对得上才返回（miss 才走慢路径） */
+    private TcpSession tcpFastGet(int idx, byte[] pkt) {
         synchronized (tcpFast) {
-            return tcpFast[idx];
+            TcpSession s = tcpFast[idx];
+            return (s != null && s.sameFlow(pkt)) ? s : null;
         }
     }
 
@@ -404,7 +406,7 @@ public class VpnNetService extends VpnService {
             int frag = IpUtil.u16(pkt, 6);
             if ((frag & 0x1FFF) != 0) { dlog("hp: frag=0x" + Integer.toHexString(frag)); return; }     // 分片包：丢弃
             int proto = pkt[9] & 0xFF;
-            dlog("hp: len=" + len + " totalLen=" + totalLen + " proto=" + proto);
+            if (DIAG) dlog("hp: len=" + len + " totalLen=" + totalLen + " proto=" + proto);
 
             if (proto == 6) {
                 int off = ihl;
@@ -418,7 +420,7 @@ public class VpnNetService extends VpnService {
                 int flags = pkt[off + 13] & 0x3F;
                 int window = IpUtil.u16(pkt, off + 14);
                 int payloadLen = totalLen - ihl - dataOff;
-                dlog("hp: TCP " + IpUtil.ipToString(pkt, 12) + ":" + srcPort + ">"
+                if (DIAG) dlog("hp: TCP " + IpUtil.ipToString(pkt, 12) + ":" + srcPort + ">"
                         + IpUtil.ipToString(pkt, 16) + ":" + dstPort
                         + " flags=0x" + Integer.toHexString(flags) + " payloadLen=" + payloadLen);
                 byte[] payload = null;
@@ -431,8 +433,8 @@ public class VpnNetService extends VpnService {
                 // 快路径：端口对直接映射，命中且 IP 核对得上就零分配拿到会话；
                 // 只有未命中才走「IP 字符串化 + 拼 key + 查 map」的慢路径
                 int idx = PortIdx.of(srcPort, dstPort);
-                TcpSession s = tcpFastGet(idx);
-                if (s == null || !s.sameFlow(pkt)) {
+                TcpSession s = tcpFastGet(idx, pkt);
+                if (s == null) {
                     String src = IpUtil.ipToString(pkt, 12);
                     String dst = IpUtil.ipToString(pkt, 16);
                     String key = src + ":" + srcPort + ">" + dst + ":" + dstPort;
@@ -469,7 +471,7 @@ public class VpnNetService extends VpnService {
                         });
                     } else {
                         // 未知会话：回 RST
-                        dlog("hp: RST unknown " + IpUtil.ipToString(pkt, 12) + ":" + srcPort + ">"
+                        if (DIAG) dlog("hp: RST unknown " + IpUtil.ipToString(pkt, 12) + ":" + srcPort + ">"
                                 + IpUtil.ipToString(pkt, 16) + ":" + dstPort
                                 + " flags=0x" + Integer.toHexString(flags));
                         String src = IpUtil.ipToString(pkt, 12);

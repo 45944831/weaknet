@@ -1,0 +1,442 @@
+{
+  "version": 1,
+  "presets": [
+    {
+      "key": "direct",
+      "name": "直连（不限制）",
+      "short": "直连",
+      "cat": "常规网络",
+      "params": {}
+    },
+    {
+      "key": "wifi",
+      "name": "Wi-Fi 良好",
+      "short": "Wi-Fi 良好",
+      "cat": "常规网络",
+      "params": {
+        "latency_up_ms": 10,
+        "latency_down_ms": 30,
+        "jitter_ms": 5,
+        "down_kbps": 50000,
+        "up_kbps": 20000
+      }
+    },
+    {
+      "key": "4g",
+      "name": "4G LTE",
+      "short": "4G LTE",
+      "cat": "常规网络",
+      "params": {
+        "latency_up_ms": 40,
+        "latency_down_ms": 60,
+        "jitter_ms": 15,
+        "down_kbps": 20000,
+        "up_kbps": 10000
+      }
+    },
+    {
+      "key": "4g_weak",
+      "name": "4G 弱网（边缘/室内）",
+      "short": "4G 弱网",
+      "cat": "弱网环境",
+      "params": {
+        "latency_up_ms": 70,
+        "latency_down_ms": 110,
+        "jitter_ms": 45,
+        "down_kbps": 3000,
+        "up_kbps": 800,
+        "loss_pct": 4,
+        "disconnect_pct": 1,
+        "stall_ms": 1200
+      }
+    },
+    {
+      "key": "5g",
+      "name": "5G（良好覆盖）",
+      "short": "5G 良好",
+      "cat": "常规网络",
+      "params": {
+        "latency_up_ms": 12,
+        "latency_down_ms": 20,
+        "jitter_ms": 8,
+        "down_kbps": 100000,
+        "up_kbps": 40000
+      }
+    },
+    {
+      "key": "5g_weak",
+      "name": "5G 弱覆盖（室内/边缘）",
+      "short": "5G 弱覆盖",
+      "cat": "弱网环境",
+      "params": {
+        "latency_up_ms": 50,
+        "latency_down_ms": 80,
+        "jitter_ms": 35,
+        "down_kbps": 6000,
+        "up_kbps": 1500,
+        "loss_pct": 2,
+        "disconnect_pct": 1,
+        "stall_ms": 1000
+      }
+    },
+    {
+      "key": "wifi_weak",
+      "name": "弱 Wi-Fi（隔墙/远端）",
+      "short": "弱 Wi-Fi",
+      "cat": "弱网环境",
+      "params": {
+        "latency_up_ms": 60,
+        "latency_down_ms": 120,
+        "jitter_ms": 60,
+        "down_kbps": 5000,
+        "up_kbps": 2000,
+        "loss_pct": 3
+      }
+    },
+    {
+      "key": "congestion",
+      "name": "网络拥塞",
+      "short": "网络拥塞",
+      "cat": "弱网环境",
+      "params": {
+        "latency_up_ms": 200,
+        "latency_down_ms": 400,
+        "jitter_ms": 100,
+        "down_kbps": 512,
+        "up_kbps": 256,
+        "loss_pct": 5
+      }
+    },
+    {
+      "key": "satellite",
+      "name": "卫星链路（高延迟）",
+      "short": "卫星链路",
+      "cat": "弱网环境",
+      "params": {
+        "latency_up_ms": 700,
+        "latency_down_ms": 700,
+        "jitter_ms": 80,
+        "down_kbps": 2000,
+        "up_kbps": 512
+      }
+    },
+    {
+      "key": "high_loss",
+      "name": "高丢包（30% 丢包）",
+      "short": "高丢包",
+      "cat": "弱网环境",
+      "params": {
+        "latency_up_ms": 100,
+        "latency_down_ms": 150,
+        "jitter_ms": 80,
+        "down_kbps": 8000,
+        "up_kbps": 3000,
+        "loss_pct": 30,
+        "stall_ms": 800
+      }
+    },
+    {
+      "key": "high_latency",
+      "name": "高延迟（RTT 800ms）",
+      "short": "高延迟",
+      "cat": "弱网环境",
+      "params": {
+        "latency_up_ms": 400,
+        "latency_down_ms": 400,
+        "jitter_ms": 60,
+        "down_kbps": 10000,
+        "up_kbps": 5000
+      }
+    },
+    {
+      "key": "highspeed_rail",
+      "name": "高铁 / 地铁（高速移动）",
+      "short": "高铁/地铁",
+      "cat": "极端环境",
+      "params": {
+        "latency_up_ms": 60,
+        "latency_down_ms": 100,
+        "jitter_ms": 150,
+        "down_kbps": 1500,
+        "up_kbps": 512,
+        "loss_pct": 8,
+        "disconnect_pct": 2,
+        "stall_ms": 1200
+      }
+    },
+    {
+      "key": "elevator",
+      "name": "电梯 / 地下室（信号极差）",
+      "short": "电梯/地下室",
+      "cat": "极端环境",
+      "params": {
+        "latency_up_ms": 500,
+        "latency_down_ms": 800,
+        "jitter_ms": 300,
+        "down_kbps": 256,
+        "up_kbps": 128,
+        "loss_pct": 20,
+        "disconnect_pct": 10,
+        "stall_ms": 2000
+      }
+    },
+    {
+      "key": "flapping",
+      "name": "频繁断连（网络切换）",
+      "short": "频繁断连",
+      "cat": "极端环境",
+      "params": {
+        "latency_up_ms": 80,
+        "latency_down_ms": 120,
+        "jitter_ms": 50,
+        "down_kbps": 8000,
+        "up_kbps": 4000,
+        "disconnect_pct": 5,
+        "flap_sec": 8,
+        "flap_blackout_sec": 3
+      }
+    },
+    {
+      "key": "blackhole",
+      "name": "黑洞（请求无响应）",
+      "short": "黑洞（无响应）",
+      "cat": "极端环境",
+      "params": {
+        "timeout_pct": 100
+      }
+    },
+    {
+      "key": "dns_fail",
+      "name": "DNS 故障（无法解析域名）",
+      "short": "DNS 故障",
+      "cat": "极端环境",
+      "params": {
+        "dns_fail_pct": 100
+      }
+    },
+    {
+      "key": "airplane",
+      "name": "完全断网（立即拒连）",
+      "short": "完全断网",
+      "cat": "极端环境",
+      "params": {
+        "reject_pct": 100
+      }
+    }
+  ],
+  "params": [
+    {
+      "key": "latency_down_ms",
+      "label": "下行延迟",
+      "unit": "ms",
+      "type": "int",
+      "min": 0,
+      "max": 10000,
+      "default": 0,
+      "step": 1
+    },
+    {
+      "key": "latency_up_ms",
+      "label": "上行延迟",
+      "unit": "ms",
+      "type": "int",
+      "min": 0,
+      "max": 10000,
+      "default": 0,
+      "step": 1
+    },
+    {
+      "key": "jitter_ms",
+      "label": "抖动 ±",
+      "unit": "ms",
+      "type": "int",
+      "min": 0,
+      "max": 5000,
+      "default": 0,
+      "step": 1
+    },
+    {
+      "key": "down_kbps",
+      "label": "下行带宽",
+      "unit": "kbps",
+      "type": "int",
+      "min": 0,
+      "max": 1000000,
+      "default": 0,
+      "step": 1
+    },
+    {
+      "key": "up_kbps",
+      "label": "上行带宽",
+      "unit": "kbps",
+      "type": "int",
+      "min": 0,
+      "max": 1000000,
+      "default": 0,
+      "step": 1
+    },
+    {
+      "key": "loss_pct",
+      "label": "丢包率",
+      "unit": "%",
+      "type": "float",
+      "min": 0,
+      "max": 100,
+      "default": 0.0,
+      "step": 0.1
+    },
+    {
+      "key": "stall_ms",
+      "label": "卡顿",
+      "unit": "ms",
+      "type": "int",
+      "min": 0,
+      "max": 60000,
+      "default": 600,
+      "step": 1
+    },
+    {
+      "key": "disconnect_pct",
+      "label": "断连率",
+      "unit": "%",
+      "type": "float",
+      "min": 0,
+      "max": 100,
+      "default": 0.0,
+      "step": 0.1
+    },
+    {
+      "key": "timeout_pct",
+      "label": "黑洞率",
+      "unit": "%",
+      "type": "float",
+      "min": 0,
+      "max": 100,
+      "default": 0.0,
+      "step": 0.1
+    },
+    {
+      "key": "dns_fail_pct",
+      "label": "DNS失败",
+      "unit": "%",
+      "type": "float",
+      "min": 0,
+      "max": 100,
+      "default": 0.0,
+      "step": 0.1
+    },
+    {
+      "key": "reject_pct",
+      "label": "拒连率",
+      "unit": "%",
+      "type": "float",
+      "min": 0,
+      "max": 100,
+      "default": 0.0,
+      "step": 0.1
+    },
+    {
+      "key": "flap_sec",
+      "label": "断网间隔",
+      "unit": "秒",
+      "type": "int",
+      "min": 0,
+      "max": 3600,
+      "default": 0,
+      "step": 1
+    },
+    {
+      "key": "flap_blackout_sec",
+      "label": "断网时长",
+      "unit": "秒",
+      "type": "int",
+      "min": 0,
+      "max": 600,
+      "default": 2,
+      "step": 1
+    }
+  ],
+  "notes": {
+    "direct": "不做任何处理，流量原样直通。用来确认「接管本身没问题」，也是跟其它场景对比的基线。",
+    "wifi": "家用 / 办公 Wi-Fi 的典型值：延迟几十毫秒、带宽几十 Mbps。功能验证和性能对比的基准环境。",
+    "4g": "移动网络常规体验：RTT 40~60ms、下行 20Mbps。模拟户外 / 地铁里信号正常的 4G。",
+    "5g": "空口延迟比 4G 低一个量级（RTT 10~20ms），下行 100Mbps。能触发「秒开」级体验，也够跑满多数 App 的预加载。",
+    "4g_weak": "地下车库 / 城中村 / 演唱会现场这类「有 4G 图标但速率塌了」的现场。速率比 5G 弱覆盖再低一档，丢包与偶发断流更明显 —— 4G 的重传比 5G 慢。",
+    "5g_weak": "室内深处 / 小区边缘 / 地铁口：还能驻留，但速率塌到几 Mbps，伴随少量丢包与偶发断流。比弱 Wi-Fi 更容易出现「看着有信号、实际传不动」。",
+    "wifi_weak": "隔墙 / 离路由器远：信号还在，但速率与稳定性一起掉，抖动明显（±60ms）。适合复现「Wi-Fi 满格却一直转圈」。",
+    "congestion": "晚高峰 / 多人共享带宽：延迟翻倍、下行被压到 512kbps。复现「点一下要转半天圈」。",
+    "satellite": "单程 700ms（一次往返约 1.4 秒）、带宽 2Mbps。典型表现是「每个请求都要等好几秒才回来」，用来验证加载态、超时与重试。",
+    "high_loss": "带宽看着够（能起连、能握手），但每三个包丢一个。典型症状：视频卡成 PPT、图片加载一半、长连接反复重试。",
+    "high_latency": "带宽正常、也不丢包，纯粹往返慢（跨境链路、卫星回传、代理中转）。复现的是「慢但有结果」，不是「传不动」。",
+    "highspeed_rail": "高速移动下频繁切换基站：抖动极大（±150ms）、偶发断流、带宽低。适合验证重连与断点续传。",
+    "elevator": "信号极差：延迟接近秒级、20% 丢包、10% 断连，常伴超时。最容易触发「请求卡死」的一档。",
+    "flapping": "每 8 秒断网 3 秒，模拟网络反复切换 / 弱信号掉线。专门用来验证重连、重试与断线提示逻辑。",
+    "blackhole": "请求发出去没有任何响应，连接挂住不返回 —— 不是报错，是一直等。用来验证超时、取消与兜底 UI。",
+    "dns_fail": "域名解析全部失败，但直接用 IP 的连接仍然通 —— 只拦 DNS 查询，不拦已建立的数据通道。",
+    "airplane": "所有新连接立即被拒绝（是立刻失败，不是挂住）。模拟飞行模式 / 完全无网络，验证快速失败与降级路径。"
+  },
+  "param_notes": {
+    "latency_down_ms": "给「服务器 → 本机」方向每块数据加的固定延迟，用来拉长响应回来的时间。\n每块数据都会加，不是只在建连时加一次 —— 否则 keep-alive / WebSocket 这类长连接里只有第一个请求慢，后面的全是零延迟。一次往返 ≈ 上行延迟 + 下行延迟。",
+    "latency_up_ms": "给「本机 → 服务器」方向加的固定延迟，影响请求发出去要多久才到服务器。\n「点了按钮迟迟不发请求」看这项，「请求回来了但界面不刷新」看下行延迟。一次往返 ≈ 上行 + 下行，所以两项都填 400 时 RTT 是 800ms。",
+    "jitter_ms": "每个数据块的延迟在基础值上随机浮动 ±N 毫秒，让延迟忽快忽慢。\n实际延迟 = 基础延迟 + (-N ~ +N) 的随机值；抖动幅度不会超过基础延迟（否则会算出负延迟，变成比直连还快的「零延迟包」），超出时按基础延迟封顶。抖动主要影响实时音视频、游戏、VoIP；纯下载几乎感觉不到。",
+    "down_kbps": "下行总带宽上限，单位 kbps（1 Mbps = 1000 kbps，1000 kbps ≈ 125 KB/s）。0 = 不限。\n注意是全局共享的一份带宽：同时开 5 条连接是 5 条一起分摊，不是每条各拿一份。",
+    "up_kbps": "上行总带宽上限（本机 → 服务器），单位 kbps。0 = 不限。\n上传大文件、发图片、提交大请求体时先卡在这里；只测「页面加载慢」时通常不用改它。",
+    "loss_pct": "每块数据按这个概率「丢掉」，表现不是报错，而是一段停顿（模拟 TCP 等重传）。\n停多久由下面的「卡顿时长」决定，丢包率本身不决定停多久。填 100 会表现为完全传不动。",
+    "stall_ms": "每次「丢包」命中后停顿多久，实际会在 0.5~1.5 倍之间随机。\n只在丢包率 > 0 时生效 —— 丢包率为 0 时这项填什么都不影响结果。默认 600。",
+    "disconnect_pct": "每块数据按概率直接掐断整条连接（两侧 RST/FIN），App 看到的是「连接被重置」。\n和丢包的区别：丢包是慢，断连是断，必须重连才能继续。只影响已建立的连接；能不能建连由「拒连率」管。",
+    "timeout_pct": "新连接按概率「发出去没有回应」，先挂住不返回，过一会儿才继续处理。\n最容易触发「请求卡死、转圈不停」。和「拒连率」的区别：这个是挂住等，那个是立刻失败。",
+    "dns_fail_pct": "按概率让域名解析失败（返回 502 DNS resolution failed）。\n只拦「需要解析域名」的连接：用 IP 直连的（HTTPDNS、写死 IP 的 App）不受影响 —— 所以填 100% 也可能看到部分请求正常。",
+    "reject_pct": "新连接按概率立刻被拒绝（直接返回 502），是「马上失败」而不是挂住。\n模拟飞行模式 / 完全没网，用来验证 App 的快速失败与降级路径。",
+    "flap_sec": "每隔 N 秒把当前所有连接全部掐断，持续「断网时长」后恢复。0 = 关闭。\n这是周期性的整体断网，跟「断连率」随机掐单条不是一回事；两项可以叠加。",
+    "flap_blackout_sec": "每次周期断网持续多久，到点自动恢复。\n只在「断网间隔」> 0 时生效，单独填没有作用。"
+  },
+  "combo": {
+    "max_steps": 5,
+    "max_minutes": 600,
+    "max_seconds": 59,
+    "intro": "弱网组合 = 把几支场景按时长排成一条链，选中后自动一段段播过去。\n· 顺序播放：一段跑完自动切下一段，中间不用你操作。\n· 可循环：末尾再回到第一段，一直循环下去（不勾就播完一遍停住）。\n· 最多 5 段：再多就不好在界面上按顺序核对了。\n· 组合里不能再套组合：段只能选预设或自定义场景。\n· 弱网没开着时点组合只「选中」，不会替你偷偷开始限速；开着才会立刻播。",
+    "examples": [
+      {
+        "name": "通勤路上",
+        "desc": "从有信号走进信号差的地方，再彻底没信号，最后恢复。",
+        "effect": "复现「地铁进隧道」这类真实链路：先正常加载，走到弱覆盖区开始卡，进隧道后请求挂住，出站后恢复。适合测弱网下的加载中状态与恢复逻辑。",
+        "steps": "5G 良好 30 秒 → 4G 弱网 1 分 → 完全断网 30 秒 → 5G 良好 30 秒"
+      },
+      {
+        "name": "抢购秒杀",
+        "desc": "平时流畅，一到高峰就抢不到，失败后快速重试。",
+        "effect": "高并发下服务端限流或网络拥塞的典型表现：请求变慢、部分直接失败。适合验证 App 的失败提示、重试与降级路径。",
+        "steps": "5G 良好 20 秒 → 弱 Wi-Fi 1 分 → 黑洞（无响应）15 秒 → 弱 Wi-Fi 1 分"
+      },
+      {
+        "name": "网络抖动",
+        "desc": "信号时好时坏，延迟忽大忽小。",
+        "effect": "模拟电梯、隧道口、拥挤场所的信号抖动。适合测实时音视频、语音通话、在线协作这类对延迟敏感的链路。",
+        "steps": "5G 良好 20 秒 → 弱 5G 20 秒 → 5G 良好 20 秒 → 弱 5G 20 秒（循环）"
+      },
+      {
+        "name": "定时断网",
+        "desc": "每隔一会儿断一次，过一会儿自己恢复。",
+        "effect": "模拟周期性网络中断（如基站切换、家庭路由重启）。适合验证长连接断了能不能自己重连、心跳与超时逻辑。",
+        "steps": "4G 良好 1 分 → 黑洞（无响应）20 秒（循环）"
+      },
+      {
+        "name": "加载渐变",
+        "desc": "从慢到快再到慢，模拟带宽被逐步放开。",
+        "effect": "测大文件 / 长列表的渐进加载表现：首屏慢、之后提速、快结束时又慢下来。适合验证进度条与分片下载逻辑。",
+        "steps": "极慢（100kbps）20 秒 → 4G 弱网 20 秒 → 5G 良好 20 秒 → 极慢（100kbps）20 秒"
+      }
+    ],
+    "tips": [
+      "组合播到一半可以随时切走或暂停：切换后原组合停在原地，不会偷偷继续改参数。",
+      "每一段都是完整的一支场景，段与段之间参数是整套替换的 —— 不会把上一段的丢包率带进下一段。",
+      "循环组合会一直播下去，测完记得切走或暂停，别忘了它在后台改着参数。"
+    ]
+  },
+  "share": {
+    "ver": 2,
+    "pin_len": 4,
+    "inbox_max": 20,
+    "max_shared_steps": 5
+  }
+}

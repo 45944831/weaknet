@@ -36,12 +36,28 @@ def dump_tree(retries=4):
     点它等于点空气。这类干扰要先清掉。
     """
     for _ in range(retries):
-        L.ensure_foreground()
+        # 组合编辑器 / 场景选择弹层是 Dialog：弹层显示期间焦点窗口可能瞬时读空，
+        # 这时再调 ensure_foreground() 会执行 am start —— 标准启动模式下等于又开一个
+        # MainActivity 实例，旧实例连同弹层一起被销毁（表现为「弹层自己关了」）。
+        # 所以只在窗口里确实看不到本 App 时才去拉前台。
+        vis = L.sh("dumpsys window windows | grep -c com.weaknet.app") or ""
+        try:
+            visible = int(vis.strip().splitlines()[-1]) > 0
+        except Exception:
+            visible = False
+        if not visible:
+            L.ensure_foreground()
         L.dismiss_overlays()
-        L.sh("uiautomator dump /sdcard/ui_z.xml")
+        dumped = L.sh("uiautomator dump /sdcard/ui_z.xml")
         time.sleep(0.6)
+        # dump 失败（控件树有动画/正忙）时不会覆盖旧文件，
+        # 直接 cat 会拿到上一次的树，点过去就点空。所以先看 dump 是否成功。
+        if "dumped to" not in (dumped or ""):
+            time.sleep(0.5)
+            continue
         out = L.sh("cat /sdcard/ui_z.xml")
-        if out and "node" in out:
+        if (out and "node" in out and 'package="com.weaknet.app"' in out
+                and out.count("<node") >= 6):
             nodes = []
             for m in re.finditer(r'<node[^>]*?>', out):
                 tag = m.group(0)
@@ -73,7 +89,10 @@ def by_text(nodes, text):
 
 def tap(node, wait=1.0):
     x, y = node["c"]
-    L.sh("input tap %d %d" % (x, y))
+    # 用 80ms 短按压而不是 input tap：注入式 tap 的 down/up 会被 ROM 分别做窗口
+    # 命中测试，弹层关闭瞬间 up 可能落到下一层窗口，造成「一次点击点两处」。
+    # 短按压实测不会穿透，行为对用户等价。
+    L.sh("input swipe %d %d %d %d 80" % (x, y, x, y))
     time.sleep(wait)
 
 
@@ -86,18 +105,29 @@ def open_editor():
     time.sleep(0.8)
     L.api_try("/api/vpn", {"enable": False})
     time.sleep(1.0)
-    for _ in range(8):
-        L.sh("input swipe 540 1800 540 900 260")
-        time.sleep(0.25)
-    time.sleep(0.5)
-    # 「组合」标签页：优先用控件树定位，dump 抽风时退回固定坐标
-    nodes = dump_tree()
-    tab = by_text(nodes, "组合")
-    if tab:
-        tap(tab[0], wait=1.2)
-    else:
-        L.sh("input tap 775 560")
-        time.sleep(1.2)
+    # 「场景 / 组合」标签在首屏下方：不动时在屏幕外，上滑一次才露出来，
+    # 再滑就整行划出屏幕了。所以逐步滑、每步抓树，看到标签就停。
+    tab = None
+    for _round in range(2):
+        for _ in range(8):
+            nodes = dump_tree()
+            found = [n for n in by_text(nodes, "组合") if n["click"]]
+            if found:
+                tab = found[0]
+                break
+            L.sh("input swipe 540 1800 540 900 260")
+            time.sleep(0.4)
+        if tab:
+            break
+        # 可能已经滑过头（标签划出了屏幕顶部）：回到顶部再来一轮
+        for _ in range(6):
+            L.sh("input swipe 540 900 540 1800 260")
+            time.sleep(0.3)
+    if tab is None:
+        print("  ! 没找到「组合」标签",
+              [n["text"] for n in dump_tree() if n["text"]][:16])
+        return False
+    tap(tab, wait=1.2)
     # 长按第一支组合打开编辑器：用控件树定位，不写死坐标
     # （卡片位置会随组合数量、名称长度变化，写死坐标十有八九点空）
     nodes = dump_tree()
@@ -124,7 +154,9 @@ def main():
         print(("  PASS " if cond else "  FAIL ") + name + ((" | " + detail) if detail else ""),
               flush=True)
 
-    open_editor()
+    if not open_editor():
+        print("  ! 未能打开组合编辑器，测试终止")
+        return ok, total
     nodes = dump_tree()
     names = [n["text"] for n in nodes if n["desc"] == "选择这一段用的场景"]
     print("\n=== 结构 ===")
@@ -164,9 +196,9 @@ def main():
 
     # 2) ＋添加一段
     print("\n=== 2. 添加一段 ===")
-    add = [n for n in nodes2 if n["click"] and n["b"][1] > 1300 and n["b"][1] < 1520]
+    add = by_text(nodes2, "＋ 添加一段")
     if add:
-        tap(min(add, key=lambda n: n["b"][1]))
+        tap(add[0])
     nodes3 = dump_tree()
     if len(by_desc(nodes3, "选择这一段用的场景")) == 0:
         time.sleep(1.2)          # 新增的行可能还没布局完，或软键盘刚弹出
@@ -203,9 +235,9 @@ def main():
     # 4) 保存 → API 读回
     print("\n=== 4. 保存落盘 ===")
     nodes6 = dump_tree()
-    save = [n for n in nodes6 if n["click"] and n["b"][1] > 1500 and n["b"][0] > 500]
+    save = by_text(nodes6, "保存组合")
     if save:
-        tap(min(save, key=lambda n: n["b"][1]))
+        tap(save[0])
     time.sleep(1.2)
     L.setup_forward()
     combos = L.api_try("/api/combos")

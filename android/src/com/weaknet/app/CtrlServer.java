@@ -32,6 +32,15 @@ public class CtrlServer implements Runnable {
                     return t;
                 }
             });
+    /** 推送独立成池：同步 HTTP 最长要等十几秒，不能占着控制池把状态轮询全堵住 */
+    private final java.util.concurrent.ExecutorService pushPool =
+            Executors.newFixedThreadPool(2, new java.util.concurrent.ThreadFactory() {
+                public Thread newThread(Runnable r) {
+                    Thread t = new Thread(r, "share-push");
+                    t.setDaemon(true);
+                    return t;
+                }
+            });
 
     public CtrlServer(int port, ProxyServer proxy, android.content.Context ctx) {
         this.port = port;
@@ -70,6 +79,7 @@ public class CtrlServer implements Runnable {
             // ignore
         }
         pool.shutdownNow();
+        pushPool.shutdownNow();
     }
 
     /** JSON 数组 → 字符串列表（没有就给个空列表，省得每个路由都判一遍 null） */
@@ -82,6 +92,8 @@ public class CtrlServer implements Runnable {
 
     class Handler implements Runnable {
         private final Socket sock;
+        /** 异步响应（推送不能占着 4 线程的控制池等对方回包） */
+        private volatile boolean async = false;
 
         Handler(Socket s) {
             sock = s;
@@ -89,48 +101,37 @@ public class CtrlServer implements Runnable {
 
         public void run() {
             try {
+                sock.setSoTimeout(30000);
                 BufferedInputStream in = new BufferedInputStream(sock.getInputStream());
-                String line = Util.readLine(in);
-                if (line == null) return;
-                String[] parts = line.split(" ");
-                if (parts.length < 2) return;
-                String method = parts[0].toUpperCase();
-                String path = parts[1];
+                HttpIn.Req req;
+                try {
+                    req = HttpIn.read(in, HttpIn.MAX_BODY_CTRL);
+                } catch (HttpIn.Bad bad) {
+                    respond(bad.code, JSON_CT, ("{\"error\":\"" + bad.getMessage() + "\"}")
+                            .getBytes("UTF-8"));
+                    return;
+                }
+                if (req == null) return;
+                String path = req.path;
                 int q = path.indexOf('?');
                 if (q >= 0) path = path.substring(0, q);
-
-                int len = 0;
-                while (true) {
-                    String h = Util.readLine(in);
-                    if (h == null || h.length() == 0) break;
-                    if (h.toLowerCase().startsWith("content-length:")) {
-                        try {
-                            len = Integer.parseInt(h.substring(h.indexOf(':') + 1).trim());
-                        } catch (Exception e) {
-                            // ignore
-                        }
-                    }
-                }
-                String body = "";
-                if (len > 0) {
-                    byte[] b = new byte[len];
-                    int off = 0;
-                    while (off < len) {
-                        int r = in.read(b, off, len - off);
-                        if (r < 0) break;
-                        off += r;
-                    }
-                    body = new String(b, 0, off, "UTF-8");
-                }
-                route(method, path, body);
+                route(req.method, path, req.body == null ? "" : req.body);
             } catch (Exception e) {
                 // ignore
             } finally {
-                try {
-                    sock.close();
-                } catch (Exception e) {
-                    // ignore
+                if (async) {
+                    // 由异步任务负责回包并关连接
+                } else {
+                    finish();
                 }
+            }
+        }
+
+        private void finish() {
+            try {
+                sock.close();
+            } catch (Exception e) {
+                // ignore
             }
         }
 
@@ -153,9 +154,45 @@ public class CtrlServer implements Runnable {
                 respond(200, JSON_CT, statusJson().toString().getBytes("UTF-8"));
                 return;
             }
+            // 与 Windows 端同构：参数表来自 spec/spec.json（安卓侧是生成的 SpecGen），
+            // spec_hash 用来断言两端确实载入了同一份规格。
+            if ("/api/params".equals(path)) {
+                respond(200, JSON_CT, SpecGen.paramsJson().toString().getBytes("UTF-8"));
+                return;
+            }
             // ---- 环境共享：只读状态，便于脚本验证「手机也能被 PC 发现 / 收到推送」----
-            if ("/api/share".equals(path)) {
+            // 正式路径是 /api/share/status：旧版这里任意方法都回 200，而共享端口 8900 上的
+            // POST /api/share 是「提交推送」，同名不同义 —— 脚本照文档写会静默成功却什么也没推过去。
+            // GET /api/share 保留一个版本作为别名，POST 明确 405 并指向 /api/push。
+            if ("/api/share/status".equals(path) || "/api/share".equals(path)) {
+                if ("POST".equals(method)) {
+                    respond(405, JSON_CT,
+                            "{\"error\":\"method not allowed, use POST /api/push\"}"
+                                    .getBytes("UTF-8"));
+                    return;
+                }
                 respond(200, JSON_CT, ShareNet.statusJson().toString().getBytes("UTF-8"));
+                return;
+            }
+            if ("/api/share/pin".equals(path)) {
+                // 与 Windows 端同名同语义：GET 看状态，POST 改 PIN / 旧版兼容开关
+                if ("POST".equals(method)) {
+                    try {
+                        JSONObject d = new JSONObject(body);
+                        JSONObject r;
+                        if (d.has("allow_legacy")) {
+                            r = ShareNet.setAllowLegacy(d.optBoolean("allow_legacy"));
+                        } else {
+                            r = ShareNet.setPin(d.optString("pin", ""), d.optBoolean("refresh"));
+                        }
+                        respond(r.optBoolean("ok") ? 200 : 400, JSON_CT,
+                                r.toString().getBytes("UTF-8"));
+                    } catch (Exception e) {
+                        respond(400, JSON_CT, "{\"error\":\"bad request\"}".getBytes("UTF-8"));
+                    }
+                } else {
+                    respond(200, JSON_CT, ShareNet.pinStatusJson().toString().getBytes("UTF-8"));
+                }
                 return;
             }
             if ("POST".equals(method) && "/api/share/name".equals(path)) {
@@ -167,36 +204,60 @@ public class CtrlServer implements Runnable {
                 }
                 return;
             }
-            if ("POST".equals(method) && "/api/share/push".equals(path)) {
-                // 给脚本用：{peer: "<id>", ids: [...], combo_ids: [...]}；真实界面走 ShareSheet
+            if ("POST".equals(method) && ("/api/share/push".equals(path) || "/api/push".equals(path))) {
+                // 给脚本用：{peer: "<id>" | {ip, share} | "ip:port", ids: [...], combo_ids: [...]}
+                // /api/push 与 Windows 同名同义；/api/share/push 是旧路径，保留一个版本
+                final ShareNet.Peer fp;
+                final List<String> flist;
+                final List<String> fclist;
                 try {
                     JSONObject d = new JSONObject(body);
-                    ShareNet.Peer p = ShareNet.findPeer(d.optString("peer", ""));
-                    List<String> list = jsonList(d.optJSONArray("ids"));
-                    List<String> clist = jsonList(d.optJSONArray("combo_ids"));
-                    // 推送是同步 HTTP，必须挪出 HTTP 线程；最多等 15 秒
-                    final ShareNet.Peer fp = p;
-                    final List<String> flist = list;
-                    final List<String> fclist = clist;
-                    final ShareNet.PushResult[] holder = new ShareNet.PushResult[1];
-                    Thread t = new Thread(new Runnable() {
-                        public void run() {
-                            holder[0] = ShareNet.push(fp, flist, fclist);
-                        }
-                    }, "share-push-api");
-                    t.setDaemon(true);
-                    t.start();
-                    t.join(15000);
-                    JSONObject o = new JSONObject();
-                    o.put("ok", holder[0] != null && holder[0].ok);
-                    o.put("msg", holder[0] == null ? "推送超时或未完成" : holder[0].msg);
-                    respond(200, JSON_CT, o.toString().getBytes("UTF-8"));
+                    fp = resolvePeer(d);
+                    flist = jsonList(d.optJSONArray("ids"));
+                    fclist = jsonList(d.optJSONArray("combo_ids"));
                 } catch (Exception e) {
                     respond(400, JSON_CT, "{\"error\":\"bad request\"}".getBytes("UTF-8"));
+                    return;
                 }
+                if (fp == null) {
+                    respond(400, JSON_CT, "{\"error\":\"bad peer\"}".getBytes("UTF-8"));
+                    return;
+                }
+                // 推送是同步 HTTP（对方 6s 连/读超时），放到独立池里跑；
+                // 本请求先不关 socket，由任务回包后关闭 —— 否则控制池的 4 个线程会被堵死
+                async = true;
+                pushPool.execute(new Runnable() {
+                    public void run() {
+                        JSONObject o = new JSONObject();
+                        try {
+                            ShareNet.PushResult pr = ShareNet.push(fp, flist, fclist);
+                            o.put("ok", pr.ok);
+                            o.put("msg", pr.msg);
+                            JSONArray acc = new JSONArray();
+                            for (String s : pr.accepted) acc.put(s);
+                            o.put("accepted", acc);
+                            JSONArray pen = new JSONArray();
+                            for (String s : pr.pending) pen.put(s);
+                            o.put("pending", pen);
+                        } catch (Exception e) {
+                            try {
+                                o.put("ok", false);
+                                o.put("msg", "推送失败：" + e.getMessage());
+                            } catch (Exception ignore) {
+                            }
+                        }
+                        try {
+                            respond(200, JSON_CT, o.toString().getBytes("UTF-8"));
+                        } catch (Exception e) {
+                            // 对方已断开：结果已进日志
+                        } finally {
+                            finish();
+                        }
+                    }
+                });
                 return;
             }
-            if ("GET".equals(method) && "/api/share/inbox".equals(path)) {
+            if ("GET".equals(method) && ("/api/share/inbox".equals(path) || "/api/inbox".equals(path))) {
                 // 收件箱列表：kind 区分「环境」和「组合」，与桌面端 /api/inbox 同构
                 try {
                     JSONArray arr = new JSONArray();
@@ -223,7 +284,8 @@ public class CtrlServer implements Runnable {
                 }
                 return;
             }
-            if ("POST".equals(method) && "/api/share/inbox".equals(path)) {
+            if ("POST".equals(method) && ("/api/share/inbox".equals(path)
+                    || "/api/inbox/resolve".equals(path))) {
                 try {
                     JSONObject d = new JSONObject(body);
                     JSONObject r = ShareNet.resolveInbox(d.optString("id", ""),
@@ -232,6 +294,39 @@ public class CtrlServer implements Runnable {
                 } catch (Exception e) {
                     respond(400, JSON_CT, "{\"error\":\"bad request\"}".getBytes("UTF-8"));
                 }
+                return;
+            }
+            if ("/api/peers".equals(path)) {
+                // 与 Windows /api/peers 同构：items + self + discover
+                JSONObject s = ShareNet.statusJson();
+                JSONArray items = new JSONArray();
+                JSONArray src = s.optJSONArray("peers");
+                if (src != null) {
+                    for (int i = 0; i < src.length(); i++) {
+                        JSONObject p = src.optJSONObject(i);
+                        if (p == null) continue;
+                        JSONObject it = new JSONObject();
+                        it.put("id", p.optString("id", ""));
+                        it.put("name", p.optString("name", ""));
+                        it.put("ip", p.optString("ip", ""));
+                        it.put("platform", p.optString("platform", ""));
+                        it.put("share", p.optInt("share", 0));
+                        it.put("ver", p.optInt("ver", 1));
+                        it.put("pin_ok", p.optBoolean("pin_ok", false));
+                        it.put("ago", p.optInt("ago", 0));
+                        items.put(it);
+                    }
+                }
+                JSONObject o = new JSONObject();
+                o.put("items", items);
+                JSONObject self = new JSONObject();
+                self.put("name", s.optString("name", ""));
+                self.put("id", s.optString("id", ""));
+                self.put("share", s.optInt("share_port", 0));
+                self.put("lan_ip", s.optString("lan_ip", ""));
+                o.put("self", self);
+                o.put("discover", s.optBoolean("discover", false));
+                respond(200, JSON_CT, o.toString().getBytes("UTF-8"));
                 return;
             }
             if ("/api/presets".equals(path)) {
@@ -570,10 +665,7 @@ public class CtrlServer implements Runnable {
                         return;
                     }
                 }
-                JSONObject o = new JSONObject();
-                o.put("name", ShareNet.getUserName());
-                o.put("id", ShareNet.getSelfId());
-                o.put("platform", "android");
+                JSONObject o = meJson();
                 respond(200, JSON_CT, o.toString().getBytes("UTF-8"));
                 return;
             }
@@ -622,14 +714,65 @@ public class CtrlServer implements Runnable {
                     Thread t = new Thread(proxy, "proxy");
                     t.setDaemon(true);
                     t.start();
-                    WeakNet.I.log("config", "代理监听切换为 " + host + ":" + proxy.port());
-                    respond(200, JSON_CT, "{\"ok\":true}".getBytes("UTF-8"));
+                    JSONObject o = new JSONObject();
+                    o.put("ok", true);
+                    o.put("host", host);
+                    o.put("token", proxy.token());
+                    o.put("warn", "0.0.0.0".equals(host)
+                            ? "局域网代理已开启：其它设备需要 Proxy-Authorization 才能使用" : "");
+                    WeakNet.I.log("config", "代理监听切换为 " + host + ":" + proxy.port()
+                            + ("0.0.0.0".equals(host) ? "（局域网代理已开启，需要 token）" : ""));
+                    respond(200, JSON_CT, o.toString().getBytes("UTF-8"));
                 } catch (Exception e) {
                     respond(500, JSON_CT, ("{\"error\":\"" + e.getMessage() + "\"}").getBytes("UTF-8"));
                 }
                 return;
             }
-            respond(404, "text/plain; charset=utf-8", "not found".getBytes("UTF-8"));
+            // ---- 平台专属能力：系统代理设置只有桌面端有 ----
+            if ("/api/sysproxy".equals(path)) {
+                respond(501, JSON_CT,
+                        "{\"error\":\"not supported on this platform\"}".getBytes("UTF-8"));
+                return;
+            }
+            respond(404, JSON_CT, "{\"error\":\"not found\"}".getBytes("UTF-8"));
+        }
+
+        /**
+         * 解析推送目标：对端 id（界面路径）/ "ip:port" / {ip, share}（脚本路径，与 Windows 一致）。
+         * 端口越界或写法认不出来返回 null，由调用方回 400 bad peer。
+         */
+        private ShareNet.Peer resolvePeer(JSONObject d) {
+            Object raw = d.opt("peer");
+            if (raw instanceof JSONObject) {
+                JSONObject o = (JSONObject) raw;
+                String ip = o.optString("ip", "").trim();
+                int share = o.optInt("share", ShareNet.SHARE_PORT);
+                if (ip.length() == 0 || share < 1 || share > 65535) return null;
+                ShareNet.Peer p = new ShareNet.Peer();
+                p.id = o.optString("id", "");
+                p.ip = ip;
+                p.name = o.optString("name", ip);
+                p.share = share;
+                return p;
+            }
+            String s = raw == null ? "" : String.valueOf(raw).trim();
+            ShareNet.Peer hit = ShareNet.findPeer(s);
+            if (hit != null) return hit;
+            int colon = s.lastIndexOf(':');
+            if (colon <= 0) return null;
+            String ip = s.substring(0, colon).trim();
+            int share;
+            try {
+                share = Integer.parseInt(s.substring(colon + 1).trim());
+            } catch (NumberFormatException e) {
+                return null;
+            }
+            if (ip.length() == 0 || share < 1 || share > 65535) return null;
+            ShareNet.Peer p = new ShareNet.Peer();
+            p.ip = ip;
+            p.name = ip;
+            p.share = share;
+            return p;
         }
 
         /**
@@ -724,6 +867,14 @@ public class CtrlServer implements Runnable {
 
         private JSONObject statusJsonInner() throws Exception {
             JSONObject o = new JSONObject();
+            // 版本与身份：与 Windows /api/status 同构。缺这三个键时，按 status.version
+            // 做兼容判断的脚本在 Android 上只能拿到 undefined，双端「同构」名不副实。
+            android.content.pm.PackageInfo pi = ctx.getPackageManager()
+                    .getPackageInfo(ctx.getPackageName(), 0);
+            o.put("version", pi.versionName);
+            o.put("build", pi.versionCode);
+            o.put("me", meJson());
+            o.put("spec_hash", SpecGen.SPEC_HASH);
             o.put("profile", WeakNet.I.profile.toJson());
             o.put("preset_key", WeakNet.I.presetKey);
             o.put("limit_on", WeakNet.I.limitOn);
@@ -731,6 +882,8 @@ public class CtrlServer implements Runnable {
             JSONObject listen = new JSONObject();
             listen.put("host", proxy.host());
             listen.put("port", proxy.port());
+            listen.put("lan", !ProxyServer.loopback(proxy.host()));
+            listen.put("token", proxy.token());
             o.put("listen", listen);
             o.put("lan_ip", WeakNet.I.lanIp());
             o.put("vpn_active", VpnNetService.active);
@@ -774,9 +927,38 @@ public class CtrlServer implements Runnable {
             return o;
         }
 
+        /** 本机身份：/api/me 与 /api/status.me 共用一份，避免两处各写一套字段。 */
+        private JSONObject meJson() throws Exception {
+            JSONObject o = new JSONObject();
+            JSONObject st = ShareNet.statusJson();
+            o.put("name", ShareNet.getUserName());
+            o.put("id", ShareNet.getSelfId());
+            o.put("platform", "android");
+            o.put("share", st.optInt("share_port", 0));
+            o.put("discover", st.optBoolean("discover", false));
+            o.put("lan_ip", st.optString("lan_ip", ""));
+            o.put("share_ver", ShareNet.SHARE_VER);
+            o.put("pin_len", ShareNet.PIN_LEN);
+            o.put("allow_legacy", ShareNet.isAllowLegacy());
+            return o;
+        }
+
         private void respond(int code, String ct, byte[] data) throws IOException {
-            String reason = code == 200 ? "OK"
-                    : (code == 404 ? "Not Found" : (code == 500 ? "Internal Server Error" : "Bad Request"));
+            String reason;
+            switch (code) {
+                case 200: reason = "OK"; break;
+                case 400: reason = "Bad Request"; break;
+                case 403: reason = "Forbidden"; break;
+                case 404: reason = "Not Found"; break;
+                case 405: reason = "Method Not Allowed"; break;
+                case 408: reason = "Request Timeout"; break;
+                case 409: reason = "Conflict"; break;
+                case 413: reason = "Payload Too Large"; break;
+                case 431: reason = "Request Header Fields Too Large"; break;
+                case 500: reason = "Internal Server Error"; break;
+                case 501: reason = "Not Implemented"; break;
+                default: reason = "Bad Request"; break;
+            }
             StringBuilder h = new StringBuilder();
             h.append("HTTP/1.1 ").append(code).append(" ").append(reason).append("\r\n");
             h.append("Content-Type: ").append(ct).append("\r\n");

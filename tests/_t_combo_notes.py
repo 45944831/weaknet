@@ -9,8 +9,9 @@
 说出来的话就不一样了，用户会以为这是两个功能。
 
 文案位置：
-  Python 侧  weaknet.py 的 COMBO_INTRO / COMBO_EXAMPLES / COMBO_TIPS
-  Java  侧  Profile.java 的同名三个常量
+  唯一来源  weaknet/spec/spec.json 的 combo 段
+  Python 侧  weaknet.py 启动时读出来拼成 COMBO_DOC
+  Java  侧  tools/gen_spec.py 生成到 SpecGen.java 的 COMBO_DOC
 
 本测试覆盖
 ----------
@@ -145,8 +146,9 @@ def main():
 
     # ================= B：Java 侧与 Python 一致 =================
     prof_src = read(os.path.join(ROOT, "android/src/com/weaknet/app/Profile.java"))
-    j_doc = parse_java_string(prof_src, "COMBO_DOC")
-    ck("B1 能从 Profile.java 解析出 COMBO_DOC", j_doc is not None, "")
+    spec_src = read(os.path.join(ROOT, "android/src/com/weaknet/app/SpecGen.java"))
+    j_doc = parse_java_string(spec_src, "COMBO_DOC")
+    ck("B1 能从 SpecGen.java 解析出 COMBO_DOC", j_doc is not None, "")
     if j_doc is not None:
         ck("B2 两端文档串逐字一致", j_doc == W.COMBO_DOC,
            "一致" if j_doc == W.COMBO_DOC else "不一致")
@@ -177,7 +179,7 @@ def main():
 
     print()
     print("%d 项通过 / %d 项失败" % (PASS, FAIL))
-    print("全部通过 ✅" if FAIL == 0 else "有失败项 ❌")
+    print("全部通过" if FAIL == 0 else "有失败项")
     return 0 if FAIL == 0 else 1
 
 

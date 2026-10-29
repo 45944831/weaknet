@@ -28,11 +28,14 @@ public class NetService extends Service {
         super.onCreate();
         WeakNet.I.startedAt = System.currentTimeMillis();
         try {
-            proxy = new ProxyServer("0.0.0.0", PROXY_PORT);
+            // 默认只绑回环：代理本身没有鉴权，绑 0.0.0.0 等于把手机变成同网段可用的
+            // 开放代理（还能绕过 VPN 的按 App 接管范围）。需要时由 /api/listen 显式打开，
+            // 打开后 ProxyServer 会要求 Proxy-Authorization。
+            proxy = new ProxyServer("127.0.0.1", PROXY_PORT);
             Thread t = new Thread(proxy, "proxy");
             t.setDaemon(true);
             t.start();
-            WeakNet.I.log("config", "代理启动 0.0.0.0:" + PROXY_PORT);
+            WeakNet.I.log("config", "代理启动 127.0.0.1:" + PROXY_PORT);
         } catch (Exception e) {
             WeakNet.I.log("error", "代理启动失败：" + e.getMessage());
         }

@@ -21,26 +21,26 @@
 
 ---
 
-## 下载（Release v1.1.9）
+## 下载（Release v1.1.10）
 
 > Windows 端 `WeakNet.exe` 以 GUI 子系统打包，双击直接出界面，**不会弹出 DOS 黑框**；Android 端安装 `WeakNet.apk` 即可。
 
 | 文件 | 平台 | 大小 | SHA-256 |
 | --- | --- | --- | --- |
-| [`WeakNet.exe`](https://github.com/45944831/weaknet/releases/latest/download/WeakNet.exe) | Windows（GUI 版，免装 Python） | 10.30 MB | `dd1c85c5…16bcc5` |
-| [`WeakNet.apk`](https://github.com/45944831/weaknet/releases/latest/download/WeakNet.apk) | Android 7.0+ | 189 KB | `4a8efe85…1f46ec` |
+| [`WeakNet.exe`](https://github.com/45944831/weaknet/releases/latest/download/WeakNet.exe) | Windows（GUI 版，免装 Python） | 10.31 MB | `627f23a7…6a0149` |
+| [`WeakNet.apk`](https://github.com/45944831/weaknet/releases/latest/download/WeakNet.apk) | Android 7.0+ | 197 KB | `f3451163…e4f05` |
 
 发布页：https://github.com/45944831/weaknet/releases/latest
 
 完整校验值：
 
 ```
-dd1c85c52ae5199a4241619d9b9ae125adc51c78f7a988e60c8b5b486a16bcc5  WeakNet.exe
-4a8efe8584e7a3703bfb6b0b3fc8c8f95cc41941ff0d9bfec71b26cf621f46ec  WeakNet.apk
+627f23a7d260439ecbbbdf61ae5798c2518df2ee11b26b3d0732ab58236a0149  WeakNet.exe
+f345116324235aba6348fea35a203d8ba4f1af30c37266d436786c06e40e4f05  WeakNet.apk
 ```
 
-> v1.1.9 是**修 bug + 换图标**的版本，两个包都要重新下载：Android 端修四处（共享服务收中文载荷挂死、删组合 API 不复位、抖动把小延迟压成零、控制接口不校验方法），Windows 端修其中三处同源缺陷（后三项）；两端同时换了新图标（见下文「图标」）。
-> APK 签名与 v1.1.8 完全一致（证书 SHA-256 `1c69f682…c1d8e`），可以直接覆盖安装，不用先卸载。
+> v1.1.10 是**契约收口**版本：Android `/api/status` 补齐 `version` / `build` / `me`，未知路径改为 JSON 404，双端控制接口由此完全同构；两端版本号统一到 1.1.10 / 120。Windows EXE 与 v1.1.9 功能相同，只换了版本号与窗口标题；**Android 建议升级**，按双端同构解析的客户端在旧 APK 上会拿到 `undefined`。
+> APK 签名与 v1.1.9 完全一致（证书 SHA-256 `1c69f682…c1d8e`），可以直接覆盖安装，不用先卸载。
 
 > 若 GitHub 下载慢或打不开，可在链接前加 `https://ghproxy.net/` 走镜像加速，例如
 > `https://ghproxy.net/https://github.com/45944831/weaknet/releases/latest/download/WeakNet.exe`
@@ -341,13 +341,19 @@ export ANDROID_HOME=/path/to/android-sdk
 bash build.sh
 ```
 
-输出 `android/WeakNet.apk`。版本号在 `build.sh` 顶部一处真值（`VERSION_CODE` / `VERSION_NAME`），
-`aapt2 link` 与 `AndroidManifest.xml` 都跟它走。
+输出 `android/WeakNet.apk`。版本号的真值在 `version.py`（`VERSION` / `BUILD`），
+`AndroidManifest.xml` 的 `versionCode` / `versionName` 与 `build.sh` 顶部默认值必须与之相同，
+由 `tests/_t_version.py` 断言。构建结束前脚本会用 `aapt2 dump badging` 回读成品版本号，
+与构建参数不符就失败 —— 不再需要人眼核对。
 
 > 坑（v1.1.9 才踩明白）：build-tools 34 的 `aapt2 link` **默认让 Manifest 里的 `versionCode` / `versionName`
 > 覆盖 `--version-code` / `--version-name`**，不加 `--replace-version` 时脚本里的版本号等于白写
 > （现象：内容明明变了，`aapt2 dump badging` 出来的版本号一直是旧值）。脚本已带上该参数，
-> 验证方式：`aapt2 dump badging WeakNet.apk | head -1` 应显示 `versionCode='119' versionName='1.1.9'`。
+> 并在构建末尾自动断言，验证方式：`aapt2 dump badging WeakNet.apk | head -1` 应显示
+> `versionCode='120' versionName='1.1.10'`。
+
+构建脚本对 javac / d8 / aapt2 的失败一律「日志落盘 + 明确报错 + 退出」：不接 `tail` 管道，
+避免管道的退出码掩盖真实失败；d8 之后还会确认 `classes.dex` 真的存在。
 
 **签名口令不入库**：脚本按 `KS_PASS` 环境变量 → `android/weaknet.keystore.pass` 文件的顺序取口令，
 两者都没有时，若 `weaknet.keystore` 也不存在就随机生成一个并写进那个文件（该文件已被 `.gitignore` 排除）；
@@ -369,6 +375,24 @@ python -m PyInstaller --onefile --windowed --clean --noconfirm --name WeakNet \
 > 坑：PyInstaller 的 `--icon` 相对路径是相对 `--specpath` 解析的，建议直接用绝对路径。
 > 网页控制台已下线，打包时不再需要 `--add-data dashboard.html`。
 
+### 自动化回归（pytest）
+
+```bash
+cd weaknet
+python -m pytest              # 默认跑 unit + integration（约 15 秒）
+python -m pytest -m perf      # 性能门槛：带宽 ±15% / RTT ±20% / 8 并发 ≤1.15x / 停止放行 <0.5s
+python -m pytest -m device    # 真机契约：先 set ANDROID_SERIAL=<adb devices 里的序列号>
+```
+
+- 标记：`unit`（纯逻辑）/ `integration`（进程内真实 socket）/ `perf`（机器相关）/ `device`（真机）。
+- 夹具在 `tests/conftest.py`：`engine` 在独立线程起完整服务（端口随机、设置与自定义场景写临时目录），
+  `http_origin` 提供大文件与慢速吐出的源站，用例只通过 HTTP / 代理端口访问 —— 测的是真实管道。
+- 存量 `_t_*.py` 里逻辑更细的部分（源码逐字比对等）由 `tests/test_golden_scripts.py` 统一登记，
+  新用例请写在 `test_*.py`。
+- `spec/spec.json` 是参数 / 场景 / 文案 / 组合规则的唯一真源：Python 运行时直接读，
+  Android 侧由 `tools/gen_spec.py` 生成 `SpecGen.java`（`--check` 用于 CI 漂移检查）。
+- CI 见仓库根 `.github/workflows/ci.yml`：Windows 跑 pytest；Linux 跑 Android JVM 单测 + 构建 + 版本断言。
+
 ---
 
 ## 目录结构
@@ -377,15 +401,22 @@ python -m PyInstaller --onefile --windowed --clean --noconfirm --name WeakNet \
 weaknet/
 ├── weaknet.py            核心引擎（asyncio 代理 + HTTP 控制接口，无界面形态）
 ├── weaknet_gui.py        GUI 主程序（tkinter，唯一的图形界面）
+├── version.py            版本号唯一真值（VERSION / BUILD；APK、EXE、/api/status 都跟它走）
 ├── usb_phone.py          USB 手机弱网：adb 查找 / 设备列举 / reverse 与全局代理的写入与还原
 ├── gen_icon.py           图标生成脚本（EXE 与 APK 同一套图形，PIL 纯代码绘制，不依赖设计稿）
 ├── logserver.py          限速验证用的本地测速服务端
 ├── assets/               Windows 图标（ico / png）
+├── spec/spec.json        参数 / 场景 / 文案 / 组合规则唯一真源（两端都从它生成）
+├── tools/gen_spec.py     由 spec 生成 Android 的 SpecGen.java（--check 查漂移）
+├── tools/gen_exe_version.py  由 version.py 生成 EXE 版本资源
+├── pytest.ini            pytest 配置（标记与默认排除 perf / device）
+├── tests/                pytest 用例（conftest 夹具）+ 历史 _t_* 回归脚本
 ├── WeakNet.exe           【产物】Windows GUI 版（CLI 形态跑源码：python weaknet.py）
 └── android/
     ├── src/com/weaknet/app/    Java 源码（VpnService / TCP 状态机 / 限速 / 悬浮窗）
     │                           MainActivity = 原生界面；MainPanels = 主界面三块面板
     │                           ScopeSheet = 指定程序接管；ShareNet = 局域网环境共享
+    │                           SpecGen = 由 spec.json 生成（勿手改）
     │                           MyPresets = 自定义场景持久化
     │                           ComboPlan / ComboStep / MyCombos = 弱网组合（时间轴编排）
     │                           ComboSheet = 组合编辑器；ComboNotesSheet = 组合说明页
@@ -393,7 +424,7 @@ weaknet/
     ├── _jw/                   JVM 可跑的回归单测（不依赖真机）
     ├── res/                    应用图标（mipmap 各密度 + adaptive icon）
     ├── AndroidManifest.xml
-    ├── build.sh                手工构建脚本
+    ├── build.sh                手工构建脚本（失败可诊断、末尾断言版本号）
     └── WeakNet.apk             【产物】Android 安装包
 ```
 
@@ -462,7 +493,7 @@ weaknet/
 | **签名口令不再入库（v1.1.8）** | `build.sh` 原先把 keystore 口令明文写在仓库里 —— 口令入库等于公开签名私钥的访问方式，哪怕 keystore 本身没提交。改为按 `KS_PASS` 环境变量 → 本地 `weaknet.keystore.pass`（已 gitignore）取；首次构建随机生成。另修掉 apksigner 主类名写死的问题（34.x 是 `com.android.apksigner`，早期是 `com.android.tools.apksigner`），改为自动探测，换 build-tools 版本不会直接 ClassNotFound |
 | **版本号第一次真正生效（v1.1.8）** | `build.sh` 里 `aapt2 link` 写死 `--version-code 1 --version-name 1.0`，`AndroidManifest.xml` 里改了不起作用，APK 装的版本一直是 1.0。改为脚本顶部一处真值，本版起 `versionCode=118 / versionName=1.1.8`。**注：v1.1.9 复测发现这版其实仍没生效**（缺 `--replace-version`），详见下方「版本号始终不生效」一行 |
 | **v1.1.8 回归** | 组合编辑器回归 **11/11**（场景名完整无省略号、行内无常驻删除按钮、每行一行、左滑露出删除、点删除生效、＋添加一段恢复三段、点名字弹 14 项单选、选完即时更新、保存后接口读回 `steps[].key` 全对）；组合播放切段实测 3 段各 3 秒**准点切换并循环**；EXE 冒烟 **7/7**（GUI 子系统无 DOS 窗口、进程起来、`/api/status` 有响应、`/api/run` 开关正常、无 conhost、主窗口标题正确）；新 APK 签名证书 SHA-256 `1c69f682…c1d8e` 与 v1.1.7 **完全一致**，可覆盖安装 |
-| **版本号始终不生效（v1.1.9 修复）** | v1.1.8 那条「版本号第一次真正生效」的结论是**错的**。build-tools 34 的 `aapt2 link` 默认让 Manifest 里的 `versionCode/versionName` 覆盖 `--version-code/--version-name`，`--replace-version` 不加就白写：两次内容不同的构建 dump 出来都是 `118 / 1.1.8`。加上 `--replace-version` 后实测 `119 / 1.1.9`，并把 Manifest 同步为同一组值做双保险。**版本号的真值仍是 `build.sh` 顶部一处** |
+| **版本号始终不生效（v1.1.9 修复）** | v1.1.8 那条「版本号第一次真正生效」的结论是**错的**。build-tools 34 的 `aapt2 link` 默认让 Manifest 里的 `versionCode/versionName` 覆盖 `--version-code/--version-name`，`--replace-version` 不加就白写：两次内容不同的构建 dump 出来都是 `118 / 1.1.8`。加上 `--replace-version` 后实测 `119 / 1.1.9`，并把 Manifest 同步为同一组值做双保险。**版本号真值已统一到 `version.py`**（Manifest 与 build.sh 跟它走，`tests/_t_version.py` 断言，构建末尾用 `aapt2 dump badging` 回读成品校验） |
 | **共享服务中文载荷挂死（v1.1.9 修复，P0）** | `ShareNet.serve()` 用 `BufferedReader` 按 **Content-Length 字节数**去读 `char[]`：中文一字 3 字节，`len` 字节里只凑得出 `len/3` 个字符，循环永远读不满 → 卡满 5s SoTimeout → 静默 `close()`，手机端表现为「推送组合一直转圈然后失败」且日志无痕迹。对照实验确证：30 字节中文必挂、120 字节 ASCII 0.1s 完成，与长度无关只与字符/字节比有关。改为 `BufferedInputStream` 按字节读满 `len`（同时去掉原先 `Math.min(len, 65536)` 的静默截断），并补上 catch 日志 |
 | **组合 API 删除不复位（v1.1.9 修复，P1）** | 正在播放的组合被 `POST /api/combo/delete` 删掉后，时间轴仍在按已删除的 steps 跑，界面却已从列表里消失，用户无处可停。两端改为：删除的是当前正在播放的组合 → 先 `stop_combo()` 再 `set_profile(全零, "direct")`（`hasLimits()` 为 false 即直连），删别的组合不打断当前场景 |
 | **抖动把小延迟压成零（v1.1.9 修复，P2）** | 抖动按 `base ± jitter` 取值，`jitter > base` 时会算出负数延迟 —— 该包比直连还快，弱网测试里出现「零延迟包」直接污染 RTT 统计。两端改为抖动幅度以基础延迟封顶；`base = 0` 时按 `uniform(0, jitter)` 取值，不再出现负值 |
@@ -470,6 +501,14 @@ weaknet/
 | **v1.1.9 全量回归** | 修复验证 **19/19**（P0 四种载荷全 0.03s 完成且手机侧入库、中文名组合推送成功、两端删播放中组合均回直连、两端 40 次 PING 零延迟包 0 次、两端 405 + `Allow`）；Windows A 组 **31/31**、B 组 **31/31**；真机深度 **34/34**；APK 接口契约 **16/16**；Python 单测 13、参数文案一致性 31；GUI 滚动 20 / 参数 26 / 标签合并 33 / 二级窗口 34；JVM 单测 **36/36**；EXE 冒烟 **7/7** 且包内实测三处修复生效。吞吐稳态（8MB + 预热）：5G 1.05x、4G 1.04x、弱 Wi-Fi 0.99x、拥塞 0.87x、上行 0.91x、8 并发 0.96x |
 | **v1.1.9 测试口径修正** | 带宽精度用例改为「**先预热 ≈0.35s 配额，再传 ≥4 倍桶容量**」：令牌桶空闲会攒满 `速率×0.25s` 的突发额度（100 Mbps ≈ 3.1 MB），短样本测的是突发不是稳态，同一档位在 1MB 载荷下反复测出 1.4x / 1.59x / 2.71x。带 `disconnect_pct` 的档位（随机断连）移出带宽精度用例，其丢包/断连语义由 B 组与真机覆盖 |
 | **图标统一（v1.1.9）** | 一套图形两处落地：EXE 内嵌 10 档 ico（16~256，已核对最大档数据确实在 exe 内）、窗口与任务栏图标显式覆盖 Tk 默认的羽毛；APK 各密度 mipmap + 自适应图标（前景画在 108dp 画布的中央 70dp，圆形 / 方圆形 / 圆角遮罩下都不裁边）。逐档肉眼核对 16 / 24 / 32 / 48 / 192 / 1024，16px 仍能认出「四格缺一格」。生成器 `gen_icon.py` 复跑两次产物哈希一致（构建可复现）；真机 `install -r` 覆盖安装成功，`versionCode=119`、证书 `1c69f682…c1d8e` 均未变 |
+| **pytest 回归体系（v1.1.9，P1）** | 新增 `tests/conftest.py` 夹具（进程内引擎 / 本地源站 / 隔离存储）与 8 个 `test_*.py`：默认套件 **91 项 / 13 秒**全绿（unit 46 + integration 45），`-m perf` 4 项、`-m device` 真机契约 13 项按需运行；存量 `_t_*` 里更细的源码比对由 `test_golden_scripts.py` 统一登记。CI 见 `.github/workflows/ci.yml`（Windows 跑 pytest；Linux 跑 JVM 单测 + 构建 + 版本断言） |
+| **停止限速仍按旧速率下载（v1.1.9 修复，P2）** | 令牌桶只在 pipe 下一轮读取时才 `sync` 新速率，等待中的 `consume` 要等当前 64KB 块按旧速率走完（300 kbps 下约 1.7s 才放行）。改为 `set_profile` 里立即同步上下行桶后，性能门槛实测停止后 **266ms** 放行全部积压（阈值 500ms） |
+| **`/api/*` 404 响应形态不一致（v1.1.9 修复）** | Windows 未实现的 API 返回纯文本 `not found`，Android 返回 JSON `{"error":"not found"}`：脚本按 Content-Type 解析时在 Windows 上会崩在「不是 dict」。两端统一为 JSON，非 API 路径仍是纯文本 |
+| **UDP 满队列仍会阻塞发送线程（v1.1.9 修复，P2）** | `DelayLine.tryPost` 先在锁内查积压、出锁再调 `post()`，而 `post()` 超限时会 `wait(50)`：并发提交时两个线程都能通过检查，后到者被卡住，与「UDP 满了就丢、绝不阻塞」相反。改为在同一个 `synchronized` 内完成容量判断 + 入队 + 唤醒，超限立即返回 false；`UdpSession` 计入 `udpDropped` 并按 1/2/4/8… 指数退避记一条事件。新增 JVM 用例 `_DelayLineTest`（容量、并发不阻塞、关闭后拒绝、内联/延迟语义）12/12 |
+| **Android 每包热路径白做工（v1.1.9 优化，P2）** | `dlog("hp: TCP " + IP 字符串化 + …)` 的参数在 `DIAG=false` 提前返回**之前**就已求值，每个包白白拼 2 次 IP 字符串；TCP 快表查询与回填各自进一次监视器。改为调用点 `if (DIAG)` 包裹（无效/未知包路径一并处理），快表查询合并为一次锁内「查槽 + sameFlow 核对」。按方案要求，每包 `byte[]` 分配与 UDP 逐包 `exec.execute` 两项**未改**——它们需要真机 30s 压测确认占比后再定，本次无测量数据 |
+| **控制接口 300 行 if/elif（v1.1.9 重构，P2）** | `handle_ctrl` 改为「(方法, 路径) → 处理函数」表：25 个端点各自成函数，`"*"` 表示不限方法；未注册的 `/api/*` 仍回 JSON 404、非 API 回纯文本 404，方法/状态码逐条与旧实现一致。GUI 的 500ms 刷新不再无条件 `config()` 全部场景/自定义/组合按钮：选中项没变就整轮跳过（按钮重建时重置缓存）。重构由控制接口契约用例 + 12 项 `_t_api_parity` + 金标准脚本验证；另新增 8 项畸形请求用例（负/非数字/超限 `Content-Length`、chunked、Origin、非回环 Host、超长头行、超 100 行头） |
+| **发布脚本凭据与路径（v1.1.9，P1-5 卫生项）** | `_release_upload.py` 原先把仓库路径写死为本机绝对路径，并允许 token 从 argv 传入（会留在进程列表与 shell 历史）。改为按脚本位置推导产物路径，token 只读 `GITHUB_TOKEN` 环境变量；tag 仍可用 `RELEASE_TAG` 或 argv 指定 |
+| **双端契约缺口（v1.1.10 修复）** | Android `/api/status` 缺 `version` / `build` / `me`，未知路径返回 `text/plain`，按 Windows 同构解析的客户端会拿到 `undefined` 或解析异常。补齐三个键（`me` 九字段逐键对齐）并把 404 改为 `application/json` 的 `{"error":"not found"}`；`pytest -m device` 由 11/13 变为 13/13。版本号同步为 1.1.10 / 120（`version.py` 单一真源，`_t_version.py` 14 项断言） |
 
 ---
 

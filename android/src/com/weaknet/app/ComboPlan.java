@@ -12,10 +12,10 @@ import java.util.List;
  * 涉及 IO 的存取在 {@link MyCombos}，涉及 {@link WeakNet} 状态的播放在 {@link WeakNet}。
  */
 public class ComboPlan {
-    /** 上限：再长就不好在飘窗上按顺序核对了 */
-    public static final int MAX_STEPS = 5;
-    public static final int MAX_MINUTES = 600;      // 单段最多 10 分钟
-    public static final int MAX_SECONDS = 59;       // 秒这一格只收到 59，再大请用「分」
+    /** 上限：再长就不好在飘窗上按顺序核对了（数值来自 spec/spec.json 的 combo 段） */
+    public static final int MAX_STEPS = SpecGen.COMBO_MAX_STEPS;
+    public static final int MAX_MINUTES = SpecGen.COMBO_MAX_MINUTES;   // 单段最多 10 分钟
+    public static final int MAX_SECONDS = SpecGen.COMBO_MAX_SECONDS;   // 秒这一格只收到 59，再大请用「分」
 
     public static int clamp(int v, int max) {
         if (v < 0) return 0;

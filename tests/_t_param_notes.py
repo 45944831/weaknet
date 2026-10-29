@@ -7,14 +7,15 @@
 漏一个参数、文案重复、两端文案不一致，表现都是「点开一片空白」或者
 「电脑上说是挂住，手机上说是立刻失败」。
 
-两端各存一份文案（weaknet.py 的 PARAM_NOTES / Profile.java 的 PARAM_NOTES），
-没法共享代码，只能靠这里逐条比对把它们钉在一起。
+两端共用一份文案（weaknet/spec/spec.json 的 param_notes）：Python 启动时直接读，
+安卓侧由 tools/gen_spec.py 生成到 SpecGen.java。这里逐条比对解析出的生成物，
+再顺带校验生成物没有过期。
 
 本测试覆盖
 ----------
 A  Python 侧数据：覆盖完整、长度够、无重复、分段、语义关键词
-B  Java 侧数据：能从源码解析出 13 条，且与 Python 逐条一字不差
-C  界面接线：安卓参数行（MainPanels.FIELDS）与注释表的 key 完全对应
+B  Java 侧数据：能从 SpecGen.java 解析出 13 条，且与 Python 逐条一字不差
+C  界面接线：安卓参数行（MainPanels.FIELDS = SpecGen.fields()）与注释表对应
 D  预设注释里被顺手修正的一处数字（卫星链路的往返时间）
 """
 import os
@@ -69,7 +70,15 @@ def java_unescape(s):
     while i < len(s):
         c = s[i]
         if c == "\\" and i + 1 < len(s):
-            out.append(JAVA_UNESC.get(s[i + 1], s[i + 1]))
+            nxt = s[i + 1]
+            if nxt == "u" and i + 5 < len(s):
+                try:
+                    out.append(chr(int(s[i + 2:i + 6], 16)))
+                    i += 6
+                    continue
+                except ValueError:
+                    pass
+            out.append(JAVA_UNESC.get(nxt, nxt))
             i += 2
         else:
             out.append(c)
@@ -92,13 +101,20 @@ def parse_java_param_notes(src):
     return notes
 
 
-def parse_java_fields(src):
-    """从 MainPanels.java 抽出参数行定义 [key, 显示名, 默认值]"""
-    m = re.search(r"FIELDS\s*=\s*\{(.*?)\n\s*\};", src, re.S)
+def parse_java_param_keys(src):
+    """从 SpecGen.java 抽出参数行 key（生成自 spec 的 PARAM_KEYS）"""
+    m = re.search(r"PARAM_KEYS\s*=\s*\{(.*?)\};", src, re.S)
     if not m:
         return []
-    rows = re.findall(r'\{\s*"([A-Za-z_]+)"\s*,\s*"([^"]*)"\s*,\s*"([^"]*)"\s*\}', m.group(1))
-    return [list(r) for r in rows]
+    return re.findall(r'"([A-Za-z_]+)"', m.group(1))
+
+
+def parse_java_param_labels(src):
+    """从 SpecGen.java 抽出参数显示名（与 key 同序）"""
+    m = re.search(r"PARAM_LABELS\s*=\s*\{(.*?)\};", src, re.S)
+    if not m:
+        return []
+    return [java_unescape(x) for x in re.findall(r'"((?:[^"\\]|\\.)*)"', m.group(1))]
 
 
 def strip_java_comments(src):
@@ -163,8 +179,9 @@ def main():
 
     # ================= B：Java 侧与 Python 一致 =================
     prof_src = read(os.path.join(ROOT, "android/src/com/weaknet/app/Profile.java"))
-    j_notes = parse_java_param_notes(prof_src)
-    ck("B1 能从 Profile.java 解析出 13 条注释", len(j_notes) == len(py_notes),
+    spec_src = read(os.path.join(ROOT, "android/src/com/weaknet/app/SpecGen.java"))
+    j_notes = parse_java_param_notes(spec_src)
+    ck("B1 能从 SpecGen.java 解析出 13 条注释", len(j_notes) == len(py_notes),
        "解析到 %d 条 / 期望 %d 条" % (len(j_notes), len(py_notes)))
 
     only_py = sorted(set(py_notes) - set(j_notes))
@@ -180,15 +197,16 @@ def main():
     ck("B3 两端文案逐条一字不差", not diff,
        "%d 条全部一致" % len(py_notes) if not diff else "不一致：%r" % (diff,))
 
-    ck("B4 Profile 暴露了 noteOfParam 且对未知 key 返回空串",
-       "public static String noteOfParam(String key)" in prof_src
-       and "return s == null ? \"\" : s;" in prof_src)
+    ck("B4 Profile.noteOfParam 委托 SpecGen，且 SpecGen 对未知 key 返回空串",
+       "SpecGen.paramNote(key)" in prof_src
+       and 'return s == null ? "" : s;' in spec_src)
 
     # ================= C：安卓参数行与注释表对应 =================
     mp_src = read(os.path.join(ROOT, "android/src/com/weaknet/app/MainPanels.java"))
-    fields = parse_java_fields(mp_src)
-    fkeys = [r[0] for r in fields]
-    ck("C1 解析出 13 行参数定义", len(fields) == 13, "%d 行" % len(fields))
+    fkeys = parse_java_param_keys(spec_src)
+    ck("C1 SpecGen 生成 13 行参数定义，且界面直接取用",
+       len(fkeys) == 13 and "FIELDS = SpecGen.fields()" in mp_src,
+       "%d 行" % len(fkeys))
     ck("C2 参数行的 key 与注释表完全对应",
        set(fkeys) == set(py_notes) and len(set(fkeys)) == len(fkeys),
        "一致" if set(fkeys) == set(py_notes) else
@@ -217,9 +235,10 @@ def main():
     ck("C3d 「！」不显眼（无背景框 + 灰字）",
        "help.setBackground" not in mp_src and "0xFF9AA4B2" in mp_src)
 
+    labels = parse_java_param_labels(spec_src)
     ck("C4 参数行都有显示名（浮层标题用）",
-       all(r[1].strip() for r in fields),
-       ", ".join(r[1] for r in fields))
+       len(labels) == len(fkeys) and all(x.strip() for x in labels),
+       ", ".join(labels))
 
     ps_src = read(os.path.join(ROOT, "android/src/com/weaknet/app/ParamSheet.java"))
     ck("C5 ParamSheet 文案取自 Profile.noteOfParam",
@@ -239,8 +258,8 @@ def main():
        and "1.4" in W.PRESET_NOTES.get("satellite", ""),
        W.PRESET_NOTES.get("satellite", "")[:40])
     ck("D2 安卓端同一处也改了",
-       "往返 700ms" not in prof_src
-       and "单程 700ms（一次往返约 1.4 秒）" in prof_src)
+       "往返 700ms" not in spec_src
+       and "单程 700ms（一次往返约 1.4 秒）" in java_unescape(spec_src))
 
     print()
     print("  %d pass, %d fail" % (PASS, FAIL))

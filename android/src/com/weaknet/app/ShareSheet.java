@@ -15,6 +15,7 @@ import android.view.ViewGroup;
 import android.view.Window;
 import android.view.WindowManager;
 import android.widget.Button;
+import android.widget.CheckBox;
 import android.widget.EditText;
 import android.widget.FrameLayout;
 import android.widget.LinearLayout;
@@ -52,6 +53,8 @@ public class ShareSheet {
     private Dialog dlg;
     private LinearLayout card;
     private EditText edtName;
+    private EditText edtPin;
+    private CheckBox cbLegacy;
     private LinearLayout peerBox;
     private LinearLayout mineBox;
     private LinearLayout comboBox;
@@ -184,6 +187,48 @@ public class ShareSheet {
         nrow.addView(btnName, np);
         card.addView(nrow);
 
+        // ---- 共享 PIN：推送方必须带对，发现广播里会同步，换完最多 3 秒生效 ----
+        card.addView(label("共享 PIN（对方推送时需要）"));
+        LinearLayout prow = new LinearLayout(a);
+        prow.setOrientation(LinearLayout.HORIZONTAL);
+        prow.setGravity(Gravity.CENTER_VERTICAL);
+        edtPin = new EditText(a);
+        edtPin.setSingleLine(true);
+        edtPin.setTextSize(13);
+        edtPin.setTextColor(0xFF1F2430);
+        edtPin.setInputType(InputType.TYPE_CLASS_NUMBER);
+        edtPin.setPadding(dp(8), dp(7), dp(8), dp(7));
+        edtPin.setBackground(box(0xFFF7F9FC, 0xFFD7DEEA, 8));
+        LinearLayout.LayoutParams plp = new LinearLayout.LayoutParams(0,
+                ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
+        plp.setMargins(0, 0, dp(8), 0);
+        prow.addView(edtPin, plp);
+        Button btnPin = smallBtn("保存", new View.OnClickListener() {
+            public void onClick(View v) {
+                savePin(false);
+            }
+        });
+        prow.addView(btnPin);
+        Button btnNewPin = smallBtn("随机换一个", new View.OnClickListener() {
+            public void onClick(View v) {
+                savePin(true);
+            }
+        });
+        prow.addView(btnNewPin, pad(dp(8), 0, 0, 0));
+        card.addView(prow);
+
+        cbLegacy = new CheckBox(a);
+        cbLegacy.setText("允许旧版设备推送（无 PIN，内容只进收件箱）");
+        cbLegacy.setTextSize(12);
+        cbLegacy.setTextColor(0xFF5A6472);
+        cbLegacy.setOnClickListener(new View.OnClickListener() {
+            public void onClick(View v) {
+                ShareNet.setAllowLegacy(cbLegacy.isChecked());
+                reload();
+            }
+        });
+        card.addView(cbLegacy);
+
         // ---- 设备 ----
         card.addView(divider(dp(8)));
         card.addView(label("局域网里的设备（可多选）"));
@@ -293,16 +338,31 @@ public class ShareSheet {
     private void reload() {
         if (dlg == null) return;
         if (edtName.getText().length() == 0) edtName.setText(ShareNet.getUserName());
+        if (edtPin.getText().length() == 0) edtPin.setText(ShareNet.getPin());
+        if (cbLegacy != null) cbLegacy.setChecked(ShareNet.isAllowLegacy());
 
         renderPeers();
         renderMine();
         renderCombos();
         renderInbox();
         syncButtons();
-        tip.setText("本机：" + ShareNet.getUserName() + " · " + WeakNet.I.lanIp()
+        tip.setText("本机：" + ShareNet.getUserName() + " · PIN " + ShareNet.getPin()
                 + " · 共享端口 " + (ShareNet.statusJson().optInt("share_port", 0) == 0
                 ? "未开启" : ShareNet.statusJson().optInt("share_port", 0))
                 + "；对方也要开着 WeakNet 才会出现在这里。");
+    }
+
+    private void savePin(boolean refresh) {
+        String v = edtPin.getText() == null ? "" : edtPin.getText().toString();
+        org.json.JSONObject r = ShareNet.setPin(v, refresh);
+        if (r.optBoolean("ok")) {
+            edtPin.setText(r.optString("pin", ShareNet.getPin()));
+            Toast.makeText(a, refresh ? "已换新 PIN：" + r.optString("pin")
+                    : "PIN 已保存", Toast.LENGTH_SHORT).show();
+        } else {
+            Toast.makeText(a, r.optString("error", "PIN 需为 4 位数字"), Toast.LENGTH_SHORT).show();
+        }
+        reload();
     }
 
     private void renderPeers() {

@@ -1,8 +1,13 @@
 # -*- coding: utf-8 -*-
-"""APK 并发 / 场景反复切换 / 长稳 三项压测（真机 tun 路径）。
+"""APK 并发 / 场景反复切换 / 长稳 三项压测（真机代理路径）。
 
 并发用设备内并行脚本（_wn_par.sh）：从 PC 并发调 adb shell 会被 adb 串行化，
 测不到真正的并发竞争。
+
+探针目标默认 127.0.0.1:8888：1.1.9 起代理默认只绑回环（P0-2 安全加固），
+旧脚本连 10.8.0.2:8888（tun 本地地址）依赖 0.0.0.0 监听，
+在只绑回环后会被内核直接拒连。可用 WN_PROBE_HOST / WN_PROBE_PORT 覆盖。
+tun 数据面（VpnNetService 透明转发）另由 _t_apk_tun_real.py 覆盖。
 """
 import os
 import sys
@@ -18,7 +23,9 @@ import sys
 import time
 import urllib.request
 
-ADB = r"C:/Program Files (x86)/Android/android-sdk/platform-tools/adb.exe"
+ADB = os.environ.get("WEAKNET_ADB") or r"C:/Program Files (x86)/Android/android-sdk/platform-tools/adb.exe"
+PROBE_HOST = os.environ.get("WN_PROBE_HOST", "127.0.0.1")
+PROBE_PORT = int(os.environ.get("WN_PROBE_PORT", "8888"))
 CTRL = "http://127.0.0.1:18899"
 R = []
 
@@ -56,7 +63,9 @@ def profile(d):
     api("/api/run", {"enable": True})
 
 
-def probe(nbytes=0, host="10.8.0.2", port=8888, t=200):
+def probe(nbytes=0, host=None, port=None, t=200):
+    host = host or PROBE_HOST
+    port = PROBE_PORT if port is None else port
     txt = sh("sh /data/local/tmp/wn_tun.sh %s %d %d" % (host, port, nbytes), t=t)
     for line in txt.splitlines():
         p = line.split()
@@ -72,7 +81,7 @@ time.sleep(0.8)
 # 容差 1.6x：并发下实测总带宽比设定值高 0~40%（单连接 1.06~1.13x 精确），
 # 偏差随并发度递增，根因待查，见报告「已知偏差」。设备内多探针并行本身也有
 # CPU 争抢（每个探针每 50ms fork 一次 wc），8 个探针会把计时彻底搅乱。
-out = sh("sh /data/local/tmp/wn_par.sh 10.8.0.2 8888 1048576 4", t=300)
+out = sh("sh /data/local/tmp/wn_par.sh %s %d 1048576 4" % (PROBE_HOST, PROBE_PORT), t=300)
 parts = out.split()
 if len(parts) >= 4 and parts[0] == "PAR":
     tot, ms, n = int(parts[1]), int(parts[2]), int(parts[3])
@@ -84,7 +93,7 @@ else:
     rec("4 并发总带宽（容差 1.6x）", False, "探针输出异常：%r" % out[:80])
 
 print("== S1b 8 并发数据完整性 ==", flush=True)
-out = sh("sh /data/local/tmp/wn_par.sh 10.8.0.2 8888 524288 8", t=300)
+out = sh("sh /data/local/tmp/wn_par.sh %s %d 524288 8" % (PROBE_HOST, PROBE_PORT), t=300)
 parts = out.split()
 if len(parts) >= 4 and parts[0] == "PAR":
     tot, ms, n = int(parts[1]), int(parts[2]), int(parts[3])

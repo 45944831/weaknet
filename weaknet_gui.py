@@ -155,33 +155,11 @@ def _note_measure(text):
         _NOTE_FONT = tkfont.Font(family="Microsoft YaHei UI", size=10)
     return _NOTE_FONT.measure(text)
 
-# GUI 里的短名称（Web 控制台仍用全名）
-SHORT = {
-    "direct": "直连", "wifi": "Wi-Fi 良好", "4g": "4G LTE", "5g": "5G 良好",
-    "4g_weak": "4G 弱网", "5g_weak": "5G 弱覆盖",
-    "wifi_weak": "弱 Wi-Fi", "congestion": "网络拥塞", "satellite": "卫星链路",
-    "highspeed_rail": "高铁/地铁", "elevator": "电梯/地下室",
-    "flapping": "频繁断连", "blackhole": "黑洞（无响应）",
-    "dns_fail": "DNS 故障", "airplane": "完全断网",
-    "high_loss": "高丢包", "high_latency": "高延迟",
-}
+# GUI 里的短名称（Web 控制台仍用全名）：与 Android / 规格同源
+SHORT = W.PRESET_SHORT
 
-# key, 标签, 单位, 上限
-FIELDS = [
-    ("latency_down_ms", "下行延迟", "ms", 10000),
-    ("latency_up_ms", "上行延迟", "ms", 10000),
-    ("jitter_ms", "抖动 ±", "ms", 5000),
-    ("down_kbps", "下行带宽", "kbps", 1000000),
-    ("up_kbps", "上行带宽", "kbps", 1000000),
-    ("loss_pct", "丢包率", "%", 100),
-    ("stall_ms", "卡顿", "ms", 10000),
-    ("disconnect_pct", "断连率", "%", 100),
-    ("timeout_pct", "黑洞率", "%", 100),
-    ("dns_fail_pct", "DNS失败", "%", 100),
-    ("reject_pct", "拒连率", "%", 100),
-    ("flap_sec", "断网间隔", "秒", 600),
-    ("flap_blackout_sec", "断网时长", "秒", 600),
-]
+# key, 标签, 单位, 上限 —— 顺序与标签都来自 spec/spec.json
+FIELDS = [(p["key"], p["label"], p["unit"], p["max"]) for p in W.PARAM_SPECS]
 
 
 def fmt_rate(bps):
@@ -270,7 +248,7 @@ class App:
         self.vars = {}
         self._last = (time.time(), W.G.bytes_down, W.G.bytes_up)
         self._rate = (0.0, 0.0)
-        self._ev_shown = 0
+        self._ev_seq = -1
         self._closing = False
         self.share_win = None                 # 环境共享二级窗口，None = 当前未打开
         self.share_after = None               # 窗口内的定时刷新（关闭时要取消）
@@ -289,7 +267,7 @@ class App:
         # 结果经这个队列回到主线程（tkinter 不是线程安全的，绝不能在子线程里直接碰控件）
         self.usb_q = queue.Queue()
 
-        root.title("WeakNet —— App 弱网测试工具")
+        root.title("WeakNet %s —— App 弱网测试工具" % W.VERSION)
         _apply_window_icon(root)
         root.configure(bg=BG)
         # 按屏幕自适应窗口高度并居中，避免小屏幕上底部内容被任务栏/屏幕边缘裁掉
@@ -1180,6 +1158,7 @@ class App:
         for b in self.mine_btns.values():
             b.destroy()
         self.mine_btns = {}
+        self._sel_mine = None      # 按钮是新建的，下次 refresh 必须重新上色
         for i, it in enumerate(self.mine_items):
             key = "u:" + it["id"]
             b = tk.Button(self.mine_grid, text=it["name"], font=FONT, bg="#eef2f7",
@@ -1426,6 +1405,7 @@ class App:
         for b in self.combo_btns.values():
             b.destroy()
         self.combo_btns = {}
+        self._sel_combo = None     # 同上：新建按钮的配色要重刷一遍
         for i, c in enumerate(self.combo_items):
             key = W.COMBO_KEY_PREFIX + c["id"]
             b = tk.Button(self.combo_grid, text="🔀 " + c["name"], font=FONT, bg="#eef2f7",
@@ -2174,6 +2154,33 @@ class App:
                   relief="flat", padx=12, pady=4, cursor="hand2",
                   command=self.save_share_name).pack(side="left")
 
+        # PIN：推送方必须带对才能入库。发现广播里会带上它，方便同网段的设备直接推；
+        # 换 PIN 后对方需要重新发现（最多 3 秒一次广播）才能继续推。
+        prow = tk.Frame(win, bg=BG)
+        prow.pack(fill="x", padx=12, pady=(6, 0))
+        tk.Label(prow, text="共享 PIN", font=FONT, bg=BG, fg=MUTED, width=8,
+                 anchor="w").pack(side="left")
+        self.share_pin = tk.StringVar(value=W.G.share_pin or "")
+        pent = tk.Entry(prow, textvariable=self.share_pin, font=FONT, width=6,
+                        relief="flat", highlightthickness=1, highlightbackground=LINE,
+                        highlightcolor=ACCENT, bg=CARD, fg=TEXT, justify="center")
+        pent.pack(side="left", padx=(6, 6))
+        pent.bind("<Return>", lambda _e: self.save_share_pin())
+        tk.Button(prow, text="保存 PIN", font=FONT, bg="#eef2f7", fg=TEXT,
+                  relief="flat", padx=10, pady=4, cursor="hand2",
+                  command=self.save_share_pin).pack(side="left")
+        tk.Button(prow, text="随机换一个", font=FONT, bg="#eef2f7", fg=TEXT,
+                  relief="flat", padx=10, pady=4, cursor="hand2",
+                  command=self.refresh_share_pin).pack(side="left", padx=(8, 0))
+
+        lrow = tk.Frame(win, bg=BG)
+        lrow.pack(fill="x", padx=12, pady=(4, 0))
+        self.share_legacy = tk.BooleanVar(value=bool(W.G.allow_legacy))
+        tk.Checkbutton(lrow, text="允许旧版设备推送（无 PIN，内容只进收件箱）",
+                       variable=self.share_legacy, font=FONT, bg=BG, fg=MUTED,
+                       activebackground=BG, selectcolor=CARD, anchor="w",
+                       command=self.toggle_share_legacy).pack(side="left")
+
         self.share_peers = self._share_group(win, "局域网里的设备", 5)
         bar = tk.Frame(win, bg=BG)
         bar.pack(fill="x", padx=12, pady=(6, 0))
@@ -2314,8 +2321,9 @@ class App:
             if it["id"] in pick_inbox:
                 self.share_inbox.selection_set(i)
 
-        self.lab_share_me.config(text="本机：%s · 共享端口 %d"
-                                 % (W.G.user_name or "-", W.G.share_port or W.SHARE_PORT))
+        self.lab_share_me.config(text="本机：%s · PIN %s · 端口 %d"
+                                 % (W.G.user_name or "-", W.G.share_pin or "-",
+                                    W.G.share_port or W.SHARE_PORT))
         self._share_sync_btns()
         # 设备会上下线、别人随时可能推环境过来，窗口开着就持续刷新
         self.share_after = self.share_win.after(3000, self.reload_share)
@@ -2340,6 +2348,28 @@ class App:
         self.share_name.set(nm)
         W.log_event("share", "局域网显示名改为：" + nm)
         self.reload_share()
+
+    def save_share_pin(self):
+        res = W.set_share_pin(self.share_pin.get())
+        if res.get("ok"):
+            self.share_pin.set(res["pin"])
+            self.lab_share_tip.config(text="PIN 已保存：%s（对方推送时需要它）" % res["pin"])
+        else:
+            self.lab_share_tip.config(text="PIN 需为 4 位数字")
+
+    def refresh_share_pin(self):
+        res = W.set_share_pin(refresh=True)
+        if res.get("ok"):
+            self.share_pin.set(res["pin"])
+            self.lab_share_tip.config(text="已换新 PIN：%s（发现广播最多 3 秒后同步给对方）"
+                                      % res["pin"])
+        self.reload_share()
+
+    def toggle_share_legacy(self):
+        on = bool(self.share_legacy.get())
+        W.set_allow_legacy(on)
+        self.lab_share_tip.config(
+            text="已允许旧版设备推送：内容只会进收件箱" if on else "已拒绝旧版设备推送")
 
     def push_share(self):
         selp = [i for i in self.share_peers.curselection() if i < len(self.share_peer_list)]
@@ -2951,6 +2981,19 @@ class App:
         self.btn_sys.config(text="解除接管" if on else "一键接管本机流量",
                             bg=OK if on else ACCENT)
 
+    def _paint_selected(self, btns, sel_key, attr):
+        """给选中按钮上色；选中项没变就整轮跳过。
+
+        500ms 一轮对每个按钮无条件 config(bg=..., fg=...) 会让 Tk 反复重排
+        按钮区，空闲时也在做无用功。按钮重建时调用方需把缓存位重置为 None。
+        """
+        if getattr(self, attr, None) == sel_key:
+            return
+        setattr(self, attr, sel_key)
+        for key, btn in btns.items():
+            btn.config(bg=ACCENT if key == sel_key else "#eef2f7",
+                       fg="white" if key == sel_key else TEXT)
+
     def refresh(self):
         if self._closing:
             return
@@ -3002,17 +3045,11 @@ class App:
         self.stat["gate"].config(text="畅通" if g.gate_open else "已断网",
                                  fg=OK if g.gate_open else WARN)
 
-        for key, btn in self.preset_btns.items():
-            btn.config(bg=ACCENT if key == g.preset_key else "#eef2f7",
-                       fg="white" if key == g.preset_key else TEXT)
+        self._paint_selected(self.preset_btns, g.preset_key, "_sel_preset")
         # 自定义场景按钮与内置档位同样高亮当前生效的那一个
-        for key, btn in getattr(self, "mine_btns", {}).items():
-            btn.config(bg=ACCENT if key == g.preset_key else "#eef2f7",
-                       fg="white" if key == g.preset_key else TEXT)
+        self._paint_selected(getattr(self, "mine_btns", {}), g.preset_key, "_sel_mine")
         # 组合按钮同理；下面再同步它的进度行（播放到第几段、还剩多久）
-        for key, btn in getattr(self, "combo_btns", {}).items():
-            btn.config(bg=ACCENT if key == g.preset_key else "#eef2f7",
-                       fg="white" if key == g.preset_key else TEXT)
+        self._paint_selected(getattr(self, "combo_btns", {}), g.preset_key, "_sel_combo")
         # 场景说明窗口开着时，切场景要同步正文里的「当前选中」标记，
         # 否则窗口里标的是打开那一刻的档位，跟界面上的高亮对不上
         try:
@@ -3044,8 +3081,10 @@ class App:
             pass
 
         ev = list(g.events)
-        if len(ev) != self._ev_shown:
-            self._ev_shown = len(ev)
+        # 用事件序号而不是 len：deque 到 300 条后 len 恒定，界面会从此不再刷新，
+        # 看起来像「程序卡住」——实际事件一直在产生
+        if g.event_seq != self._ev_seq:
+            self._ev_seq = g.event_seq
             self.logbox.configure(state="normal")
             self.logbox.delete("1.0", "end")
             for e in list(ev)[-60:][::-1]:

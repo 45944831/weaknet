@@ -44,6 +44,11 @@ public class ShareNet {
     public static final int SHARE_PORT = 8900;        // TCP 共享端口（接收别人推送用）
     public static final String TAG = "weaknet-discover-v1";
     public static final long PEER_TTL = 12000L;       // 超过这么久没收到广播就当对方下线
+    /** 协议版本：2 起推送必须带 PIN；1 为旧版无鉴权（默认拒收，可选兼容且只进收件箱） */
+    public static final int SHARE_VER = SpecGen.SHARE_VER;
+    public static final int PIN_LEN = SpecGen.PIN_LEN;
+    public static final int MAX_INBOX = SpecGen.INBOX_MAX;
+    public static final int MAX_SHARED_STEPS = SpecGen.SHARE_MAX_STEPS;
 
     public static final class Peer {
         public String id = "";
@@ -51,6 +56,8 @@ public class ShareNet {
         public String ip = "";
         public String platform = "";
         public int share = SHARE_PORT;
+        public int ver = 1;
+        public String pin = "";
         public long at = 0;
     }
 
@@ -80,10 +87,16 @@ public class ShareNet {
     private static final String PREF = "weaknet";
     private static final String KEY_ID = "share_id";
     private static final String KEY_NAME = "share_name";
+    private static final String KEY_PIN = "share_pin";
+    private static final String KEY_LEGACY = "share_allow_legacy";
 
     private static volatile Context ctx;
     private static volatile String selfId = "";
     private static volatile String userName = "";
+    private static volatile String sharePin = "";
+    private static volatile boolean allowLegacy = false;
+    /** 共享服务处理池：慢客户端不能把后面所有推送都堵在 accept 循环里 */
+    private static java.util.concurrent.ExecutorService servePool;
 
     private static final Map<String, Peer> peers =
             Collections.synchronizedMap(new LinkedHashMap<String, Peer>());
@@ -125,6 +138,112 @@ public class ShareNet {
         selfId = id;
         if (name == null || name.length() == 0) name = defaultName();
         userName = name;
+        String pin = "";
+        boolean legacy = false;
+        if (c != null) {
+            SharedPreferences sp = c.getSharedPreferences(PREF, Context.MODE_PRIVATE);
+            pin = normPin(sp.getString(KEY_PIN, ""));
+            legacy = sp.getBoolean(KEY_LEGACY, false);
+        }
+        if (pin.length() == 0) {
+            pin = newPin();
+            if (c != null) {
+                c.getSharedPreferences(PREF, Context.MODE_PRIVATE)
+                        .edit().putString(KEY_PIN, pin).apply();
+            }
+        }
+        sharePin = pin;
+        allowLegacy = legacy;
+    }
+
+    public static String normPin(String v) {
+        if (v == null) return "";
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < v.length() && sb.length() < PIN_LEN; i++) {
+            char ch = v.charAt(i);
+            if (ch >= '0' && ch <= '9') sb.append(ch);
+        }
+        return sb.length() == PIN_LEN ? sb.toString() : "";
+    }
+
+    private static String newPin() {
+        return String.format(java.util.Locale.US, "%04d", (int) (Math.random() * 10000));
+    }
+
+    public static synchronized String getPin() {
+        ensureIdentity();
+        return sharePin;
+    }
+
+    public static synchronized boolean isAllowLegacy() {
+        ensureIdentity();
+        return allowLegacy;
+    }
+
+    /**
+     * 设置 / 刷新共享 PIN。refresh=true 时忽略入参直接换一个随机值。
+     * 换完立刻广播一次，让同网段的设备尽快拿到新 PIN（否则最多要等 3 秒）。
+     */
+    public static synchronized JSONObject setPin(String v, boolean refresh) {
+        ensureIdentity();
+        JSONObject o = new JSONObject();
+        String p = refresh ? newPin() : normPin(v);
+        try {
+            if (p.length() == 0) {
+                o.put("ok", false);
+                o.put("error", "PIN 需为 4 位数字");
+                return o;
+            }
+            sharePin = p;
+            Context c = ctx;
+            if (c != null) {
+                c.getSharedPreferences(PREF, Context.MODE_PRIVATE)
+                        .edit().putString(KEY_PIN, p).apply();
+            }
+            WeakNet.I.log("share", "共享 PIN 已" + (refresh ? "刷新" : "更新"));
+            broadcastPresence();
+            o.put("ok", true);
+            o.put("pin", p);
+        } catch (Exception e) {
+            try {
+                o.put("ok", false);
+                o.put("error", String.valueOf(e.getMessage()));
+            } catch (Exception ignore) {
+            }
+        }
+        return o;
+    }
+
+    public static synchronized JSONObject setAllowLegacy(boolean on) {
+        ensureIdentity();
+        allowLegacy = on;
+        Context c = ctx;
+        if (c != null) {
+            c.getSharedPreferences(PREF, Context.MODE_PRIVATE)
+                    .edit().putBoolean(KEY_LEGACY, on).apply();
+        }
+        WeakNet.I.log("share", "旧版设备推送：" + (on ? "允许（仅进收件箱）" : "已拒绝"));
+        JSONObject o = new JSONObject();
+        try {
+            o.put("ok", true);
+            o.put("allow_legacy", on);
+        } catch (Exception ignore) {
+        }
+        return o;
+    }
+
+    /** GET /api/share/pin 的响应体（与 Windows 端同字段） */
+    public static JSONObject pinStatusJson() {
+        JSONObject o = new JSONObject();
+        try {
+            o.put("ok", true);
+            o.put("pin", getPin());
+            o.put("len", PIN_LEN);
+            o.put("allow_legacy", isAllowLegacy());
+            o.put("ver", SHARE_VER);
+        } catch (Exception ignore) {
+        }
+        return o;
     }
 
     private static String defaultName() {
@@ -278,10 +397,28 @@ public class ShareNet {
                 ssock = ss;
                 sharePort = SHARE_PORT;
                 WeakNet.I.log("share", "环境共享已开启（端口 " + SHARE_PORT + "）");
+                synchronized (ShareNet.class) {
+                    if (servePool == null) {
+                        servePool = java.util.concurrent.Executors.newFixedThreadPool(
+                                4, new java.util.concurrent.ThreadFactory() {
+                                    public Thread newThread(Runnable r) {
+                                        Thread t = new Thread(r, "share-serve");
+                                        t.setDaemon(true);
+                                        return t;
+                                    }
+                                });
+                    }
+                }
                 while (running) {
                     try {
                         Socket c = ss.accept();
-                        serve(c);
+                        // accept 循环只负责收：慢客户端（5s 超时）不能再让后续推送排队
+                        final Socket fc = c;
+                        servePool.execute(new Runnable() {
+                            public void run() {
+                                serve(fc);
+                            }
+                        });
                     } catch (Exception e) {
                         if (!running) break;
                     }
@@ -307,6 +444,9 @@ public class ShareNet {
             String plat = o.optString("platform", "");
             p.platform = plat != null && plat.length() > 16 ? plat.substring(0, 16) : (plat == null ? "" : plat);
             p.share = o.optInt("share", SHARE_PORT);
+            if (p.share <= 0 || p.share > 65535) p.share = SHARE_PORT;
+            p.ver = o.optInt("ver", 1);
+            p.pin = normPin(o.optString("pin", ""));
             p.at = System.currentTimeMillis();
             peers.put(pid, p);
         } catch (Exception e) {
@@ -322,7 +462,8 @@ public class ShareNet {
             o.put("name", getUserName());
             o.put("platform", "android");
             o.put("share", sharePort > 0 ? sharePort : SHARE_PORT);
-            o.put("ver", 1);
+            o.put("ver", SHARE_VER);
+            o.put("pin", getPin());
         } catch (Exception e) {
             return;
         }
@@ -492,8 +633,25 @@ public class ShareNet {
         return t.length() > 40 ? t.substring(0, 40) : t;
     }
 
-    /** 别人推给我的环境：不同名直接入库；同名进收件箱等本机决定 */
-    public static synchronized JSONObject receiveShare(JSONObject payload) {
+    public static JSONObject receiveShare(JSONObject payload) {
+        return receiveShare(payload, false);
+    }
+
+    /** 收件箱入队并返回 id；满了返回 null（调用方要给推送方回执） */
+    private static String inboxPut(InboxItem ib) {
+        synchronized (inbox) {
+            if (inbox.size() >= MAX_INBOX) return null;
+            String iid = newId();
+            while (inbox.containsKey(iid)) iid = newId();
+            ib.id = iid;
+            inbox.put(iid, ib);
+            return iid;
+        }
+    }
+
+    /** 别人推给我的环境：不同名直接入库；同名进收件箱等本机决定。
+     *  onlyInbox=true 用于旧版无 PIN 兼容模式：一律只进收件箱，绝不自动入库。 */
+    public static synchronized JSONObject receiveShare(JSONObject payload, boolean onlyInbox) {
         JSONObject res = new JSONObject();
         JSONArray accepted = new JSONArray();
         JSONArray pending = new JSONArray();
@@ -517,28 +675,34 @@ public class ShareNet {
                     if (name.length() == 0) continue;
                     JSONObject prof = it.optJSONObject("profile");
                     if (prof == null) prof = new JSONObject();
-                    if (findByName(name) == null) {
+                    if (!onlyInbox && findByName(name) == null) {
                         MyPresets.Item saved = MyPresets.save(null, name, prof);
                         accepted.put(saved.name);
                         WeakNet.I.log("share", "收到 " + from + " 推送的环境：" + saved.name);
                     } else {
-                        String iid = newId();
-                        while (inbox.containsKey(iid)) iid = newId();
                         InboxItem ib = new InboxItem();
-                        ib.id = iid;
                         ib.from = from;
                         ib.fromId = fromId;
                         ib.name = name;
                         ib.kind = "preset";
                         ib.profile = prof;
                         ib.at = System.currentTimeMillis();
-                        inbox.put(iid, ib);
+                        String iid = inboxPut(ib);
+                        if (iid == null) {
+                            JSONObject d = new JSONObject();
+                            d.put("name", name);
+                            d.put("reason", "收件箱已满");
+                            dropList.put(d);
+                            WeakNet.I.log("share", "收件箱已满，丢弃 " + from + " 推送的「" + name + "」");
+                            continue;
+                        }
                         JSONObject pi = new JSONObject();
                         pi.put("id", iid);
                         pi.put("name", name);
                         pi.put("kind", "preset");
                         pending.put(pi);
-                        WeakNet.I.log("share", from + " 推送的「" + name + "」与本地同名，等你决定");
+                        WeakNet.I.log("share", from + " 推送的「" + name + "」"
+                                + (onlyInbox ? "（旧版无 PIN，只进收件箱）" : "与本地同名") + "，等你决定");
                     }
                 }
             }
@@ -551,8 +715,15 @@ public class ShareNet {
                     JSONObject keep = new JSONObject();
                     keep.put("loop", c.optBoolean("loop", false));
                     JSONArray raw = c.optJSONArray("steps");
-                    keep.put("steps", raw == null ? new JSONArray() : raw);
-                    if (MyCombos.findByName(name) == null) {
+                    // 段数按组合规则截断：收件箱里存的原始载荷也不该比本机能播的更长
+                    JSONArray capped = new JSONArray();
+                    if (raw != null) {
+                        for (int j = 0; j < raw.length() && j < MAX_SHARED_STEPS; j++) {
+                            capped.put(raw.opt(j));
+                        }
+                    }
+                    keep.put("steps", capped);
+                    if (!onlyInbox && MyCombos.findByName(name) == null) {
                         JSONArray dropped = new JSONArray();
                         List<MyCombos.Step> steps = resolveSteps(keep.optJSONArray("steps"), dropped);
                         if (steps.isEmpty()) {
@@ -585,23 +756,29 @@ public class ShareNet {
                             WeakNet.I.log("share", "组合「" + saved.name + "」丢掉 " + joinArr(dropped));
                         }
                     } else {
-                        String iid = newId();
-                        while (inbox.containsKey(iid)) iid = newId();
                         InboxItem ib = new InboxItem();
-                        ib.id = iid;
                         ib.from = from;
                         ib.fromId = fromId;
                         ib.name = name;
                         ib.kind = "combo";
                         ib.combo = keep;
                         ib.at = System.currentTimeMillis();
-                        inbox.put(iid, ib);
+                        String iid = inboxPut(ib);
+                        if (iid == null) {
+                            JSONObject d = new JSONObject();
+                            d.put("name", name);
+                            d.put("reason", "收件箱已满");
+                            dropList.put(d);
+                            WeakNet.I.log("share", "收件箱已满，丢弃 " + from + " 推送的组合「" + name + "」");
+                            continue;
+                        }
                         JSONObject pi = new JSONObject();
                         pi.put("id", iid);
                         pi.put("name", name);
                         pi.put("kind", "combo");
                         pending.put(pi);
-                        WeakNet.I.log("share", from + " 推送的组合「" + name + "」与本地同名，等你决定");
+                        WeakNet.I.log("share", from + " 推送的组合「" + name + "」"
+                                + (onlyInbox ? "（旧版无 PIN，只进收件箱）" : "与本地同名") + "，等你决定");
                     }
                 }
             }
@@ -822,6 +999,8 @@ public class ShareNet {
             payload.put("from", getUserName());
             payload.put("from_id", getSelfId());
             payload.put("platform", "android");
+            payload.put("ver", SHARE_VER);
+            payload.put("pin", peer.pin == null ? "" : peer.pin);
             payload.put("items", items);
             payload.put("combos", cs);
         } catch (Exception e) {
@@ -850,6 +1029,13 @@ public class ShareNet {
             while ((line = br.readLine()) != null) sb.append(line);
             br.close();
             JSONObject res = new JSONObject(sb.toString());
+            if (code >= 400 || !res.optBoolean("ok", true)) {
+                // 403/409/413 都要把对方的原因原样带给用户，而不是只报「HTTP 403」
+                r.ok = false;
+                r.msg = res.optString("error", "对方拒收（HTTP " + code + "）");
+                WeakNet.I.log("share", "推送给 " + peer.name + " 被拒：" + r.msg);
+                return r;
+            }
             JSONArray acc = res.optJSONArray("accepted");
             if (acc != null) {
                 for (int i = 0; i < acc.length(); i++) r.accepted.add(acc.optString(i, ""));
@@ -912,71 +1098,53 @@ public class ShareNet {
     private static void serve(Socket s) {
         try {
             s.setSoTimeout(5000);
-            // 必须按「字节」读请求：Content-Length 是字节数，而 UTF-8 中文一个字占 3 个字节。
-            // 旧实现用 BufferedReader（字符流）按 len 个「字符」去读，中文载荷的字符数少于
-            // 字节数，读循环永远凑不满 → 卡满 5s SoTimeout → 静默断连，推送方只看到
-            // "Remote end closed connection without response"。ASCII 名字恰好一字一节才没暴露。
             BufferedInputStream in = new BufferedInputStream(s.getInputStream());
-            String line = readLineBytes(in);
-            if (line == null) {
+            HttpIn.Req req;
+            try {
+                // 有界读取：单行 8KB / 总头 64KB / 100 行 / 正文 256KB
+                req = HttpIn.read(in, HttpIn.MAX_BODY_SHARE);
+            } catch (HttpIn.Bad bad) {
+                writeJson(s, bad.code, bad.getMessage());
+                return;
+            } catch (java.net.SocketTimeoutException e) {
+                writeJson(s, 408, "header timeout");
+                return;
+            }
+            if (req == null) {
                 s.close();
                 return;
             }
-            String[] parts = line.split(" ");
-            String method = parts.length > 0 ? parts[0] : "";
-            String path = parts.length > 1 ? parts[1] : "";
-            int len = 0;
-            String h;
-            while ((h = readLineBytes(in)) != null && h.length() > 0) {
-                if (h.toLowerCase().startsWith("content-length:")) {
-                    try {
-                        len = Integer.parseInt(h.substring(15).trim());
-                    } catch (Exception ignore) {
-                    }
-                }
-            }
-            String body = "";
-            if (len > 0) {
-                // 按 Content-Length 读满 len 个「字节」（不截断：多支组合一起推可能超过 64KB）
-                byte[] buf = new byte[len];
-                int off = 0;
-                while (off < len) {
-                    int rd = in.read(buf, off, len - off);
-                    if (rd < 0) break;
-                    off += rd;
-                }
-                body = new String(buf, 0, off, "UTF-8");
-            }
+            String method = req.method;
+            String path = req.path;
+            int q = path.indexOf('?');
+            if (q >= 0) path = path.substring(0, q);
             JSONObject res;
             if ("/api/hello".equals(path)) {
                 res = helloJson();
             } else if ("POST".equals(method) && "/api/share".equals(path)) {
+                JSONObject d;
                 try {
-                    res = receiveShare(new JSONObject(body));
+                    d = new JSONObject(req.body == null ? "" : req.body);
                 } catch (Exception e) {
-                    res = new JSONObject();
-                    try {
-                        res.put("ok", false);
-                        res.put("error", "JSON 解析失败");
-                    } catch (Exception ignore) {
+                    d = null;
+                }
+                if (d == null) {
+                    res = errorJson("JSON 解析失败");
+                } else {
+                    JSONObject bad = authError(d);
+                    if (bad != null) {
+                        WeakNet.I.log("share", "拒收 " + cleanName(d.optString("from", ""), "未知设备")
+                                + " 的推送（HTTP " + bad.optInt("code", 403) + "）："
+                                + bad.optString("error", ""));
+                        writeJson(s, bad.optInt("code", 403), bad.optString("error", "拒收"));
+                        return;
                     }
+                    res = receiveShare(d, d.optInt("ver", 1) < SHARE_VER);
                 }
             } else {
-                res = new JSONObject();
-                try {
-                    res.put("ok", false);
-                    res.put("error", "不支持的路径");
-                } catch (Exception ignore) {
-                }
+                res = errorJson("不支持的路径");
             }
-            byte[] out = res.toString().getBytes("UTF-8");
-            OutputStream os = s.getOutputStream();
-            os.write(("HTTP/1.1 200 OK\r\nContent-Type: application/json; charset=utf-8\r\n"
-                    + "Content-Length: " + out.length + "\r\nConnection: close\r\n\r\n").getBytes("UTF-8"));
-            os.write(out);
-            os.flush();
-            os.close();
-            s.close();
+            writeJson(s, 200, res.toString());
         } catch (Exception e) {
             // 以前这里静默 close：载荷读不满时推送方只看到"连接被对方关闭"，
             // 手机端一行日志都没有，排查时完全不知道是谁把连接掐了。
@@ -988,16 +1156,74 @@ public class ShareNet {
         }
     }
 
-    /** 按字节读一行（去掉行尾 \r\n）。与 Content-Length 的字节语义一致，中文不会读不满。 */
-    private static String readLineBytes(BufferedInputStream in) throws Exception {
-        ByteArrayOutputStream bo = new ByteArrayOutputStream(128);
-        int c;
-        while ((c = in.read()) >= 0) {
-            if (c == '\n') break;
-            if (c != '\r') bo.write(c);
+    /** 推送鉴权：null = 放行；否则带 code/error 的响应体 */
+    private static JSONObject authError(JSONObject d) {
+        JSONObject o = new JSONObject();
+        try {
+            if (d.optInt("ver", 1) < SHARE_VER) {
+                if (!isAllowLegacy()) {
+                    o.put("code", 409);
+                    o.put("error", "对方是旧版 WeakNet（无 PIN），已拒收；可在共享面板允许旧版设备");
+                    return o;
+                }
+                return null;
+            }
+            String mine = getPin();
+            if (mine.length() > 0 && !mine.equals(normPin(d.optString("pin", "")))) {
+                o.put("code", 403);
+                o.put("error", "PIN 不正确");
+                return o;
+            }
+            return null;
+        } catch (Exception e) {
+            try {
+                o.put("code", 403);
+                o.put("error", "鉴权失败");
+            } catch (Exception ignore) {
+            }
+            return o;
         }
-        if (c < 0 && bo.size() == 0) return null;
-        return new String(bo.toByteArray(), "UTF-8");
+    }
+
+    private static JSONObject errorJson(String msg) {
+        JSONObject o = new JSONObject();
+        try {
+            o.put("ok", false);
+            o.put("error", msg);
+        } catch (Exception ignore) {
+        }
+        return o;
+    }
+
+    private static void writeJson(Socket s, int code, String body) {
+        String reason;
+        switch (code) {
+            case 200: reason = "OK"; break;
+            case 400: reason = "Bad Request"; break;
+            case 403: reason = "Forbidden"; break;
+            case 404: reason = "Not Found"; break;
+            case 408: reason = "Request Timeout"; break;
+            case 409: reason = "Conflict"; break;
+            case 413: reason = "Payload Too Large"; break;
+            case 431: reason = "Request Header Fields Too Large"; break;
+            default: reason = "Bad Request"; break;
+        }
+        try {
+            byte[] out = body.getBytes("UTF-8");
+            OutputStream os = s.getOutputStream();
+            os.write(("HTTP/1.1 " + code + " " + reason + "\r\n"
+                    + "Content-Type: application/json; charset=utf-8\r\n"
+                    + "Content-Length: " + out.length + "\r\nConnection: close\r\n\r\n")
+                    .getBytes("UTF-8"));
+            os.write(out);
+            os.flush();
+        } catch (Exception ignore) {
+        } finally {
+            try {
+                s.close();
+            } catch (Exception ignore) {
+            }
+        }
     }
 
     private static JSONObject helloJson() {
@@ -1025,6 +1251,9 @@ public class ShareNet {
             o.put("discover", discoverListen);
             o.put("lan_ip", WeakNet.I.lanIp());
             o.put("inbox_count", inboxCount());
+            o.put("share_ver", SHARE_VER);
+            o.put("allow_legacy", isAllowLegacy());
+            o.put("inbox_max", MAX_INBOX);
             JSONArray ps = new JSONArray();
             for (Peer p : peers()) {
                 JSONObject it = new JSONObject();
@@ -1033,7 +1262,9 @@ public class ShareNet {
                 it.put("ip", p.ip);
                 it.put("platform", p.platform);
                 it.put("share", p.share);
-                it.put("age", (int) ((System.currentTimeMillis() - p.at) / 1000));
+                it.put("ver", p.ver);
+                it.put("pin_ok", normPin(p.pin).length() > 0);
+                it.put("ago", (int) ((System.currentTimeMillis() - p.at) / 1000));
                 ps.put(it);
             }
             o.put("peers", ps);
@@ -1043,7 +1274,7 @@ public class ShareNet {
                 j.put("id", it.id);
                 j.put("from", it.from);
                 j.put("name", it.name);
-                j.put("age", (int) ((System.currentTimeMillis() - it.at) / 1000));
+                j.put("ago", (int) ((System.currentTimeMillis() - it.at) / 1000));
                 ib.put(j);
             }
             o.put("inbox", ib);

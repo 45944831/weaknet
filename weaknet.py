@@ -23,6 +23,7 @@ import argparse
 import asyncio
 import atexit
 import functools
+import hashlib
 import ipaddress
 import json
 import os
@@ -38,6 +39,11 @@ import urllib.request
 import uuid
 from collections import deque
 from pathlib import Path
+
+try:
+    from version import BUILD, VERSION
+except ImportError:                 # 被当成包导入时的兜底（脚本方式运行走上面）
+    from .version import BUILD, VERSION
 
 # 打包成 EXE 后 stdout 是块缓冲，窗口里看不到任何输出 —— 强制行缓冲
 try:
@@ -433,28 +439,53 @@ def list_procs():
         return []
 
 
+# --------------------------------------------------------------------------
+# 规格单一真源
+#
+# 预置场景、参数上下限/默认值、场景与参数文案、组合规则全部来自
+# spec/spec.json；Android 端由 tools/gen_spec.py 生成 SpecGen.java。
+# 文件缺失或解析失败直接报错：静默回退到硬编码会让「唯一真源」变成两份，
+# 漂移只会更隐蔽（v1.1.x 就出现过两端参数上限各写一套）。
+# --------------------------------------------------------------------------
+SPEC_PATH = Path(__file__).resolve().parent / "spec" / "spec.json"
+try:
+    _SPEC_BYTES = SPEC_PATH.read_bytes()
+    SPEC = json.loads(_SPEC_BYTES.decode("utf-8"))
+except Exception as e:
+    raise RuntimeError("规格文件读取失败：%s（%s）" % (SPEC_PATH, e))
+
+SPEC_HASH = hashlib.sha256(_SPEC_BYTES).hexdigest()[:8]
+PRESETS = {p["key"]: (p["name"], p["cat"], dict(p.get("params") or {}))
+           for p in SPEC["presets"]}
+PRESET_SHORT = {p["key"]: p.get("short") or p["name"] for p in SPEC["presets"]}
+PRESET_NOTES = dict(SPEC["notes"])
+PARAM_SPECS = [dict(p) for p in SPEC["params"]]
+PARAM_DEFAULTS = {p["key"]: p["default"] for p in PARAM_SPECS}
+PARAM_NOTES = dict(SPEC["param_notes"])
+PROF_LIMITS = {p["key"]: int(p["max"]) for p in PARAM_SPECS}
+DEFAULT_PROFILE_NAME = PRESETS.get("direct", ("直连（不限制）",))[0]
+
+COMBO_SPEC = SPEC["combo"]
+MAX_COMBO_STEPS = int(COMBO_SPEC["max_steps"])
+STEP_MAX_MINUTES = int(COMBO_SPEC["max_minutes"])
+STEP_MAX_SECONDS = int(COMBO_SPEC["max_seconds"])
+
+SHARE_SPEC = SPEC["share"]
+SHARE_VER = int(SHARE_SPEC["ver"])
+PIN_LEN = int(SHARE_SPEC["pin_len"])
+MAX_INBOX = int(SHARE_SPEC["inbox_max"])
+MAX_SHARED_STEPS = int(SHARE_SPEC["max_shared_steps"])
+
+
 # 未命中「接管范围」的程序走直通：原样转发，不注入任何弱网参数。
 # 用一个固定的全零 profile，且不随 G.profile 变化（否则切换场景会误伤不该接管的程序）。
 BYPASS_PROFILE = None   # 延迟到 default_profile 定义后初始化
 
 
-def default_profile(name="直连（不限制）"):
-    return {
-        "name": name,
-        "latency_up_ms": 0,        # 上行初始延迟
-        "latency_down_ms": 0,      # 下行初始延迟
-        "jitter_ms": 0,            # 随机抖动（±）
-        "down_kbps": 0,            # 下行带宽（kbps，0=不限）
-        "up_kbps": 0,              # 上行带宽（kbps，0=不限）
-        "loss_pct": 0.0,           # 丢包率（表现为卡顿停顿）
-        "stall_ms": 600,           # 单次卡顿时长
-        "disconnect_pct": 0.0,     # 随机断连率（每数据块判定）
-        "timeout_pct": 0.0,        # 黑洞超时率（每连接判定）
-        "dns_fail_pct": 0.0,       # DNS 失败率（每连接判定）
-        "reject_pct": 0.0,         # 立即拒连率（每连接判定）
-        "flap_sec": 0,             # 周期断网间隔（0=关闭）
-        "flap_blackout_sec": 2,    # 每次断网时长
-    }
+def default_profile(name=None):
+    prof = dict(PARAM_DEFAULTS)
+    prof["name"] = name or DEFAULT_PROFILE_NAME
+    return prof
 
 
 def has_limits(prof):
@@ -467,193 +498,20 @@ def has_limits(prof):
     return any(prof.get(k) != d.get(k) for k in d if k != "name")
 
 
-# key: (名称, 分类, 参数覆盖)
-#
-# 2026-10 清理过时的制式：2G EDGE / 2G GPRS / 56K 拨号 / 3G 已陆续退网
-# （国内外运营商关停 2G/3G、拨号上网早已不存在），留着只会让测试同学误以为
-# 现网还有这些档位。想要「极慢网」直接用自定义参数压带宽即可，不必挂靠已退网的制式。
-PRESETS = {
-    "direct": ("直连（不限制）", "常规网络", {}),
-    "wifi": ("Wi-Fi 良好", "常规网络",
-             {"latency_up_ms": 10, "latency_down_ms": 30, "jitter_ms": 5,
-              "down_kbps": 50000, "up_kbps": 20000}),
-    "4g": ("4G LTE", "常规网络",
-           {"latency_up_ms": 40, "latency_down_ms": 60, "jitter_ms": 15,
-            "down_kbps": 20000, "up_kbps": 10000}),
-    # 5G：空口延迟比 4G 低一个量级（实测良好覆盖下 RTT 约 10~20ms），
-    # 下行按 100Mbps 给，够触发「秒开」级别的体验，也能跑满多数 App 的预加载
-    # 4G 弱网：地下车库 / 城中村 / 演唱会现场这类「有 4G 图标但速率塌了」的场景，
-    # 速率比 5G 弱覆盖再低一档，丢包与偶发断流更明显（4G 的重传比 5G 慢）
-    "4g_weak": ("4G 弱网（边缘/室内）", "弱网环境",
-                {"latency_up_ms": 70, "latency_down_ms": 110, "jitter_ms": 45,
-                 "down_kbps": 3000, "up_kbps": 800, "loss_pct": 4,
-                 "disconnect_pct": 1, "stall_ms": 1200}),
-    "5g": ("5G（良好覆盖）", "常规网络",
-           {"latency_up_ms": 12, "latency_down_ms": 20, "jitter_ms": 8,
-            "down_kbps": 100000, "up_kbps": 40000}),
-    # 5G 弱覆盖：室内深处 / 小区边缘 / 地铁口，常见的是 SA 还能驻留但速率塌到几 Mbps，
-    # 伴随少量丢包与偶发断流（比 Wi-Fi 弱信号更容易「看着有信号实际传不动」）
-    "5g_weak": ("5G 弱覆盖（室内/边缘）", "弱网环境",
-                {"latency_up_ms": 50, "latency_down_ms": 80, "jitter_ms": 35,
-                 "down_kbps": 6000, "up_kbps": 1500, "loss_pct": 2,
-                 "disconnect_pct": 1, "stall_ms": 1000}),
-    "wifi_weak": ("弱 Wi-Fi（隔墙/远端）", "弱网环境",
-                  {"latency_up_ms": 60, "latency_down_ms": 120, "jitter_ms": 60,
-                   "down_kbps": 5000, "up_kbps": 2000, "loss_pct": 3}),
-    "congestion": ("网络拥塞", "弱网环境",
-                   {"latency_up_ms": 200, "latency_down_ms": 400, "jitter_ms": 100,
-                    "down_kbps": 512, "up_kbps": 256, "loss_pct": 5}),
-    "satellite": ("卫星链路（高延迟）", "弱网环境",
-                  {"latency_up_ms": 700, "latency_down_ms": 700, "jitter_ms": 80,
-                   "down_kbps": 2000, "up_kbps": 512}),
-    # 高丢包：带宽看着够（能起连、能握手），但每三个包就丢一个 ——
-    # 典型症状是视频卡成 PPT、图片加载到一半、长连接反复重试
-    "high_loss": ("高丢包（30% 丢包）", "弱网环境",
-                  {"latency_up_ms": 100, "latency_down_ms": 150, "jitter_ms": 80,
-                   "down_kbps": 8000, "up_kbps": 3000, "loss_pct": 30,
-                   "stall_ms": 800}),
-    # 高延迟：带宽正常、也不丢包，纯粹是往返慢（跨境链路、卫星回传、代理中转），
-    # 用来复现「点一下要等半天才有反应」而不是「传不动」
-    "high_latency": ("高延迟（RTT 800ms）", "弱网环境",
-                     {"latency_up_ms": 400, "latency_down_ms": 400, "jitter_ms": 60,
-                      "down_kbps": 10000, "up_kbps": 5000}),
-    "highspeed_rail": ("高铁 / 地铁（高速移动）", "极端环境",
-                       {"latency_up_ms": 60, "latency_down_ms": 100, "jitter_ms": 150,
-                        "down_kbps": 1500, "up_kbps": 512, "loss_pct": 8,
-                        "disconnect_pct": 2, "stall_ms": 1200}),
-    "elevator": ("电梯 / 地下室（信号极差）", "极端环境",
-                 {"latency_up_ms": 500, "latency_down_ms": 800, "jitter_ms": 300,
-                  "down_kbps": 256, "up_kbps": 128, "loss_pct": 20,
-                  "disconnect_pct": 10, "stall_ms": 2000}),
-    "flapping": ("频繁断连（网络切换）", "极端环境",
-                 {"latency_up_ms": 80, "latency_down_ms": 120, "jitter_ms": 50,
-                  "down_kbps": 8000, "up_kbps": 4000, "disconnect_pct": 5,
-                  "flap_sec": 8, "flap_blackout_sec": 3}),
-    "blackhole": ("黑洞（请求无响应）", "极端环境", {"timeout_pct": 100}),
-    "dns_fail": ("DNS 故障（无法解析域名）", "极端环境", {"dns_fail_pct": 100}),
-    "airplane": ("完全断网（立即拒连）", "极端环境", {"reject_pct": 100}),
-}
-
-# 每个内置场景的注释：界面上的「！」入口把它们列出来。
-#
-# 为什么不复用 PRESETS 里的参数值自动生成：光看数字（延迟 110ms / 3Mbps / 丢包 4%）
-# 分不清「4G 弱网」和「弱 Wi-Fi」到底差在哪，也看不出该用哪一档去复现某个 bug。
-# 这里写的是「模拟的是什么现场 + 典型症状」，参数摘要由界面按 profile 现算。
-PRESET_NOTES = {
-    "direct":
-        "不做任何处理，流量原样直通。用来确认「接管本身没问题」，也是跟其它场景对比的基线。",
-    "wifi":
-        "家用 / 办公 Wi-Fi 的典型值：延迟几十毫秒、带宽几十 Mbps。功能验证和性能对比的基准环境。",
-    "4g":
-        "移动网络常规体验：RTT 40~60ms、下行 20Mbps。模拟户外 / 地铁里信号正常的 4G。",
-    "5g":
-        "空口延迟比 4G 低一个量级（RTT 10~20ms），下行 100Mbps。能触发「秒开」级体验，"
-        "也够跑满多数 App 的预加载。",
-    "4g_weak":
-        "地下车库 / 城中村 / 演唱会现场这类「有 4G 图标但速率塌了」的现场。"
-        "速率比 5G 弱覆盖再低一档，丢包与偶发断流更明显 —— 4G 的重传比 5G 慢。",
-    "5g_weak":
-        "室内深处 / 小区边缘 / 地铁口：还能驻留，但速率塌到几 Mbps，伴随少量丢包与偶发断流。"
-        "比弱 Wi-Fi 更容易出现「看着有信号、实际传不动」。",
-    "wifi_weak":
-        "隔墙 / 离路由器远：信号还在，但速率与稳定性一起掉，抖动明显（±60ms）。"
-        "适合复现「Wi-Fi 满格却一直转圈」。",
-    "congestion":
-        "晚高峰 / 多人共享带宽：延迟翻倍、下行被压到 512kbps。复现「点一下要转半天圈」。",
-    "satellite":
-        "单程 700ms（一次往返约 1.4 秒）、带宽 2Mbps。典型表现是「每个请求都要等好几秒才回来」，"
-        "用来验证加载态、超时与重试。",
-    "high_loss":
-        "带宽看着够（能起连、能握手），但每三个包丢一个。典型症状：视频卡成 PPT、"
-        "图片加载一半、长连接反复重试。",
-    "high_latency":
-        "带宽正常、也不丢包，纯粹往返慢（跨境链路、卫星回传、代理中转）。"
-        "复现的是「慢但有结果」，不是「传不动」。",
-    "highspeed_rail":
-        "高速移动下频繁切换基站：抖动极大（±150ms）、偶发断流、带宽低。"
-        "适合验证重连与断点续传。",
-    "elevator":
-        "信号极差：延迟接近秒级、20% 丢包、10% 断连，常伴超时。"
-        "最容易触发「请求卡死」的一档。",
-    "flapping":
-        "每 8 秒断网 3 秒，模拟网络反复切换 / 弱信号掉线。"
-        "专门用来验证重连、重试与断线提示逻辑。",
-    "blackhole":
-        "请求发出去没有任何响应，连接挂住不返回 —— 不是报错，是一直等。"
-        "用来验证超时、取消与兜底 UI。",
-    "dns_fail":
-        "域名解析全部失败，但直接用 IP 的连接仍然通 —— 只拦 DNS 查询，不拦已建立的数据通道。",
-    "airplane":
-        "所有新连接立即被拒绝（是立刻失败，不是挂住）。模拟飞行模式 / 完全无网络，"
-        "验证快速失败与降级路径。",
-}
+# 预置场景：名称 / 分类 / 参数覆盖全部来自 spec/spec.json。
+# 已退网制式（2G / 3G / 拨号）不再单列：要「极慢网」直接用自定义参数压带宽。
 
 
-# 弱网组合的说明文案与推荐例子。
-#
-# 为什么要单独一份：组合是「按时长排队播的一串场景」，光看按钮上的名字
-# （「通勤」「抢购」）猜不出它到底模拟了什么。用户在组合页点「！」能看到的
-# 内容分三块：组合怎么播、每段拼在一起是什么效果、几个能照抄的例子。
-#
-# 文案放在引擎里而不是界面里，是为了让 Windows 与 APK 两端说同一句话 ——
-# 两端各写一份必然漂移（改了一端忘了另一端，说的就不一样了）。
+# 每个内置场景的注释来自 spec 的 notes。为什么不按参数值自动生成：
+# 光看数字（110ms / 3Mbps / 4% 丢包）分不清「4G 弱网」和「弱 Wi-Fi」差在哪，
+# 也看不出该用哪一档复现某个 bug。
+
+
+# 弱网组合的说明 / 例子 / 提醒来自 spec 的 combo：两端说同一句话。
 COMBO_DOC_SEP = "\x1f"
-
-COMBO_INTRO = (
-    "弱网组合 = 把几支场景按时长排成一条链，选中后自动一段段播过去。\n"
-    "· 顺序播放：一段跑完自动切下一段，中间不用你操作。\n"
-    "· 可循环：末尾再回到第一段，一直循环下去（不勾就播完一遍停住）。\n"
-    "· 最多 5 段：再多就不好在界面上按顺序核对了。\n"
-    "· 组合里不能再套组合：段只能选预设或自定义场景。\n"
-    "· 弱网没开着时点组合只「选中」，不会替你偷偷开始限速；开着才会立刻播。"
-)
-
-# 推荐例子：照抄就能用
-COMBO_EXAMPLES = [
-    {
-        "name": "通勤路上",
-        "desc": "从有信号走进信号差的地方，再彻底没信号，最后恢复。",
-        "effect": "复现「地铁进隧道」这类真实链路：先正常加载，走到弱覆盖区开始卡，"
-                  "进隧道后请求挂住，出站后恢复。适合测弱网下的加载中状态与恢复逻辑。",
-        "steps": "5G 良好 30 秒 → 4G 弱网 1 分 → 完全断网 30 秒 → 5G 良好 30 秒",
-    },
-    {
-        "name": "抢购秒杀",
-        "desc": "平时流畅，一到高峰就抢不到，失败后快速重试。",
-        "effect": "高并发下服务端限流或网络拥塞的典型表现：请求变慢、部分直接失败。"
-                  "适合验证 App 的失败提示、重试与降级路径。",
-        "steps": "5G 良好 20 秒 → 弱 Wi-Fi 1 分 → 黑洞（无响应）15 秒 → 弱 Wi-Fi 1 分",
-    },
-    {
-        "name": "网络抖动",
-        "desc": "信号时好时坏，延迟忽大忽小。",
-        "effect": "模拟电梯、隧道口、拥挤场所的信号抖动。适合测实时音视频、"
-                  "语音通话、在线协作这类对延迟敏感的链路。",
-        "steps": "5G 良好 20 秒 → 弱 5G 20 秒 → 5G 良好 20 秒 → 弱 5G 20 秒（循环）",
-    },
-    {
-        "name": "定时断网",
-        "desc": "每隔一会儿断一次，过一会儿自己恢复。",
-        "effect": "模拟周期性网络中断（如基站切换、家庭路由重启）。"
-                  "适合验证长连接断了能不能自己重连、心跳与超时逻辑。",
-        "steps": "4G 良好 1 分 → 黑洞（无响应）20 秒（循环）",
-    },
-    {
-        "name": "加载渐变",
-        "desc": "从慢到快再到慢，模拟带宽被逐步放开。",
-        "effect": "测大文件 / 长列表的渐进加载表现：首屏慢、之后提速、快结束时又慢下来。"
-                  "适合验证进度条与分片下载逻辑。",
-        "steps": "极慢（100kbps）20 秒 → 4G 弱网 20 秒 → 5G 良好 20 秒 → 极慢（100kbps）20 秒",
-    },
-]
-
-# 组合特有的坑：单支场景页里没有这些
-COMBO_TIPS = [
-    "组合播到一半可以随时切走或暂停：切换后原组合停在原地，不会偷偷继续改参数。",
-    "每一段都是完整的一支场景，段与段之间参数是整套替换的 —— "
-    "不会把上一段的丢包率带进下一段。",
-    "循环组合会一直播下去，测完记得切走或暂停，别忘了它在后台改着参数。",
-]
+COMBO_INTRO = COMBO_SPEC["intro"]
+COMBO_EXAMPLES = [dict(e) for e in COMBO_SPEC["examples"]]
+COMBO_TIPS = list(COMBO_SPEC["tips"])
 
 
 # 三块内容拼成的完整文档串（两端逐字一致，由 _t_combo_notes.py 比对）
@@ -735,68 +593,9 @@ def _new_pid(used):
             return pid
 
 
-# 自定义参数每个字段的上限。百分比类最多 100，时间/带宽类留足余量但别到荒谬的量级
-PROF_LIMITS = {
-    "latency_up_ms": 10000, "latency_down_ms": 10000, "jitter_ms": 5000,
-    "down_kbps": 1000000, "up_kbps": 1000000,
-    "loss_pct": 100, "disconnect_pct": 100, "timeout_pct": 100,
-    "dns_fail_pct": 100, "reject_pct": 100,
-    "stall_ms": 60000, "flap_sec": 3600, "flap_blackout_sec": 600,
-}
+# 自定义参数的上下限来自 spec 的 params（PROF_LIMITS 在上面统一构建）。
 
-# 每个自定义参数的注释：界面上的「！」入口按参数逐个显示。
-#
-# 为什么需要：13 个参数里有一半光看名字猜不出行为 —— 「丢包率」填 30 到底会让请求
-# 报错还是变慢？「黑洞率」和「拒连率」都是连不上，差别在哪？「卡顿时长」单独填
-# 为什么没效果？这些都得翻引擎源码才能确定，写在这里让用户点一下就看到。
-# 文案与安卓端 Profile.PARAM_NOTES 保持一致（由 _t_param_notes.py 逐条比对）。
-PARAM_NOTES = {
-    "latency_down_ms":
-        "给「服务器 → 本机」方向每块数据加的固定延迟，用来拉长响应回来的时间。\n"
-        "每块数据都会加，不是只在建连时加一次 —— 否则 keep-alive / WebSocket 这类长连接里"
-        "只有第一个请求慢，后面的全是零延迟。一次往返 ≈ 上行延迟 + 下行延迟。",
-    "latency_up_ms":
-        "给「本机 → 服务器」方向加的固定延迟，影响请求发出去要多久才到服务器。\n"
-        "「点了按钮迟迟不发请求」看这项，「请求回来了但界面不刷新」看下行延迟。"
-        "一次往返 ≈ 上行 + 下行，所以两项都填 400 时 RTT 是 800ms。",
-    "jitter_ms":
-        "每个数据块的延迟在基础值上随机浮动 ±N 毫秒，让延迟忽快忽慢。\n"
-        "实际延迟 = 基础延迟 + (-N ~ +N) 的随机值；抖动幅度不会超过基础延迟"
-        "（否则会算出负延迟，变成比直连还快的「零延迟包」），超出时按基础延迟封顶。"
-        "抖动主要影响实时音视频、游戏、VoIP；纯下载几乎感觉不到。",
-    "down_kbps":
-        "下行总带宽上限，单位 kbps（1 Mbps = 1000 kbps，1000 kbps ≈ 125 KB/s）。0 = 不限。\n"
-        "注意是全局共享的一份带宽：同时开 5 条连接是 5 条一起分摊，不是每条各拿一份。",
-    "up_kbps":
-        "上行总带宽上限（本机 → 服务器），单位 kbps。0 = 不限。\n"
-        "上传大文件、发图片、提交大请求体时先卡在这里；只测「页面加载慢」时通常不用改它。",
-    "loss_pct":
-        "每块数据按这个概率「丢掉」，表现不是报错，而是一段停顿（模拟 TCP 等重传）。\n"
-        "停多久由下面的「卡顿时长」决定，丢包率本身不决定停多久。填 100 会表现为完全传不动。",
-    "stall_ms":
-        "每次「丢包」命中后停顿多久，实际会在 0.5~1.5 倍之间随机。\n"
-        "只在丢包率 > 0 时生效 —— 丢包率为 0 时这项填什么都不影响结果。默认 600。",
-    "disconnect_pct":
-        "每块数据按概率直接掐断整条连接（两侧 RST/FIN），App 看到的是「连接被重置」。\n"
-        "和丢包的区别：丢包是慢，断连是断，必须重连才能继续。只影响已建立的连接；"
-        "能不能建连由「拒连率」管。",
-    "timeout_pct":
-        "新连接按概率「发出去没有回应」，先挂住不返回，过一会儿才继续处理。\n"
-        "最容易触发「请求卡死、转圈不停」。和「拒连率」的区别：这个是挂住等，那个是立刻失败。",
-    "dns_fail_pct":
-        "按概率让域名解析失败（返回 502 DNS resolution failed）。\n"
-        "只拦「需要解析域名」的连接：用 IP 直连的（HTTPDNS、写死 IP 的 App）不受影响 —— "
-        "所以填 100% 也可能看到部分请求正常。",
-    "reject_pct":
-        "新连接按概率立刻被拒绝（直接返回 502），是「马上失败」而不是挂住。\n"
-        "模拟飞行模式 / 完全没网，用来验证 App 的快速失败与降级路径。",
-    "flap_sec":
-        "每隔 N 秒把当前所有连接全部掐断，持续「断网时长」后恢复。0 = 关闭。\n"
-        "这是周期性的整体断网，跟「断连率」随机掐单条不是一回事；两项可以叠加。",
-    "flap_blackout_sec":
-        "每次周期断网持续多久，到点自动恢复。\n"
-        "只在「断网间隔」> 0 时生效，单独填没有作用。",
-}
+# 每个参数的注释来自 spec 的 param_notes。
 
 
 # 说明文案的固定结构：第一段讲「这项是干什么的」，第二段讲「坑在哪」。
@@ -1284,9 +1083,7 @@ def delete_user_preset(pid):
 # --------------------------------------------------------------------------
 
 COMBO_KEY_PREFIX = "c:"
-MAX_COMBO_STEPS = 5            # 上限：再长就不好在界面上按顺序核对了
-STEP_MAX_MINUTES = 600         # 单段最多 10 分钟
-STEP_MAX_SECONDS = 59
+# 组合上限（段数 / 单段分秒）来自 spec 的 combo。
 
 
 def step_seconds(st):
@@ -1586,6 +1383,7 @@ class G:
     last_profile = None                # 最后一次生效过的场景（「再次开启」时复原用）
     gate_open = True
     events = deque(maxlen=300)
+    event_seq = 0               # 事件序号：deque 满了以后 len 不再变化，界面靠它判断有没有新事件
     conns_total = 0
     conns_active = 0
     bytes_up = 0
@@ -1624,6 +1422,8 @@ class G:
     share_port = 0              # 共享服务端口（0 = 未开启）
     share_server = None
     discover_listen = False     # 是否成功监听了 UDP 广播
+    share_pin = ""              # 4 位共享 PIN：推送方必须带对，否则 403
+    allow_legacy = False        # 是否接受 ver=1（无 PIN）旧版推送，且只进收件箱
 
 
 BYPASS_PROFILE = default_profile("（未接管 · 直通）")
@@ -1659,7 +1459,9 @@ def set_scope(mode, names):
 
 def log_event(etype, msg):
     """记一条事件：进内存 deque（GUI/接口实时看）+ 缓冲日志（落盘，事后排查用）"""
-    G.events.append({"t": time.strftime("%H:%M:%S"), "type": etype, "msg": msg})
+    G.event_seq += 1
+    G.events.append({"seq": G.event_seq, "t": time.strftime("%H:%M:%S"),
+                     "type": etype, "msg": msg})
     try:
         if _LOG_SINK is None:
             globals()["_LOG_SINK"] = _LogSink(LOG_FILE)
@@ -1941,7 +1743,7 @@ class DelayLine:
 
     MAX_BLOCKS = 64             # 在途块数上限（64KB × 64 ≈ 4MB），兼作背压阈值
 
-    __slots__ = ("writer", "q", "task", "pending", "label")
+    __slots__ = ("writer", "q", "task", "pending", "label", "dead")
 
     def __init__(self, writer, label=""):
         self.writer = writer
@@ -1949,6 +1751,7 @@ class DelayLine:
         self.task = None
         self.pending = 0
         self.label = label
+        self.dead = False       # 投递协程已退出：此后 submit 直接丢弃，绝不再阻塞
 
     def start(self):
         self.task = asyncio.create_task(self._run())
@@ -1958,12 +1761,41 @@ class DelayLine:
         """没有「排在自己前面、但还没真正写出」的数据 —— 此时才配走零延迟快路径"""
         return self.pending == 0 and self.q.empty()
 
+    def _drain(self):
+        """丢弃排队中的数据并把 pending 归零计数。
+
+        队列满时生产者阻塞在 q.put 上；get_nowait 会唤醒等待中的 putter，
+        所以「消费者退出后生产者永久挂起」这条路在这里被拆掉。
+        """
+        while True:
+            try:
+                item = self.q.get_nowait()
+            except asyncio.QueueEmpty:
+                return
+            if item is not None:
+                self.pending = max(0, self.pending - len(item[0]))
+
+    def _mark_dead(self):
+        """所有退出路径的唯一出口：置位、清队列、唤醒生产者、取消投递协程"""
+        if self.dead:
+            return
+        self.dead = True
+        self._drain()
+        t = self.task
+        if t is not None and not t.done() and t is not asyncio.current_task():
+            t.cancel()
+
     def abort(self):
-        """连接已被掐断，积压数据不必再投递"""
-        if self.task is not None and not self.task.done():
-            self.task.cancel()
+        """连接已被掐断，积压数据不必再投递。
+
+        必须先 mark_dead 再 cancel：只 cancel 的话，正卡在 q.put 上的生产者
+        不会被唤醒，aclose 里那句 put 也就永远等不到空位。
+        """
+        self._mark_dead()
 
     async def submit(self, data, delay, gen):
+        if self.dead:
+            return
         if delay <= 0 and self._idle():
             # 零延迟且无在途数据：直接写。直连档靠这条快路径保持满速，不被队列调度拖慢
             self.writer.write(data)
@@ -1971,6 +1803,9 @@ class DelayLine:
             return
         self.pending += len(data)
         await self.q.put((data, time.monotonic() + delay, gen))
+        if self.dead:
+            # 入队期间消费者退出：本块不会再有人投递，立即回收计数
+            self._drain()
 
     async def _run(self):
         try:
@@ -1988,11 +1823,15 @@ class DelayLine:
                 except (ConnectionError, OSError):
                     return
                 finally:
-                    self.pending -= len(data)
+                    self.pending = max(0, self.pending - len(data))
         except asyncio.CancelledError:
             raise
         except Exception:
             return
+        finally:
+            # 包括 CancelledError 在内的所有退出路径都要收敛到这里，
+            # 否则生产者会卡在满队列的 put 上、aclose 会卡在哨兵 put 上。
+            self._mark_dead()
 
     async def aclose(self, timeout=None):
         """排空队列后再返回。
@@ -2007,17 +1846,26 @@ class DelayLine:
         if t is None:
             return
         self.task = None
+        if self.dead or t.done():
+            # 消费者已经没了：没有排空的可能，立刻返回（旧实现在这里会永久阻塞）
+            t.cancel()
+            self._drain()
+            return
         if timeout is None:
             # 64KB 一块、每块至少留 30s 余量；速率信息由 pipe 通过 rate_kbps 传入更准，
             # 这里用保守的块数估算兜底（调用方一般会显式传 timeout）
             timeout = max(30.0, self.pending / 32768.0 + 30.0)
+        deadline = time.monotonic() + timeout
         try:
-            await self.q.put(None)
-            await asyncio.wait_for(t, timeout=timeout)
+            # 哨兵入队也必须限时：消费者若正好在这期间死掉，put 会一直等空位
+            await asyncio.wait_for(self.q.put(None), timeout=min(15.0, timeout))
+            await asyncio.wait_for(t, timeout=max(0.01, deadline - time.monotonic()))
         except (asyncio.TimeoutError, TimeoutError):
             t.cancel()
+            self._mark_dead()
         except BaseException:
             t.cancel()
+            self._mark_dead()
             raise
 
 
@@ -2199,7 +2047,7 @@ async def _read_msg_head(reader, timeout):
     while True:
         try:
             h = await asyncio.wait_for(reader.readline(), timeout=timeout)
-        except (TimeoutError, ConnectionError, OSError):
+        except (asyncio.TimeoutError, TimeoutError, ConnectionError, OSError):
             return None
         if not h:
             return lines if lines else None
@@ -2492,7 +2340,7 @@ async def handle_proxy(reader, writer):
 
         try:
             line = await asyncio.wait_for(reader.readline(), timeout=600)
-        except (TimeoutError, ConnectionError, OSError):
+        except (asyncio.TimeoutError, TimeoutError, ConnectionError, OSError):
             return
         if not line:
             return
@@ -2513,7 +2361,7 @@ async def handle_proxy(reader, writer):
                 hs.append(h)
         try:
             headers = await asyncio.wait_for(_read_headers(), timeout=30)
-        except (TimeoutError, ConnectionError, OSError):
+        except (asyncio.TimeoutError, TimeoutError, ConnectionError, OSError):
             return
 
         # 直通连接用固定全零参数：不注入任何弱网效果，也不随场景切换而变化
@@ -2708,6 +2556,15 @@ async def set_profile(prof, key):
     G.profile = cur
     G.preset_key = key
     G.gen += 1                     # 代数 +1：唤醒所有挂起（黑洞/卡顿）的连接
+    # 令牌桶必须在这里同步新速率。等待中的 consume 只在下次醒来时才检查 rate，
+    # 若等 pipe 下一轮再 sync，点「停止」要等当前 64KB 块按旧速率走完
+    # （300kbps 下约 1.7s），用户看到的是「点了停止还在慢慢下」。
+    for _k, _b in (("up_kbps", G.bucket_up), ("down_kbps", G.bucket_down)):
+        if _b is not None:
+            try:
+                _b.sync(cur.get(_k, 0))
+            except Exception:
+                pass
     try:
         if G.wake is not None:
             G.wake.set()
@@ -2930,6 +2787,7 @@ DISCOVER_SPAN = 8              # 同机多实例时各占其后的一个端口�
 SHARE_PORT = 8900              # TCP 共享端口（接收别人推送用）
 DISCOVER_TAG = "weaknet-discover-v1"
 PEER_TTL = 12.0                # 超过这么久没再收到广播，就当对方下线了
+# 共享协议版本 / PIN 长度 / 收件箱上限来自 spec 的 share。
 
 
 def _settings_file():
@@ -3000,11 +2858,75 @@ def ensure_identity():
     if not d.get("name"):
         d["name"] = _default_user_name()
         changed = True
+    if "share_pin" not in d:
+        d["share_pin"] = new_share_pin()
+        changed = True
     if changed:
         save_settings(d)
     G.self_id = d["id"]
     G.user_name = d["name"]
+    G.share_pin = normalize_pin(d.get("share_pin"))
+    G.allow_legacy = bool(d.get("allow_legacy", False))
     return d
+
+
+def normalize_pin(v):
+    """PIN 只接受 4 位数字；其他形态一律视为空（不匹配）"""
+    s = "".join(ch for ch in str(v or "") if ch.isdigit())[:PIN_LEN]
+    return s if len(s) == PIN_LEN else ""
+
+
+def new_share_pin():
+    return "%04d" % random.randint(0, 9999)
+
+
+def set_share_pin(pin=None, refresh=False):
+    """设置/刷新共享 PIN。refresh=True 时忽略 pin 参数直接换一个随机的。"""
+    d = ensure_identity()
+    p = new_share_pin() if refresh else normalize_pin(pin)
+    if not p:
+        return {"ok": False, "error": "PIN 需为 4 位数字"}
+    d["share_pin"] = p
+    save_settings(d)
+    G.share_pin = p
+    log_event("share", "共享 PIN 已" + ("刷新" if refresh else "更新"))
+    return {"ok": True, "pin": p}
+
+
+def set_allow_legacy(v):
+    d = ensure_identity()
+    d["allow_legacy"] = bool(v)
+    save_settings(d)
+    G.allow_legacy = bool(d["allow_legacy"])
+    log_event("share", "旧版设备推送：" + ("允许（仅进收件箱）" if G.allow_legacy else "已拒绝"))
+    return {"ok": True, "allow_legacy": G.allow_legacy}
+
+
+def share_proto_ver(payload):
+    try:
+        return int(payload.get("ver") or 1)
+    except Exception:
+        return 1
+
+
+def share_auth_error(payload, target_pin=None):
+    """共享推送的鉴权判定：None = 放行，否则返回 (HTTP 状态码, 原因)。
+
+    默认安全：ver<2（旧版、无 PIN）直接 409 拒收；用户在面板里显式打开
+    allow_legacy 后才接受，且调用方会把内容强制降级为「只进收件箱」。
+    """
+    if share_proto_ver(payload) < SHARE_VER:
+        if not G.allow_legacy:
+            return 409, "对方是旧版 WeakNet（无 PIN），已拒收；可在共享面板允许旧版设备"
+        return None
+    want = G.share_pin if target_pin is None else normalize_pin(target_pin)
+    if not want:
+        # 本机从未生成过 PIN（例如刚升级、设置文件只读）：此时没有可校验的口令，
+        # 与其全部拒收让用户以为共享坏了，不如放行并提示去面板设置 PIN。
+        return None
+    if normalize_pin(payload.get("pin")) != want:
+        return 403, "PIN 不正确"
+    return None
 
 
 def set_user_name(name):
@@ -3033,12 +2955,24 @@ class _DiscoverProtocol(asyncio.DatagramProtocol):
         pid = str(msg.get("id") or "")
         if not pid or pid == G.self_id:
             return
+        try:
+            ver = int(msg.get("ver") or 1)
+        except Exception:
+            ver = 1
+        try:
+            share_port = int(msg.get("share") or SHARE_PORT)
+        except Exception:
+            share_port = SHARE_PORT
+        if not (0 < share_port < 65536):
+            share_port = SHARE_PORT
         G.peers[pid] = {
             "id": pid,
             "name": clean_name(msg.get("name"), "匿名"),
             "ip": addr[0],
             "platform": str(msg.get("platform") or "")[:16],
-            "share": int(msg.get("share") or SHARE_PORT),
+            "share": share_port,
+            "ver": ver,
+            "pin": normalize_pin(msg.get("pin")),
             "at": time.time(),
         }
 
@@ -3076,7 +3010,8 @@ def _broadcast_presence():
     payload = json.dumps({
         "tag": DISCOVER_TAG, "id": G.self_id, "name": G.user_name,
         "platform": "windows" if IS_WIN else os.name,
-        "share": G.share_port or SHARE_PORT, "ver": 1,
+        "share": G.share_port or SHARE_PORT, "ver": SHARE_VER,
+        "pin": G.share_pin,
     }, ensure_ascii=False).encode("utf-8")
     addrs = ["255.255.255.255"]
     try:
@@ -3146,18 +3081,31 @@ def _find_preset_by_name(name):
 COMBO_SHARE_MARK = "🔀 "          # 推文 / 日志里标出「这是个组合」的前缀
 
 
-def receive_share(payload):
+def _inbox_put(rec):
+    """收件箱入队并返回 id；满了返回 None（调用方必须给推送方回执）。"""
+    if len(G.inbox) >= MAX_INBOX:
+        return None
+    iid = _new_pid(set(G.inbox))
+    rec["id"] = iid
+    G.inbox[iid] = rec
+    return iid
+
+
+def receive_share(payload, only_inbox=False):
     """别人推给我的东西（自定义环境 + 弱网组合）：不同名直接入库；同名先进收件箱。
 
     两类走完全同一套规则 —— 组合跟自定义环境一样，同名就是两条不同内容撞了名字，
     静默覆盖会把对面排好的段序冲掉，所以一样进收件箱等本机用户决定。
+
+    only_inbox=True 用于「允许旧版设备」的兼容模式：没有 PIN 的推送不可信，
+    连重名判断都不做，一律只进收件箱、不自动入库。
     """
     items = payload.get("items") if isinstance(payload.get("items"), list) else []
     combos = payload.get("combos") if isinstance(payload.get("combos"), list) else []
     if not items and not combos:
         return {"ok": False, "error": "没有内容"}
     from_name = clean_name(payload.get("from"), "某人")
-    from_id = str(payload.get("from_id") or "")
+    from_id = str(payload.get("from_id") or "")[:32]
     accepted, pending, dropped = [], [], []
     for it in items[:20]:
         if not isinstance(it, dict):
@@ -3166,17 +3114,21 @@ def receive_share(payload):
         if not name:
             continue
         prof = _norm_user_profile(name, it.get("profile") or {})
-        if _find_preset_by_name(name) is None:
+        if not only_inbox and _find_preset_by_name(name) is None:
             newit, _all = upsert_user_preset(name, prof)   # 返回 (item, items)
             accepted.append(newit["name"])
             log_event("share", "收到 %s 推送的环境：%s" % (from_name, newit["name"]))
         else:
-            iid = _new_pid(set(G.inbox))
-            G.inbox[iid] = {"id": iid, "from": from_name, "from_id": from_id,
-                            "kind": "preset", "name": name, "profile": prof,
-                            "at": time.time()}
+            iid = _inbox_put({"from": from_name, "from_id": from_id,
+                              "kind": "preset", "name": name, "profile": prof,
+                              "at": time.time()})
+            if iid is None:
+                dropped.append({"name": name, "reason": "收件箱已满"})
+                log_event("share", "收件箱已满，丢弃 %s 推送的「%s」" % (from_name, name))
+                continue
             pending.append({"id": iid, "name": name, "kind": "preset"})
-            log_event("share", "%s 推送的「%s」与本地同名，等你决定" % (from_name, name))
+            why = "（旧版无 PIN，只进收件箱）" if only_inbox else "与本地同名"
+            log_event("share", "%s 推送的「%s」%s，等你决定" % (from_name, name, why))
     for c in combos[:20]:
         if not isinstance(c, dict):
             continue
@@ -3184,8 +3136,9 @@ def receive_share(payload):
         if not name:
             continue
         raw_steps = c.get("steps") if isinstance(c.get("steps"), list) else []
+        raw_steps = raw_steps[:MAX_SHARED_STEPS]
         loop = bool(c.get("loop"))
-        if _find_combo_by_name(name) is None:
+        if not only_inbox and _find_combo_by_name(name) is None:
             steps, dropped_steps = _resolve_shared_steps(raw_steps)
             if not steps:
                 # 一段都落不下来：对方这台机器上没法播这个组合。
@@ -3207,14 +3160,17 @@ def receive_share(payload):
             if dropped_steps:
                 log_event("share", "组合「%s」丢掉 %s" % (newc["name"], "、".join(dropped_steps)))
         else:
-            iid = _new_pid(set(G.inbox))
-            G.inbox[iid] = {"id": iid, "from": from_name, "from_id": from_id,
-                            "kind": "combo", "name": name,
-                            "combo": {"loop": loop, "steps": raw_steps},
-                            "at": time.time()}
+            iid = _inbox_put({"from": from_name, "from_id": from_id,
+                              "kind": "combo", "name": name,
+                              "combo": {"loop": loop, "steps": raw_steps},
+                              "at": time.time()})
+            if iid is None:
+                dropped.append({"name": name, "reason": "收件箱已满"})
+                log_event("share", "收件箱已满，丢弃 %s 推送的组合「%s」" % (from_name, name))
+                continue
             pending.append({"id": iid, "name": name, "kind": "combo"})
-            log_event("share", "%s 推送的组合「%s」与本地同名，等你决定"
-                      % (from_name, name))
+            why = "（旧版无 PIN，只进收件箱）" if only_inbox else "与本地同名"
+            log_event("share", "%s 推送的组合「%s」%s，等你决定" % (from_name, name, why))
     return {"ok": True, "accepted": accepted, "pending": pending,
             "dropped": dropped, "name": G.user_name}
 
@@ -3278,8 +3234,21 @@ def _post_share(ip, port, payload, timeout=6):
         "http://%s:%d/api/share" % (ip, port),
         data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
         headers={"Content-Type": "application/json"}, method="POST")
-    with urllib.request.urlopen(req, timeout=timeout) as r:
-        return json.loads(r.read().decode("utf-8"))
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return json.loads(r.read(1 << 20).decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        # 403/409/413 也带 JSON 原因：不能让调用方只看到「HTTP Error 403」
+        try:
+            d = json.loads(e.read(1 << 20).decode("utf-8"))
+        except Exception:
+            d = {}
+        if not isinstance(d, dict):
+            d = {}
+        d.setdefault("ok", False)
+        d.setdefault("error", "HTTP %d" % e.code)
+        d["http"] = e.code
+        return d
 
 
 async def push_to_peer(peer, item_ids, combo_ids=None):
@@ -3303,11 +3272,24 @@ async def push_to_peer(peer, item_ids, combo_ids=None):
                            "steps": share_steps(c)})
     if not items and not combos:
         return {"ok": False, "error": "没找到要推送的内容"}
+    ip = str(peer.get("ip") or "")
+    try:
+        port = int(peer.get("share") or SHARE_PORT)
+    except Exception:
+        port = SHARE_PORT
+    if not (0 < port < 65536):
+        port = SHARE_PORT
+    if not normalize_pin(peer.get("pin")):
+        # 调用方（控制 API / 脚本）通常只传 ip:port：PIN 从发现结果里补，
+        # 否则每次推送都得把 PIN 抄一遍，抄错就是 403。
+        for p in G.peers.values():
+            if (peer.get("id") and p["id"] == peer.get("id")) or p["ip"] == ip:
+                peer = dict(peer, pin=p.get("pin") or "", ver=p.get("ver") or 1)
+                break
     payload = {"from": G.user_name, "from_id": G.self_id,
                "platform": "windows" if IS_WIN else os.name,
+               "ver": SHARE_VER, "pin": normalize_pin(peer.get("pin")),
                "items": items, "combos": combos}
-    ip = str(peer.get("ip") or "")
-    port = int(peer.get("share") or SHARE_PORT)
     who = peer.get("name") or ip
     if not ip:
         return {"ok": False, "error": "对方地址为空"}
@@ -3317,6 +3299,10 @@ async def push_to_peer(peer, item_ids, combo_ids=None):
     except Exception as e:
         log_event("share", "推送给 %s 失败：%s" % (who, str(e)[:60]))
         return {"ok": False, "error": str(e)[:160]}
+    if res.get("ok") is False:
+        msg = str(res.get("error") or "对方拒收")[:160]
+        log_event("share", "推送给 %s 被拒：%s" % (who, msg))
+        return {"ok": False, "error": msg}
     accepted = [str(x) for x in (res.get("accepted") or [])]
     pending = res.get("pending") or []
     dropped = res.get("dropped") or []
@@ -3340,37 +3326,37 @@ async def handle_share(reader, writer):
     """共享端口上的小 HTTP 服务：只认 /api/hello 与 /api/share。
     刻意不复用控制台那一套 —— 这个端口是对局域网开放的，暴露面越小越好。"""
     try:
-        line = await asyncio.wait_for(reader.readline(), 5)
-        parts = line.decode("latin1").split()
-        if len(parts) < 2:
+        try:
+            method, path, headers, body = await read_http_request(
+                reader, MAX_BODY_SHARE, header_timeout=5.0)
+        except HttpError as e:
+            send_response(writer, e.code, JSON_CT, json.dumps(
+                {"ok": False, "error": e.msg}, ensure_ascii=False).encode())
             return
-        method, path = parts[0].upper(), parts[1].split("?")[0]
-        headers = []
-        while True:
-            h = await reader.readline()
-            if not h or h in (b"\r\n", b"\n"):
-                break
-            headers.append(h)
-        cl = 0
-        for h in headers:
-            if h.lower().startswith(b"content-length:"):
-                try:
-                    cl = int(h.split(b":", 1)[1])
-                except Exception:
-                    cl = 0
-        body = await reader.readexactly(cl) if cl else b""
 
         if path == "/api/hello":
             send_response(writer, 200, JSON_CT, json.dumps({
                 "app": "weaknet", "name": G.user_name, "id": G.self_id,
                 "platform": "windows" if IS_WIN else os.name,
+                "ver": SHARE_VER, "need_pin": True,
             }, ensure_ascii=False).encode())
         elif method == "POST" and path == "/api/share":
             try:
                 d = json.loads(body.decode("utf-8"))
             except Exception:
                 d = {}
-            res = receive_share(d if isinstance(d, dict) else {})
+            if not isinstance(d, dict):
+                d = {}
+            err = share_auth_error(d)
+            if err:
+                code, msg = err
+                log_event("share", "拒收 %s 的推送（HTTP %d）：%s"
+                          % (clean_name(d.get("from"), "未知设备"), code, msg))
+                send_response(writer, code, JSON_CT, json.dumps(
+                    {"ok": False, "error": msg}, ensure_ascii=False).encode())
+                return
+            legacy = share_proto_ver(d) < SHARE_VER
+            res = receive_share(d, only_inbox=legacy)
             send_response(writer, 200, JSON_CT,
                           json.dumps(res, ensure_ascii=False).encode())
         else:
@@ -3408,6 +3394,8 @@ def status_payload():
     ev = list(G.events)[-60:]
     ev.reverse()
     return {
+        "version": VERSION,
+        "build": BUILD,
         "profile": G.profile,
         "preset_key": G.preset_key,
         "limit_on": G.limit_on,
@@ -3436,12 +3424,140 @@ def status_payload():
             "id": G.self_id,
             "share": G.share_port,
             "discover": G.discover_listen,
+            "share_ver": SHARE_VER,
+            "allow_legacy": G.allow_legacy,
         },
         "inbox_count": len(G.inbox),
+        "spec_hash": SPEC_HASH,
     }
 
 
-REASON = {200: "OK", 400: "Bad Request", 404: "Not Found", 405: "Method Not Allowed"}
+def _share_peer_rows():
+    """共享对端列表：/api/peers 与 /api/share/status 共用一份，避免字段漂移。"""
+    now = time.time()
+    return [{"id": p["id"], "name": p["name"], "ip": p["ip"],
+             "platform": p["platform"], "share": p["share"],
+             "ver": p.get("ver") or 1,
+             "pin_ok": bool(normalize_pin(p.get("pin"))),
+             "ago": int(now - p["at"])}
+            for p in sorted(G.peers.values(), key=lambda x: x["name"].lower())]
+
+
+def _share_status_payload():
+    """共享只读状态：与 Android /api/share/status 同名同构（Android 旧路径 GET /api/share 为别名）"""
+    now = time.time()
+    return {
+        "name": G.user_name,
+        "id": G.self_id,
+        "share_port": G.share_port,
+        "discover": G.discover_listen,
+        "lan_ip": G.lan_ip,
+        "inbox_count": len(G.inbox),
+        "share_ver": SHARE_VER,
+        "allow_legacy": G.allow_legacy,
+        "inbox_max": MAX_INBOX,
+        "peers": _share_peer_rows(),
+        "inbox": [{"id": it["id"], "from": it["from"], "name": it["name"],
+                   "ago": int(now - it["at"])}
+                  for it in G.inbox.values()],
+    }
+
+
+REASON = {200: "OK", 400: "Bad Request", 403: "Forbidden", 404: "Not Found",
+          405: "Method Not Allowed", 408: "Request Timeout", 409: "Conflict",
+          413: "Payload Too Large", 431: "Request Header Fields Too Large",
+          501: "Not Implemented"}
+
+
+class HttpError(Exception):
+    """请求读取阶段的错误：handler 直接按 code 回一个 JSON 响应"""
+
+    def __init__(self, code, msg=""):
+        Exception.__init__(self, msg or str(code))
+        self.code = code
+        self.msg = msg
+
+
+MAX_HEADER_BYTES = 16 * 1024     # 请求行 + 全部头部
+MAX_HEADER_LINES = 100
+MAX_BODY_SHARE = 256 * 1024      # 共享推送：20 条环境 + 20 支组合远用不到 256KB
+MAX_BODY_CTRL = 1 << 20          # 控制台：留足余量，但仍必须有上限
+
+
+async def read_http_request(reader, max_body, header_timeout=10.0, body_timeout=30.0):
+    """读取并校验一个 HTTP/1.1 请求，返回 (method, path, headers, body)。
+
+    超限 / 畸形 / 超时一律抛 HttpError，由 handler 转成具体状态码并关闭连接。
+    明确不支持 chunked：猜测长度比拒绝更危险，调用方都是自家客户端，没有兼容包袱。
+    """
+    try:
+        head = await asyncio.wait_for(reader.readuntil(b"\r\n\r\n"), header_timeout)
+    except asyncio.IncompleteReadError:
+        raise HttpError(400, "incomplete request")
+    except asyncio.LimitOverrunError:
+        raise HttpError(431, "header too large")
+    except (asyncio.TimeoutError, TimeoutError):
+        raise HttpError(408, "header timeout")
+    if len(head) > MAX_HEADER_BYTES:
+        raise HttpError(431, "header too large")
+    lines = head.decode("latin1").split("\r\n")
+    while lines and not lines[-1]:
+        lines.pop()
+    if not lines:
+        raise HttpError(400, "empty request")
+    parts = lines[0].split()
+    if len(parts) < 2:
+        raise HttpError(400, "bad request line")
+    method, path = parts[0].upper(), parts[1].split("?")[0]
+    if len(lines) - 1 > MAX_HEADER_LINES:
+        raise HttpError(431, "too many headers")
+    headers = {}
+    for h in lines[1:]:
+        if ":" not in h:
+            raise HttpError(400, "bad header")
+        k, v = h.split(":", 1)
+        k = k.strip().lower()
+        if k in headers:
+            if k == "content-length":
+                raise HttpError(400, "duplicate content-length")
+            headers[k] = headers[k] + ", " + v.strip()
+        else:
+            headers[k] = v.strip()
+    if headers.get("transfer-encoding"):
+        raise HttpError(400, "chunked not supported")
+    raw_cl = headers.get("content-length", "0").strip()
+    if not raw_cl.isdigit():          # 含负数、非数字；这两种都按坏请求处理
+        raise HttpError(400, "bad content-length")
+    cl = int(raw_cl)
+    if cl > max_body:
+        raise HttpError(413, "body too large")
+    body = b""
+    if cl:
+        try:
+            body = await asyncio.wait_for(reader.readexactly(cl), body_timeout)
+        except asyncio.IncompleteReadError:
+            raise HttpError(400, "incomplete body")
+        except (asyncio.TimeoutError, TimeoutError):
+            raise HttpError(408, "body timeout")
+    return method, path, headers, body
+
+
+def ctrl_host_ok(headers):
+    """控制口只服务本机：Host 必须指向回环，且不允许浏览器带来的 Origin。
+
+    控制端口本来就绑 127.0.0.1，但浏览器里的任意网页也能向它发简单请求
+    （以及 DNS rebinding 把域名解析到 127.0.0.1），所以按 Host/Origin 再挡一层。
+    """
+    if headers.get("origin"):
+        return False
+    h = (headers.get("host") or "").strip().lower()
+    if not h:
+        return False
+    if h.startswith("["):                 # [::1]:8899
+        h = h.split("]")[0] + "]"
+    elif ":" in h:
+        h = h.rsplit(":", 1)[0]
+    return h in ("127.0.0.1", "localhost", "[::1]")
 
 
 def send_response(writer, code, ctype, body, extra=""):
@@ -3456,13 +3572,458 @@ def send_response(writer, code, ctype, body, extra=""):
 JSON_CT = "application/json; charset=utf-8"
 
 
+# ---- 控制接口路由表 ------------------------------------------------------
+#
+# 原先 handle_ctrl 是一条 300 多行的 if/elif：新增端点得在中间找位置，方法不对时
+# 又只会落到末尾的 404，读起来很难确认「这个路径到底支持哪些方法」。现在按
+# 「(方法, 路径) → 处理函数」建表：method 用 "*" 表示不限方法（与原 if/elif 的
+# 判定顺序等价）；同一路径 GET/POST 语义不同时分别注册；未注册的 /api/* 一律回
+# JSON 404，与旧行为一致。
+_CTRL_ROUTES = {}
+
+
+def _route(path, method="*"):
+    def _reg(fn):
+        _CTRL_ROUTES[(method, path)] = fn
+        return fn
+    return _reg
+
+
+@_route("/")
+@_route("/index.html")
+async def _h_root(writer, method, body):
+    # 网页控制台已下线（只保留 GUI）。留一句说明，免得浏览器打开是空白页、看不出原因
+    send_response(writer, 200, "text/plain; charset=utf-8",
+                  ("WeakNet 控制台已改为纯桌面界面，网页端不再提供。\n"
+                   "请运行 WeakNet.exe 使用图形界面；\n"
+                   "本机 HTTP 控制接口仍可用，见 /api/status。\n").encode("utf-8"))
+
+
+@_route("/api/status")
+async def _h_status(writer, method, body):
+    send_response(writer, 200, JSON_CT,
+                  json.dumps(status_payload(), ensure_ascii=False).encode())
+
+
+@_route("/api/share/status")
+async def _h_share_status(writer, method, body):
+    # 共享只读状态：与 Android 同名同构；POST /api/share 只在共享端口表示「提交推送」
+    if method == "POST":
+        send_response(writer, 405, JSON_CT,
+                      b'{"error":"method not allowed, use POST /api/push"}',
+                      extra="Allow: GET\r\n")
+    else:
+        send_response(writer, 200, JSON_CT,
+                      json.dumps(_share_status_payload(), ensure_ascii=False).encode())
+
+
+@_route("/api/presets")
+async def _h_presets(writer, method, body):
+    data = [{"key": k, "name": v[0], "cat": v[1]} for k, v in PRESETS.items()]
+    send_response(writer, 200, JSON_CT,
+                  json.dumps(data, ensure_ascii=False).encode())
+
+
+@_route("/api/params")
+async def _h_params(writer, method, body):
+    # 参数规格：两端由同一份 spec.json 生成，脚本/CI 用它做深度比对
+    send_response(writer, 200, JSON_CT, json.dumps(
+        {"spec_hash": SPEC_HASH, "items": PARAM_SPECS},
+        ensure_ascii=False).encode())
+
+
+@_route("/api/upresets")
+async def _h_upresets(writer, method, body):
+    # 自定义栏：用户命名保存的参数。老版本客户端没有这个接口也照常工作
+    send_response(writer, 200, JSON_CT, json.dumps(
+        {"items": _items_payload(get_user_presets())},
+        ensure_ascii=False).encode())
+
+
+@_route("/api/combos")
+async def _h_combos(writer, method, body):
+    # 弱网组合列表（每支带 steps 与一行摘要）。字段与 Android 端同名，
+    # 同一套脚本在两端都能跑，不用为平台各写一份
+    send_response(writer, 200, JSON_CT, json.dumps(
+        {"items": _combos_payload()}, ensure_ascii=False).encode())
+
+
+@_route("/api/combo", "POST")
+async def _h_combo_save(writer, method, body):
+    # 新增或覆盖一支组合：{id?, name, loop, steps:[{key,minutes,seconds}]}
+    try:
+        data = json.loads(body)
+    except Exception:
+        data = None
+    if not isinstance(data, dict):
+        send_response(writer, 400, JSON_CT, b'{"error":"bad request"}')
+        return
+    raw_steps = data.get("steps") if isinstance(data.get("steps"), list) else []
+    steps = []
+    for s in raw_steps:
+        if not isinstance(s, dict):
+            continue
+        steps.append({"key": str(s.get("key") or ""),
+                      "minutes": max(0, int(s.get("minutes", 0) or 0)),
+                      "seconds": max(0, int(s.get("seconds", 0) or 0))})
+    combo, _all = upsert_combo(data.get("name") or "", steps,
+                               loop=bool(data.get("loop")),
+                               cid=data.get("id"))
+    if combo is None:
+        # 一段都留不下：不当成保存成功，否则调用方会以为库里多了一支空组合
+        send_response(writer, 400, JSON_CT, json.dumps(
+            {"error": "没有一段能用的场景"}, ensure_ascii=False).encode())
+        return
+    log_event("config", "保存弱网组合：" + combo["name"])
+    send_response(writer, 200, JSON_CT, json.dumps(
+        {"ok": True, "id": combo["id"], "name": combo["name"],
+         "steps": len(combo["steps"])},
+        ensure_ascii=False).encode())
+
+
+@_route("/api/combo/delete", "POST")
+async def _h_combo_delete(writer, method, body):
+    try:
+        cid = json.loads(body).get("id")
+    except Exception:
+        cid = None
+    if not cid:
+        send_response(writer, 400, JSON_CT, b'{"error":"bad request"}')
+        return
+    combo = find_combo(cid)
+    # 删的这支是不是「当前这支」：正在播放（combo_id）或被选中（preset_key）
+    # 都要在删除后复位，否则 preset_key 悬挂指向已删除的组合、弱网参数无限期残留。
+    active = (str(G.combo_id) == str(cid)
+              or G.preset_key == COMBO_KEY_PREFIX + str(cid))
+    ok = bool(combo) and delete_combo(cid)[0]
+    if ok:
+        if active:
+            # 与界面删除同一条路径：停播放 + 回直连（set_profile 会同时把
+            # preset_key 置 direct、limit_on 置 False）
+            await stop_combo()
+            await set_profile(default_profile(), "direct")
+            log_event("config", "删除组合后切回直连")
+        log_event("config", "删除弱网组合：" + combo["name"])
+    send_response(writer, 200, JSON_CT,
+                  json.dumps({"ok": ok}, ensure_ascii=False).encode())
+
+
+@_route("/api/upreset", "POST")
+async def _h_upreset_save(writer, method, body):
+    # 保存（带 id 则覆盖更新那一条，否则新建）
+    try:
+        data = json.loads(body)
+        prof = data.get("profile")
+    except Exception:
+        data, prof = None, None
+    if not isinstance(data, dict) or not isinstance(prof, dict):
+        send_response(writer, 400, JSON_CT, b'{"error":"bad request"}')
+        return
+    item, _items = upsert_user_preset(data.get("name"), prof, data.get("id"))
+    log_event("config", "保存自定义场景：" + item["name"])
+    send_response(writer, 200, JSON_CT, json.dumps(
+        {"ok": True, "id": item["id"], "name": item["name"],
+         "items": _items_payload(get_user_presets())},
+        ensure_ascii=False).encode())
+
+
+@_route("/api/upreset/del", "POST")
+async def _h_upreset_del(writer, method, body):
+    try:
+        pid = json.loads(body).get("id")
+    except Exception:
+        pid = None
+    if not pid:
+        send_response(writer, 400, JSON_CT, b'{"error":"bad request"}')
+        return
+    ok, left = delete_user_preset(pid)
+    if ok:
+        log_event("config", "删除自定义场景")
+    send_response(writer, 200, JSON_CT, json.dumps(
+        {"ok": ok, "items": _items_payload(left)}, ensure_ascii=False).encode())
+
+
+@_route("/api/preset", "POST")
+async def _h_preset_select(writer, method, body):
+    key = None
+    try:
+        key = json.loads(body).get("key")
+    except Exception:
+        key = None
+    if str(key or "").startswith(COMBO_KEY_PREFIX):
+        # "c:<id>" = 弱网组合：与 GUI 点组合按钮走同一条路
+        # （已开限速就立刻按序播放，没开只选中，不替用户偷偷开始限速）
+        cid = str(key)[len(COMBO_KEY_PREFIX):]
+        if find_combo(cid) is None:
+            send_response(writer, 400, JSON_CT, b'{"error":"bad request"}')
+            return
+        applied = await select_combo(cid)
+        send_response(writer, 200, JSON_CT, json.dumps(
+            {"ok": True, "applied": bool(applied),
+             "kind": "combo"}, ensure_ascii=False).encode())
+        return
+    try:
+        prof = build_preset_profile(key)
+    except Exception:
+        prof = None
+    if prof is None:
+        send_response(writer, 400, JSON_CT, b'{"error":"bad request"}')
+    else:
+        # 与 GUI 同一条规矩：切场景只是选中，没开启限速时不施加
+        await select_scene(prof, key)
+        log_event("config", "切换场景：" + prof["name"])
+        send_response(writer, 200, JSON_CT, b'{"ok":true}')
+
+
+@_route("/api/profile", "POST")
+async def _h_profile(writer, method, body):
+    try:
+        data = json.loads(body)
+    except Exception:
+        data = None
+    if not isinstance(data, dict):
+        send_response(writer, 400, JSON_CT, b'{"error":"bad request"}')
+        return
+    prof = default_profile("自定义")
+    for k, v in data.items():
+        if k in prof and k != "name" and isinstance(v, (int, float)):
+            prof[k] = max(0, v)
+    await set_profile(prof, "custom")
+    log_event("config", "应用自定义参数")
+    send_response(writer, 200, JSON_CT, b'{"ok":true}')
+
+
+@_route("/api/run")
+async def _h_run(writer, method, body):
+    # 限速总开关。GET 视为查询，POST {enable:true/false} 为切换。
+    if method == "POST" and body:
+        try:
+            enable_raw = json.loads(body).get("enable")
+        except Exception:
+            enable_raw = None
+        # 只认真正的布尔值：字符串 "false"、数字 1 等一律视为非法，
+        # 否则 bool("false") == True 会把「停止」误执行为「开启限速」
+        enable = enable_raw if isinstance(enable_raw, bool) else None
+        if enable is None:
+            send_response(writer, 400, JSON_CT, b'{"error":"bad request"}')
+        else:
+            await set_limit(enable)
+            log_event("config", ("开启限速：" + G.profile["name"]) if enable
+                      else "停止限速（恢复直连，场景保留：" + G.preset_key + "）")
+            send_response(writer, 200, JSON_CT,
+                          ('{"ok":true,"limit_on":%s}' % ("true" if G.limit_on else "false")).encode())
+    else:
+        send_response(writer, 200, JSON_CT,
+                      ('{"ok":true,"limit_on":%s}' % ("true" if G.limit_on else "false")).encode())
+
+
+@_route("/api/stop")
+async def _h_stop(writer, method, body):
+    # 不限方法：页面若以 GET 发出也要能停（历史上前端漏带 body 导致 GET 404、按钮点了没反应）
+    await set_limit(False)
+    log_event("config", "停止限速，恢复直连")
+    send_response(writer, 200, JSON_CT, b'{"ok":true}')
+
+
+@_route("/api/sysproxy", "POST")
+async def _h_sysproxy(writer, method, body):
+    try:
+        enable = bool(json.loads(body).get("enable"))
+    except Exception:
+        enable = None
+    if enable is None:
+        send_response(writer, 400, JSON_CT, b'{"error":"bad request"}')
+    else:
+        ok = set_sysproxy(enable)
+        log_event("config", "一键" + ("接管本机流量（系统代理已开启）" if enable else "解除接管（系统代理已关闭）"))
+        send_response(writer, 200, JSON_CT,
+                      ('{"ok":%s}' % ("true" if ok else "false")).encode())
+
+
+@_route("/api/scope")
+async def _h_scope(writer, method, body):
+    # 不限方法：GET 取当前设置，POST 更新
+    if method == "POST" and body:
+        try:
+            data = json.loads(body)
+            mode, lst = set_scope(data.get("mode"), data.get("list"))
+            if mode == "all":
+                log_event("config", "接管范围：全部程序")
+            elif mode == "only":
+                log_event("config", "接管范围：仅 " + (", ".join(lst) or "（空名单=不接管任何程序）"))
+            else:
+                log_event("config", "接管范围：排除 " + (", ".join(lst) or "（空名单=全部接管）"))
+        except Exception:
+            send_response(writer, 400, JSON_CT, b'{"error":"bad request"}')
+            return
+    send_response(writer, 200, JSON_CT, json.dumps({
+        "mode": G.scope_mode, "list": G.scope_list,
+        "supported": IS_WIN,
+    }, ensure_ascii=False).encode())
+
+
+@_route("/api/targets")
+async def _h_targets(writer, method, body):
+    # 可接管的目标。Windows 是进程名，Android 是包名 —— 用同一结构便于两端共用控制台。
+    names = set(list_procs()) | set(G.scope_seen.keys()) | set(G.scope_list)
+    names = {n for n in names if n and n.lower() != "system"
+             and n != "<未识别>"}
+    send_response(writer, 200, JSON_CT, json.dumps({
+        "type": "process",
+        "unit": "程序（exe）",
+        "items": [{"id": n, "name": n, "desc": ""} for n in sorted(names)],
+    }, ensure_ascii=False).encode())
+
+
+@_route("/api/listen", "POST")
+async def _h_listen(writer, method, body):
+    try:
+        host = json.loads(body).get("host")
+    except Exception:
+        host = None
+    if host not in ("127.0.0.1", "0.0.0.0"):
+        send_response(writer, 400, JSON_CT, b'{"error":"bad host"}')
+    else:
+        await restart_proxy(host)
+        log_event("config", f"代理监听切换为 {host}:{G.proxy_port}")
+        send_response(writer, 200, JSON_CT, b'{"ok":true}')
+
+
+# ---- 平台专属能力：Android 有 VPN / 悬浮窗，桌面端没有 ----
+# 回 501 而不是 404，脚本才能区分「路径写错」与「该平台没这个能力」
+@_route("/api/vpn")
+@_route("/api/float")
+@_route("/api/float/show")
+async def _h_platform_unsupported(writer, method, body):
+    send_response(writer, 501, JSON_CT,
+                  b'{"error":"not supported on this platform"}')
+
+
+# ---- 环境共享：用户名 / 局域网 peer / 推送 / 收件箱 ----
+
+@_route("/api/me")
+async def _h_me(writer, method, body):
+    if method == "POST":
+        try:
+            nm = json.loads(body).get("name")
+        except Exception:
+            nm = None
+        if nm is not None:
+            set_user_name(nm)
+            log_event("share", "本机名称改为：" + G.user_name)
+    send_response(writer, 200, JSON_CT, json.dumps({
+        "name": G.user_name, "id": G.self_id, "share": G.share_port,
+        "discover": G.discover_listen, "lan_ip": G.lan_ip,
+        "platform": "windows" if IS_WIN else os.name,
+        "share_ver": SHARE_VER, "pin_len": PIN_LEN,
+        "allow_legacy": G.allow_legacy,
+    }, ensure_ascii=False).encode())
+
+
+@_route("/api/share/pin")
+async def _h_share_pin(writer, method, body):
+    # 与 Android CtrlServer 同名同语义：GET 看状态，POST 改 PIN / 兼容开关
+    if method == "POST":
+        try:
+            d = json.loads(body)
+        except Exception:
+            d = {}
+        if not isinstance(d, dict):
+            d = {}
+        if "allow_legacy" in d:
+            res = set_allow_legacy(d.get("allow_legacy"))
+        else:
+            res = set_share_pin(d.get("pin"), bool(d.get("refresh")))
+        send_response(writer, 200 if res.get("ok") else 400, JSON_CT,
+                      json.dumps(res, ensure_ascii=False).encode())
+    else:
+        send_response(writer, 200, JSON_CT, json.dumps({
+            "ok": True, "pin": G.share_pin, "len": PIN_LEN,
+            "allow_legacy": G.allow_legacy, "ver": SHARE_VER,
+        }, ensure_ascii=False).encode())
+
+
+@_route("/api/peers")
+async def _h_peers(writer, method, body):
+    send_response(writer, 200, JSON_CT, json.dumps({
+        "items": _share_peer_rows(),
+        "self": {"name": G.user_name, "id": G.self_id,
+                 "share": G.share_port, "lan_ip": G.lan_ip},
+        "discover": G.discover_listen,
+    }, ensure_ascii=False).encode())
+
+
+@_route("/api/push", "POST")
+async def _h_push(writer, method, body):
+    try:
+        d = json.loads(body)
+    except Exception:
+        d = {}
+    ids = d.get("ids")
+    if isinstance(ids, str):
+        ids = [ids]
+    if not isinstance(ids, list):
+        ids = []
+    cids = d.get("combo_ids")
+    if isinstance(cids, str):
+        cids = [cids]
+    if not isinstance(cids, list):
+        cids = []
+    peer = d.get("peer")
+    if isinstance(peer, str) and ":" in peer:      # 兼容 "ip:port" 写法
+        ip, _, pstr = peer.partition(":")
+        peer = {"ip": ip, "share": int(pstr or SHARE_PORT), "name": ip}
+    if not isinstance(peer, dict) or not peer.get("ip"):
+        send_response(writer, 400, JSON_CT, b'{"error":"bad peer"}')
+    else:
+        res = await push_to_peer(peer, ids, cids)
+        send_response(writer, 200, JSON_CT,
+                      json.dumps(res, ensure_ascii=False).encode())
+
+
+@_route("/api/inbox")
+async def _h_inbox(writer, method, body):
+    items = []
+    for it in sorted(G.inbox.values(), key=lambda x: x["at"]):
+        row = {"id": it["id"], "from": it["from"], "name": it["name"],
+               "kind": it.get("kind") or "preset",
+               "ago": int(time.time() - it["at"])}
+        if row["kind"] == "combo":
+            row["combo"] = it.get("combo") or {}
+        else:
+            row["profile"] = it.get("profile") or {}
+        items.append(row)
+    send_response(writer, 200, JSON_CT,
+                  json.dumps({"items": items}, ensure_ascii=False).encode())
+
+
+@_route("/api/inbox/resolve", "POST")
+async def _h_inbox_resolve(writer, method, body):
+    try:
+        d = json.loads(body)
+    except Exception:
+        d = {}
+    res = resolve_inbox(str(d.get("id") or ""), str(d.get("action") or ""),
+                        d.get("name"))
+    send_response(writer, 200, JSON_CT,
+                  json.dumps(res, ensure_ascii=False).encode())
+
+
 async def handle_ctrl(reader, writer):
     try:
-        line = await reader.readline()
-        parts = line.decode("latin1").split()
-        if len(parts) < 2:
+        try:
+            method, path, headers, body = await read_http_request(
+                reader, MAX_BODY_CTRL, header_timeout=10.0)
+        except HttpError as e:
+            send_response(writer, e.code, JSON_CT, json.dumps(
+                {"error": e.msg}, ensure_ascii=False).encode())
             return
-        method, path = parts[0].upper(), parts[1].split("?")[0]
+
+        if not ctrl_host_ok(headers):
+            log_event("share", "控制接口拒绝了 Host=%r Origin=%r 的请求"
+                      % (headers.get("host"), headers.get("origin")))
+            send_response(writer, 403, JSON_CT, b'{"error":"forbidden"}')
+            return
 
         # 控制接口只接受 GET / POST。以前完全不看方法，DELETE /api/status 也会返回 200，
         # 脚本里写错方法时会静默「成功」，很难发现。
@@ -3472,321 +4033,13 @@ async def handle_ctrl(reader, writer):
                           extra="Allow: GET, POST\r\n")
             return
 
-        headers = []
-        while True:
-            h = await reader.readline()
-            if not h or h in (b"\r\n", b"\n"):
-                break
-            headers.append(h)
-        cl = 0
-        for h in headers:
-            if h.lower().startswith(b"content-length:"):
-                cl = int(h.split(b":", 1)[1])
-        body = await reader.readexactly(cl) if cl else b""
-
-        if path in ("/", "/index.html"):
-            # 网页控制台已下线（只保留 GUI）。留一句说明，免得浏览器打开是空白页、看不出原因
-            send_response(writer, 200, "text/plain; charset=utf-8",
-                          ("WeakNet 控制台已改为纯桌面界面，网页端不再提供。\n"
-                           "请运行 WeakNet.exe 使用图形界面；\n"
-                           "本机 HTTP 控制接口仍可用，见 /api/status。\n").encode("utf-8"))
-        elif path == "/api/status":
-            send_response(writer, 200, JSON_CT,
-                          json.dumps(status_payload(), ensure_ascii=False).encode())
-        elif path == "/api/presets":
-            data = [{"key": k, "name": v[0], "cat": v[1]} for k, v in PRESETS.items()]
-            send_response(writer, 200, JSON_CT,
-                          json.dumps(data, ensure_ascii=False).encode())
-        elif path == "/api/upresets":
-            # 自定义栏：用户命名保存的参数。老版本客户端没有这个接口也照常工作
-            send_response(writer, 200, JSON_CT, json.dumps(
-                {"items": _items_payload(get_user_presets())},
-                ensure_ascii=False).encode())
-        elif path == "/api/combos":
-            # 弱网组合列表（每支带 steps 与一行摘要）。字段与 Android 端同名，
-            # 同一套脚本在两端都能跑，不用为平台各写一份
-            send_response(writer, 200, JSON_CT, json.dumps(
-                {"items": _combos_payload()}, ensure_ascii=False).encode())
-        elif method == "POST" and path == "/api/combo":
-            # 新增或覆盖一支组合：{id?, name, loop, steps:[{key,minutes,seconds}]}
-            try:
-                data = json.loads(body)
-            except Exception:
-                data = None
-            if not isinstance(data, dict):
-                send_response(writer, 400, JSON_CT, b'{"error":"bad request"}')
-                return
-            raw_steps = data.get("steps") if isinstance(data.get("steps"), list) else []
-            steps = []
-            for s in raw_steps:
-                if not isinstance(s, dict):
-                    continue
-                steps.append({"key": str(s.get("key") or ""),
-                              "minutes": max(0, int(s.get("minutes", 0) or 0)),
-                              "seconds": max(0, int(s.get("seconds", 0) or 0))})
-            combo, _all = upsert_combo(data.get("name") or "", steps,
-                                       loop=bool(data.get("loop")),
-                                       cid=data.get("id"))
-            if combo is None:
-                # 一段都留不下：不当成保存成功，否则调用方会以为库里多了一支空组合
-                send_response(writer, 400, JSON_CT, json.dumps(
-                    {"error": "没有一段能用的场景"}, ensure_ascii=False).encode())
-                return
-            log_event("config", "保存弱网组合：" + combo["name"])
-            send_response(writer, 200, JSON_CT, json.dumps(
-                {"ok": True, "id": combo["id"], "name": combo["name"],
-                 "steps": len(combo["steps"])},
-                ensure_ascii=False).encode())
-        elif method == "POST" and path == "/api/combo/delete":
-            try:
-                cid = json.loads(body).get("id")
-            except Exception:
-                cid = None
-            if not cid:
-                send_response(writer, 400, JSON_CT, b'{"error":"bad request"}')
-                return
-            combo = find_combo(cid)
-            # 删的这支是不是「当前这支」：正在播放（combo_id）或被选中（preset_key）
-            # 都要在删除后复位，否则 preset_key 悬挂指向已删除的组合、弱网参数无限期残留。
-            active = (str(G.combo_id) == str(cid)
-                      or G.preset_key == COMBO_KEY_PREFIX + str(cid))
-            ok = bool(combo) and delete_combo(cid)[0]
-            if ok:
-                if active:
-                    # 与界面删除同一条路径：停播放 + 回直连（set_profile 会同时把
-                    # preset_key 置 direct、limit_on 置 False）
-                    await stop_combo()
-                    await set_profile(default_profile(), "direct")
-                    log_event("config", "删除组合后切回直连")
-                log_event("config", "删除弱网组合：" + combo["name"])
-            send_response(writer, 200, JSON_CT,
-                          json.dumps({"ok": ok}, ensure_ascii=False).encode())
-        elif method == "POST" and path == "/api/upreset":
-            # 保存（带 id 则覆盖更新那一条，否则新建）
-            try:
-                data = json.loads(body)
-                prof = data.get("profile")
-            except Exception:
-                data, prof = None, None
-            if not isinstance(data, dict) or not isinstance(prof, dict):
-                send_response(writer, 400, JSON_CT, b'{"error":"bad request"}')
-                return
-            item, _items = upsert_user_preset(data.get("name"), prof, data.get("id"))
-            log_event("config", "保存自定义场景：" + item["name"])
-            send_response(writer, 200, JSON_CT, json.dumps(
-                {"ok": True, "id": item["id"], "name": item["name"],
-                 "items": _items_payload(get_user_presets())},
-                ensure_ascii=False).encode())
-        elif method == "POST" and path == "/api/upreset/del":
-            try:
-                pid = json.loads(body).get("id")
-            except Exception:
-                pid = None
-            if not pid:
-                send_response(writer, 400, JSON_CT, b'{"error":"bad request"}')
-                return
-            ok, left = delete_user_preset(pid)
-            if ok:
-                log_event("config", "删除自定义场景")
-            send_response(writer, 200, JSON_CT, json.dumps(
-                {"ok": ok, "items": _items_payload(left)}, ensure_ascii=False).encode())
-        elif method == "POST" and path == "/api/preset":
-            key = None
-            try:
-                key = json.loads(body).get("key")
-            except Exception:
-                key = None
-            if str(key or "").startswith(COMBO_KEY_PREFIX):
-                # "c:<id>" = 弱网组合：与 GUI 点组合按钮走同一条路
-                # （已开限速就立刻按序播放，没开只选中，不替用户偷偷开始限速）
-                cid = str(key)[len(COMBO_KEY_PREFIX):]
-                if find_combo(cid) is None:
-                    send_response(writer, 400, JSON_CT, b'{"error":"bad request"}')
-                    return
-                applied = await select_combo(cid)
-                send_response(writer, 200, JSON_CT, json.dumps(
-                    {"ok": True, "applied": bool(applied),
-                     "kind": "combo"}, ensure_ascii=False).encode())
-                return
-            try:
-                prof = build_preset_profile(key)
-            except Exception:
-                prof = None
-            if prof is None:
-                send_response(writer, 400, JSON_CT, b'{"error":"bad request"}')
-            else:
-                # 与 GUI 同一条规矩：切场景只是选中，没开启限速时不施加
-                await select_scene(prof, key)
-                log_event("config", "切换场景：" + prof["name"])
-                send_response(writer, 200, JSON_CT, b'{"ok":true}')
-        elif method == "POST" and path == "/api/profile":
-            try:
-                data = json.loads(body)
-            except Exception:
-                data = None
-            if not isinstance(data, dict):
-                send_response(writer, 400, JSON_CT, b'{"error":"bad request"}')
-                return
-            prof = default_profile("自定义")
-            for k, v in data.items():
-                if k in prof and k != "name" and isinstance(v, (int, float)):
-                    prof[k] = max(0, v)
-            await set_profile(prof, "custom")
-            log_event("config", "应用自定义参数")
-            send_response(writer, 200, JSON_CT, b'{"ok":true}')
-        elif path == "/api/run":
-            # 限速总开关。GET 视为查询，POST {enable:true/false} 为切换。
-            if method == "POST" and body:
-                try:
-                    enable_raw = json.loads(body).get("enable")
-                except Exception:
-                    enable_raw = None
-                # 只认真正的布尔值：字符串 "false"、数字 1 等一律视为非法，
-                # 否则 bool("false") == True 会把「停止」误执行为「开启限速」
-                enable = enable_raw if isinstance(enable_raw, bool) else None
-                if enable is None:
-                    send_response(writer, 400, JSON_CT, b'{"error":"bad request"}')
-                else:
-                    await set_limit(enable)
-                    log_event("config", ("开启限速：" + G.profile["name"]) if enable
-                              else "停止限速（恢复直连，场景保留：" + G.preset_key + "）")
-                    send_response(writer, 200, JSON_CT,
-                                  ('{"ok":true,"limit_on":%s}' % ("true" if G.limit_on else "false")).encode())
-            else:
-                send_response(writer, 200, JSON_CT,
-                              ('{"ok":true,"limit_on":%s}' % ("true" if G.limit_on else "false")).encode())
-        elif path == "/api/stop":
-            # 不限方法：页面若以 GET 发出也要能停（历史上前端漏带 body 导致 GET 404、按钮点了没反应）
-            await set_limit(False)
-            log_event("config", "停止限速，恢复直连")
-            send_response(writer, 200, JSON_CT, b'{"ok":true}')
-        elif method == "POST" and path == "/api/sysproxy":
-            try:
-                enable = bool(json.loads(body).get("enable"))
-            except Exception:
-                enable = None
-            if enable is None:
-                send_response(writer, 400, JSON_CT, b'{"error":"bad request"}')
-            else:
-                ok = set_sysproxy(enable)
-                log_event("config", "一键" + ("接管本机流量（系统代理已开启）" if enable else "解除接管（系统代理已关闭）"))
-                send_response(writer, 200, JSON_CT,
-                              ('{"ok":%s}' % ("true" if ok else "false")).encode())
-        elif path == "/api/scope":
-            # 不限方法：GET 取当前设置，POST 更新
-            if method == "POST" and body:
-                try:
-                    data = json.loads(body)
-                    mode, lst = set_scope(data.get("mode"), data.get("list"))
-                    if mode == "all":
-                        log_event("config", "接管范围：全部程序")
-                    elif mode == "only":
-                        log_event("config", "接管范围：仅 " + (", ".join(lst) or "（空名单=不接管任何程序）"))
-                    else:
-                        log_event("config", "接管范围：排除 " + (", ".join(lst) or "（空名单=全部接管）"))
-                except Exception:
-                    send_response(writer, 400, JSON_CT, b'{"error":"bad request"}')
-                    return
-            send_response(writer, 200, JSON_CT, json.dumps({
-                "mode": G.scope_mode, "list": G.scope_list,
-                "supported": IS_WIN,
-            }, ensure_ascii=False).encode())
-        elif path == "/api/targets":
-            # 可接管的目标。Windows 是进程名，Android 是包名 —— 用同一结构便于两端共用控制台。
-            names = set(list_procs()) | set(G.scope_seen.keys()) | set(G.scope_list)
-            names = {n for n in names if n and n.lower() != "system"
-                     and n != "<未识别>"}
-            send_response(writer, 200, JSON_CT, json.dumps({
-                "type": "process",
-                "unit": "程序（exe）",
-                "items": [{"id": n, "name": n, "desc": ""} for n in sorted(names)],
-            }, ensure_ascii=False).encode())
-        elif method == "POST" and path == "/api/listen":
-            try:
-                host = json.loads(body).get("host")
-            except Exception:
-                host = None
-            if host not in ("127.0.0.1", "0.0.0.0"):
-                send_response(writer, 400, JSON_CT, b'{"error":"bad host"}')
-            else:
-                await restart_proxy(host)
-                log_event("config", f"代理监听切换为 {host}:{G.proxy_port}")
-                send_response(writer, 200, JSON_CT, b'{"ok":true}')
-        # ---- 环境共享：用户名 / 局域网 peer / 推送 / 收件箱 ----
-        elif path == "/api/me":
-            if method == "POST":
-                try:
-                    nm = json.loads(body).get("name")
-                except Exception:
-                    nm = None
-                if nm is not None:
-                    set_user_name(nm)
-                    log_event("share", "本机名称改为：" + G.user_name)
-            send_response(writer, 200, JSON_CT, json.dumps({
-                "name": G.user_name, "id": G.self_id, "share": G.share_port,
-                "discover": G.discover_listen, "lan_ip": G.lan_ip,
-                "platform": "windows" if IS_WIN else os.name,
-            }, ensure_ascii=False).encode())
-        elif path == "/api/peers":
-            now = time.time()
-            items = []
-            for p in sorted(G.peers.values(), key=lambda x: x["name"].lower()):
-                items.append({"id": p["id"], "name": p["name"], "ip": p["ip"],
-                              "platform": p["platform"], "share": p["share"],
-                              "ago": int(now - p["at"])})
-            send_response(writer, 200, JSON_CT, json.dumps({
-                "items": items,
-                "self": {"name": G.user_name, "id": G.self_id,
-                         "share": G.share_port, "lan_ip": G.lan_ip},
-                "discover": G.discover_listen,
-            }, ensure_ascii=False).encode())
-        elif method == "POST" and path == "/api/push":
-            try:
-                d = json.loads(body)
-            except Exception:
-                d = {}
-            ids = d.get("ids")
-            if isinstance(ids, str):
-                ids = [ids]
-            if not isinstance(ids, list):
-                ids = []
-            cids = d.get("combo_ids")
-            if isinstance(cids, str):
-                cids = [cids]
-            if not isinstance(cids, list):
-                cids = []
-            peer = d.get("peer")
-            if isinstance(peer, str) and ":" in peer:      # 兼容 "ip:port" 写法
-                ip, _, pstr = peer.partition(":")
-                peer = {"ip": ip, "share": int(pstr or SHARE_PORT), "name": ip}
-            if not isinstance(peer, dict) or not peer.get("ip"):
-                send_response(writer, 400, JSON_CT, b'{"error":"bad peer"}')
-            else:
-                res = await push_to_peer(peer, ids, cids)
-                send_response(writer, 200, JSON_CT,
-                              json.dumps(res, ensure_ascii=False).encode())
-        elif path == "/api/inbox":
-            items = []
-            for it in sorted(G.inbox.values(), key=lambda x: x["at"]):
-                row = {"id": it["id"], "from": it["from"], "name": it["name"],
-                       "kind": it.get("kind") or "preset",
-                       "ago": int(time.time() - it["at"])}
-                if row["kind"] == "combo":
-                    row["combo"] = it.get("combo") or {}
-                else:
-                    row["profile"] = it.get("profile") or {}
-                items.append(row)
-            send_response(writer, 200, JSON_CT,
-                          json.dumps({"items": items}, ensure_ascii=False).encode())
-        elif method == "POST" and path == "/api/inbox/resolve":
-            try:
-                d = json.loads(body)
-            except Exception:
-                d = {}
-            res = resolve_inbox(str(d.get("id") or ""), str(d.get("action") or ""),
-                                d.get("name"))
-            send_response(writer, 200, JSON_CT,
-                          json.dumps(res, ensure_ascii=False).encode())
+        handler = _CTRL_ROUTES.get((method, path)) or _CTRL_ROUTES.get(("*", path))
+        if handler is not None:
+            await handler(writer, method, body)
+        elif path.startswith("/api/"):
+            # 未实现的 API 也回 JSON：脚本按 Content-Type 解析时不会拿到一段
+            # 纯文本而崩在「不是 dict」上（Android 端同形）
+            send_response(writer, 404, JSON_CT, b'{"error":"not found"}')
         else:
             send_response(writer, 404, "text/plain; charset=utf-8", b"not found")
         await writer.drain()
