@@ -6,6 +6,7 @@ WeakNet —— App 弱网测试工具（桌面 GUI 版）
 
 用法：
     python weaknet_gui.py [--proxy-port 8888] [--ctrl-port 8899]
+    python weaknet_gui.py --headless [--ready-file 路径]   # 只跑引擎，界面由宿主进程（Perfara）驱动
 打包（--icon 写 EXE 文件图标；窗口图标由本文件内嵌的 base64 提供，见 _apply_window_icon）：
     python -m PyInstaller --onefile --windowed --clean --noconfirm --name WeakNet \\
         --icon assets/weaknet.ico --distpath . --workpath _build_gui \\
@@ -14,6 +15,7 @@ WeakNet —— App 弱网测试工具（桌面 GUI 版）
 
 import argparse
 import asyncio
+import json
 import os
 import queue
 import sys
@@ -31,6 +33,9 @@ if sys.stderr is None:
 
 import weaknet as W
 import usb_phone as UP
+
+# 由 main() 在解析完参数后置位：无窗口模式下出错不能弹 messagebox（没人点，宿主会一直等）
+_HEADLESS = False
 
 # 窗口/任务栏图标：与 assets/weaknet.ico、APK 的 launcher 图标是同一套图形
 # （图形与配色由 assets/make_icon.py 生成，改那边再重跑即可）。
@@ -114,15 +119,189 @@ def _apply_window_icon(root):
     except Exception:
         pass                        # 图标只是门面，任何异常都不能挡住启动
 
-BG = "#f4f6f9"
-CARD = "#ffffff"
-ACCENT = "#2d7ff9"
-ACCENT_D = "#1a63d8"
-TEXT = "#1f2430"
-MUTED = "#6b7280"
-LINE = "#e3e7ee"
-OK = "#16a34a"
-WARN = "#d97706"
+# ---------------------------------------------------------------- 主题
+#
+# 宿主（Perfara 采集端）是深色界面。随包拉起的 WeakNet 必须跟着深色，
+# 否则二级窗口一眼就不像同一个产品；独立运行（发布包/源码直跑）保持原浅色。
+# 判定优先级：环境变量 WEAKNET_THEME > --theme dark / --dark > 目录位置
+# （<...>/resources/weaknet/ 是宿主打包后的固定布局，独立发布包不会长这样）。
+def _detect_dark():
+    v = (os.environ.get("WEAKNET_THEME") or "").strip().lower()
+    if v in ("dark", "1", "true", "yes"):
+        return True
+    if v in ("light", "0", "false", "no"):
+        return False
+    argv = [a.lower() for a in sys.argv[1:]]
+    for i, a in enumerate(argv):
+        if a == "--theme" and i + 1 < len(argv):
+            return argv[i + 1] == "dark"
+        if a.startswith("--theme="):
+            return a.split("=", 1)[1] == "dark"
+    if "--dark" in argv:
+        return True
+    if "--light" in argv:
+        return False
+    try:
+        # 打包后 sys.argv[0] 是 exe 自己的路径，onefile 解包目录不参与判定
+        base = sys.executable if getattr(sys, "frozen", False) else (sys.argv[0] or __file__)
+        here = os.path.dirname(os.path.abspath(base))
+        return (os.path.basename(here).lower() == "weaknet"
+                and os.path.basename(os.path.dirname(here)).lower() == "resources")
+    except Exception:
+        return False
+
+
+DARK = _detect_dark()
+
+if DARK:
+    # 与采集端 style.css 同一套色：背景/卡片/描边/文字/强调色
+    BG = "#0f1117"
+    CARD = "#161922"
+    LINE = "#2a2f3d"
+    TEXT = "#e0e4ef"
+    MUTED = "#8a90a0"
+    ACCENT = "#4f8ef7"
+    ACCENT_D = "#3f7ae0"
+    OK = "#3ecf8e"
+    WARN = "#f5a623"
+    ERR = "#f85151"
+    BTN2 = "#1e2230"        # 次要按钮底
+    BTN2_HOVER = "#2a2f3d"
+    FIELD = "#0f1117"       # 输入框底：比卡片更暗一档，才有「凹进去」的层次
+    CHIP = "#1e2230"        # 信息小标签底
+    SELECT = "#22304d"      # 勾选/单选底
+else:
+    BG = "#f4f6f9"
+    CARD = "#ffffff"
+    LINE = "#e3e7ee"
+    TEXT = "#1f2430"
+    MUTED = "#6b7280"
+    ACCENT = "#2d7ff9"
+    ACCENT_D = "#1a63d8"
+    OK = "#16a34a"
+    WARN = "#d97706"
+    ERR = "#c0392b"
+    BTN2 = "#eef2f7"
+    BTN2_HOVER = "#e2e9f6"
+    FIELD = "#fbfcfe"
+    CHIP = "#f1f4fa"
+    SELECT = "#eef3ff"
+
+
+def _darken_titlebar(win):
+    """让系统标题栏也变深：不处理的话，深色窗口顶着一圈亮白边框很跳。"""
+    if not DARK:
+        return
+    try:
+        import ctypes
+        hwnd = win.winfo_id()
+        parent = ctypes.windll.user32.GetParent(hwnd)
+        if parent:
+            hwnd = parent
+        for attr in (20, 19):           # 20: Win10 1903+ / 19: 更老的 Win10
+            flag = ctypes.c_int(1)
+            if ctypes.windll.dwmapi.DwmSetWindowAttribute(
+                    hwnd, attr, ctypes.byref(flag), ctypes.sizeof(flag)) == 0:
+                break
+    except Exception:
+        pass
+
+
+def _scrollbar(parent, **kw):
+    """深色下换 ttk 滚动条。
+
+    Windows 的 tk.Scrollbar 走原生绘制，显式设了 -background/-troughcolor
+    也不生效（实测），深色窗口边上会留一条白条；clam 主题的 ttk 滚动条
+    认配色。浅色保持原来的 tk.Scrollbar，观感不动。
+    """
+    if DARK:
+        kw.pop("width", None)
+        return ttk.Scrollbar(parent, **kw)
+    return tk.Scrollbar(parent, **kw)
+
+
+def _apply_theme(root):
+    """深色主题的全局兜底。
+
+    tk 的默认色是系统浅色，几十个按钮/输入框里只要有一个没写底色，
+    深色窗口上就会闪出一块白（按下时的 activebackground 尤其明显）。
+    统一走 option 数据库给未显式指定的控件补默认值，比逐个控件改更稳。
+    """
+    if not DARK:
+        return
+    defaults = {
+        "*Button.activeBackground": BTN2_HOVER,
+        "*Button.activeForeground": TEXT,
+        "*Button.disabledForeground": MUTED,
+        "*Button.highlightBackground": BG,
+        "*Button.highlightColor": BG,
+        "*Checkbutton.background": CARD,
+        "*Checkbutton.activeBackground": CARD,
+        "*Checkbutton.activeForeground": TEXT,
+        "*Checkbutton.selectColor": SELECT,
+        "*Radiobutton.background": BG,
+        "*Radiobutton.activeBackground": BG,
+        "*Radiobutton.activeForeground": TEXT,
+        "*Radiobutton.selectColor": SELECT,
+        "*Entry.background": FIELD,
+        "*Entry.foreground": TEXT,
+        "*Entry.insertBackground": TEXT,
+        "*Entry.highlightBackground": LINE,
+        "*Entry.highlightColor": ACCENT,
+        "*Text.background": FIELD,
+        "*Text.foreground": TEXT,
+        "*Text.insertBackground": TEXT,
+        "*Text.selectBackground": ACCENT,
+        "*Text.selectForeground": "#ffffff",
+        "*Listbox.background": CARD,
+        "*Listbox.foreground": TEXT,
+        "*Listbox.selectBackground": ACCENT,
+        "*Listbox.selectForeground": "#ffffff",
+        "*Scrollbar.background": BTN2,
+        "*Scrollbar.troughColor": BG,
+        "*Scrollbar.activeBackground": LINE,
+        "*Scrollbar.highlightBackground": BG,
+        "*TCombobox*Listbox.background": CARD,
+        "*TCombobox*Listbox.foreground": TEXT,
+        "*TCombobox*Listbox.selectBackground": ACCENT,
+        "*TCombobox*Listbox.selectForeground": "#ffffff",
+    }
+    for key, val in defaults.items():
+        try:
+            root.option_add(key, val)
+        except tk.TclError:
+            pass
+    st = ttk.Style(root)
+    try:
+        # vista 主题不认 fieldbackground/arrowcolor，深色下必须是 clam
+        st.theme_use("clam")
+    except tk.TclError:
+        pass
+    st.configure("TCombobox", fieldbackground=FIELD, background=BTN2, foreground=TEXT,
+                 arrowcolor=TEXT, bordercolor=LINE, lightcolor=LINE, darkcolor=LINE,
+                 selectbackground=FIELD, selectforeground=TEXT, padding=2)
+    st.map("TCombobox",
+           fieldbackground=[("readonly", FIELD)],
+           foreground=[("readonly", TEXT), ("disabled", MUTED)],
+           background=[("active", BTN2_HOVER), ("pressed", BTN2_HOVER)],
+           arrowcolor=[("active", TEXT), ("disabled", MUTED)],
+           bordercolor=[("focus", ACCENT)],
+           lightcolor=[("focus", ACCENT)])
+    st.configure("TSpinbox", fieldbackground=FIELD, background=BTN2, foreground=TEXT,
+                 arrowcolor=TEXT, bordercolor=LINE, lightcolor=LINE, darkcolor=LINE,
+                 insertcolor=TEXT)
+    st.map("TSpinbox",
+           foreground=[("disabled", MUTED)],
+           background=[("active", BTN2_HOVER)],
+           arrowcolor=[("active", TEXT), ("disabled", MUTED)],
+           bordercolor=[("focus", ACCENT)])
+    for orient in ("Vertical", "Horizontal"):
+        st.configure("%s.TScrollbar" % orient, background=BTN2, troughcolor=BG,
+                     bordercolor=BG, arrowcolor=MUTED, lightcolor=BTN2,
+                     darkcolor=BTN2, gripcount=0)
+        st.map("%s.TScrollbar" % orient,
+               background=[("active", LINE), ("pressed", LINE)],
+               arrowcolor=[("active", TEXT)])
 
 FONT = ("Microsoft YaHei UI", 9)
 FONT_B = ("Microsoft YaHei UI", 9, "bold")
@@ -270,6 +449,11 @@ class App:
         root.title("WeakNet %s —— App 弱网测试工具" % W.VERSION)
         _apply_window_icon(root)
         root.configure(bg=BG)
+        _apply_theme(root)
+        _darken_titlebar(root)
+        # 二级窗口（接管范围 / 场景说明 / 编辑组合…）各自有系统标题栏，
+        # 一律在首次显示时补一次深色，不用逐个窗口调用。
+        root.bind_all("<Map>", lambda e: _darken_titlebar(e.widget.winfo_toplevel()), add="+")
         # 按屏幕自适应窗口高度并居中，避免小屏幕上底部内容被任务栏/屏幕边缘裁掉
         sw, sh = root.winfo_screenwidth(), root.winfo_screenheight()
         wh = min(860, sh - 90)
@@ -297,7 +481,7 @@ class App:
         self._left_sb_busy = False
         self.left_canvas = tk.Canvas(left_wrap, bg=BG, bd=0, highlightthickness=0,
                                      takefocus=0, yscrollincrement=1)
-        self.left_sb = tk.Scrollbar(left_wrap, orient="vertical", width=12,
+        self.left_sb = _scrollbar(left_wrap, orient="vertical", width=12,
                                     command=self.left_canvas.yview)
         self.left_canvas.configure(yscrollcommand=self._left_scroll_set)
         self.left_canvas.pack(side="left", fill="both", expand=True)
@@ -344,9 +528,9 @@ class App:
         btn = None
         if action is not None:
             text, cmd = action
-            btn = tk.Button(head, text=text, font=FONT_B, bg="#eef2f7", fg=ACCENT,
+            btn = tk.Button(head, text=text, font=FONT_B, bg=BTN2, fg=ACCENT,
                             relief="flat", padx=8, pady=0, cursor="hand2",
-                            activebackground="#e2e9f6", activeforeground=ACCENT,
+                            activebackground=BTN2_HOVER, activeforeground=ACCENT,
                             bd=0, highlightthickness=1, highlightbackground=LINE,
                             command=cmd)
             btn.pack(side="right")
@@ -581,7 +765,7 @@ class App:
                                  fg="white", relief="flat", padx=14, pady=6,
                                  cursor="hand2", command=self.toggle_sysproxy)
         self.btn_sys.pack(side="left")
-        self.btn_lan = tk.Button(btns, text="开启局域网访问", font=FONT, bg="#eef2f7",
+        self.btn_lan = tk.Button(btns, text="开启局域网访问", font=FONT, bg=BTN2,
                                  fg=TEXT, relief="flat", padx=12, pady=6,
                                  cursor="hand2", command=self.toggle_lan)
         self.btn_lan.pack(side="left", padx=(8, 0))
@@ -636,7 +820,7 @@ class App:
             grid = tk.Frame(group, bg=CARD)
             grid.pack(side="left", fill="x")
             for i, (key, name) in enumerate(items):
-                b = tk.Button(grid, text=SHORT.get(key, name), font=FONT, bg="#eef2f7",
+                b = tk.Button(grid, text=SHORT.get(key, name), font=FONT, bg=BTN2,
                               fg=TEXT, relief="flat", padx=9, pady=3, cursor="hand2",
                               command=lambda k=key: self.apply_preset(k))
                 # 4 列：左栏比整窗窄，按 5 列排会顶到卡片外
@@ -698,7 +882,7 @@ class App:
         tk.Button(bar, text="应用自定义参数", font=FONT_B, bg=ACCENT, fg="white",
                   relief="flat", padx=14, pady=5, cursor="hand2",
                   command=self.apply_custom).pack(side="left")
-        tk.Button(bar, text="读取当前场景", font=FONT, bg="#eef2f7", fg=TEXT,
+        tk.Button(bar, text="读取当前场景", font=FONT, bg=BTN2, fg=TEXT,
                   relief="flat", padx=12, pady=5, cursor="hand2",
                   command=self.load_current).pack(side="left", padx=(8, 0))
         self.load_current()
@@ -715,12 +899,12 @@ class App:
         self.mine_name = tk.StringVar()
         ent = tk.Entry(row, textvariable=self.mine_name, font=FONT, width=26,
                        relief="flat", highlightthickness=1, highlightbackground=LINE,
-                       highlightcolor=ACCENT, bg="#fbfcfe", fg=TEXT)
+                       highlightcolor=ACCENT, bg=FIELD, fg=TEXT)
         ent.pack(side="left", padx=(6, 8))
         # 记下输入框：「➕ 新建场景」要把光标送过来
         self.mine_name_ent = ent
         ent.bind("<Return>", lambda _e: self.save_mine())
-        tk.Button(row, text="保存当前参数", font=FONT, bg="#eef2f7", fg=TEXT,
+        tk.Button(row, text="保存当前参数", font=FONT, bg=BTN2, fg=TEXT,
                   relief="flat", padx=12, pady=4, cursor="hand2",
                   command=self.save_mine).pack(side="left")
         tk.Label(box, text="保存后与内置场景并排显示、点一下即切换；选中它后"
@@ -743,7 +927,7 @@ class App:
                  fg=TEXT).pack(side="left")
 
         # 环境共享：自定义场景与弱网组合在同一个窗口里共享，入口跟着这张卡片走
-        self.btn_share = tk.Button(head, text="🔗 环境共享", font=FONT, bg="#eef2f7",
+        self.btn_share = tk.Button(head, text="🔗 环境共享", font=FONT, bg=BTN2,
                                    fg=TEXT, relief="flat", padx=10, pady=3,
                                    cursor="hand2", command=self.open_share)
         self.btn_share.pack(side="right")
@@ -754,7 +938,7 @@ class App:
         tabs.pack(fill="x", pady=(7, 0))
         self.tab_btns = {}
         for key, label in (("scene", "场景"), ("combo", "组合")):
-            b = tk.Button(tabs, text=label, font=FONT_B, bg="#eef2f7", fg=MUTED,
+            b = tk.Button(tabs, text=label, font=FONT_B, bg=BTN2, fg=MUTED,
                           relief="flat", padx=16, pady=3, cursor="hand2",
                           command=lambda k=key: self.switch_tab(k))
             b.pack(side="left", padx=(0, 4))
@@ -787,7 +971,7 @@ class App:
                 page.pack_forget()
         for k, b in getattr(self, "tab_btns", {}).items():
             on = (k == key)
-            b.configure(bg=ACCENT if on else "#eef2f7",
+            b.configure(bg=ACCENT if on else BTN2,
                         fg="white" if on else MUTED)
         self.cur_tab = key
 
@@ -802,7 +986,7 @@ class App:
         #  所以这里不是弹窗，而是把那块展开并把光标送过去）
         row = tk.Frame(page, bg=CARD)
         row.pack(fill="x")
-        tk.Button(row, text="➕ 新建场景", font=FONT, bg="#eef2f7", fg=TEXT,
+        tk.Button(row, text="➕ 新建场景", font=FONT, bg=BTN2, fg=TEXT,
                   relief="flat", padx=10, pady=3, cursor="hand2",
                   command=self.goto_new_scene).pack(side="left")
 
@@ -814,7 +998,7 @@ class App:
         bar.pack(fill="x", pady=(8, 0))
         self.mine_del_bar = bar
         self.btn_mine_del = tk.Button(bar, text="🗑 删除当前场景", font=FONT,
-                                      bg="#eef2f7", fg=TEXT, relief="flat",
+                                      bg=BTN2, fg=TEXT, relief="flat",
                                       padx=12, pady=4, cursor="hand2",
                                       command=self.del_mine)
         self.btn_mine_del.pack(side="left")
@@ -907,7 +1091,7 @@ class App:
                       wrap="char",          # 中文没有空格，按字符换行才不会溢出
                       padx=14, pady=12, spacing1=1, spacing3=3,
                       takefocus=0, cursor="arrow")
-        sb = tk.Scrollbar(wrap, command=txt.yview)
+        sb = _scrollbar(wrap, command=txt.yview)
         txt.configure(yscrollcommand=sb.set)
         txt.pack(side="left", fill="both", expand=True)
         sb.pack(side="right", fill="y")
@@ -1085,7 +1269,7 @@ class App:
                          anchor="w", justify="left", padx=0, bd=0).grid(
                     row=0, column=1, sticky="w")
 
-        tk.Button(card, text="知道了", font=("Microsoft YaHei UI", 9), bg="#eef2f7",
+        tk.Button(card, text="知道了", font=("Microsoft YaHei UI", 9), bg=BTN2,
                   fg=TEXT, relief="flat", padx=16, pady=5, cursor="hand2",
                   takefocus=0, bd=0, highlightthickness=1, highlightbackground=LINE,
                   command=self.close_param_note).pack(anchor="e", padx=NOTE_PAD,
@@ -1100,13 +1284,13 @@ class App:
 
     def _note_chip(self, parent, name, value):
         """说明窗里的一枚小标签：标题（浅底）+ 取值（等宽感）。"""
-        chip = tk.Frame(parent, bg="#f1f4fa", highlightbackground=LINE,
+        chip = tk.Frame(parent, bg=CHIP, highlightbackground=LINE,
                         highlightthickness=1)
         chip.pack(side="left", padx=(0, 6))
-        tk.Label(chip, text=name, font=("Microsoft YaHei UI", 9), bg="#f1f4fa",
+        tk.Label(chip, text=name, font=("Microsoft YaHei UI", 9), bg=CHIP,
                  fg=MUTED, padx=6, pady=2).pack(side="left")
         tk.Label(chip, text=value, font=("Microsoft YaHei UI", 9, "bold"),
-                 bg="#f1f4fa", fg=TEXT, padx=6, pady=2).pack(side="left")
+                 bg=CHIP, fg=TEXT, padx=6, pady=2).pack(side="left")
 
     def _place_param_note(self, win, key):
         """贴在被点的「！」旁边：右边放不下就翻到左边，最后夹在屏幕内。
@@ -1161,7 +1345,7 @@ class App:
         self._sel_mine = None      # 按钮是新建的，下次 refresh 必须重新上色
         for i, it in enumerate(self.mine_items):
             key = "u:" + it["id"]
-            b = tk.Button(self.mine_grid, text=it["name"], font=FONT, bg="#eef2f7",
+            b = tk.Button(self.mine_grid, text=it["name"], font=FONT, bg=BTN2,
                           fg=TEXT, relief="flat", padx=9, pady=3, cursor="hand2",
                           command=lambda k=key: self.apply_preset(k))
             b.grid(row=i // 4, column=i % 4, padx=(0, 5), pady=2, sticky="w")
@@ -1290,7 +1474,7 @@ class App:
                       highlightthickness=1, highlightbackground=LINE, bd=0,
                       wrap="char", padx=14, pady=12, spacing1=1, spacing3=3,
                       takefocus=0, cursor="arrow")
-        sb = tk.Scrollbar(wrap, command=txt.yview)
+        sb = _scrollbar(wrap, command=txt.yview)
         txt.configure(yscrollcommand=sb.set)
         txt.pack(side="left", fill="both", expand=True)
         sb.pack(side="right", fill="y")
@@ -1379,7 +1563,7 @@ class App:
         # 看的，摆在组合列表顶上反而像跟哪支组合都有关似的
         head = tk.Frame(page, bg=CARD)
         head.pack(fill="x")
-        tk.Button(head, text="＋ 新建组合", font=FONT, bg="#eef2f7", fg=ACCENT,
+        tk.Button(head, text="＋ 新建组合", font=FONT, bg=BTN2, fg=ACCENT,
                   relief="flat", padx=10, pady=3, cursor="hand2",
                   command=lambda: self.open_combo_editor()).pack(side="left")
         self.combo_grid = tk.Frame(page, bg=CARD)
@@ -1388,10 +1572,10 @@ class App:
         self.combo_edit_bar = tk.Frame(page, bg=CARD)
         self.combo_edit_bar.pack(fill="x", pady=(8, 0))
         self.btn_combo_edit = tk.Button(self.combo_edit_bar, text="✏️ 编辑", font=FONT,
-                                        bg="#eef2f7", fg=TEXT, relief="flat", padx=12,
+                                        bg=BTN2, fg=TEXT, relief="flat", padx=12,
                                         pady=3, cursor="hand2", command=self.edit_combo)
         self.btn_combo_del = tk.Button(self.combo_edit_bar, text="🗑 删除", font=FONT,
-                                       bg="#eef2f7", fg=TEXT, relief="flat", padx=12,
+                                       bg=BTN2, fg=TEXT, relief="flat", padx=12,
                                        pady=3, cursor="hand2", command=self.del_combo)
         self.lab_combo = tk.Label(page, text="", font=FONT, bg=CARD, fg=MUTED,
                                   anchor="w", justify="left", wraplength=430)
@@ -1408,7 +1592,7 @@ class App:
         self._sel_combo = None     # 同上：新建按钮的配色要重刷一遍
         for i, c in enumerate(self.combo_items):
             key = W.COMBO_KEY_PREFIX + c["id"]
-            b = tk.Button(self.combo_grid, text="🔀 " + c["name"], font=FONT, bg="#eef2f7",
+            b = tk.Button(self.combo_grid, text="🔀 " + c["name"], font=FONT, bg=BTN2,
                           fg=TEXT, relief="flat", padx=9, pady=3, cursor="hand2",
                           command=lambda k=key: self.apply_preset(k))
             # 单击 = 选中（已开限速就立即按序播），双击 = 打开查看/编辑（里面有删除按钮）
@@ -1574,14 +1758,14 @@ class App:
         self.combo_name = tk.StringVar(value=(combo["name"] if combo else ""))
         ent = tk.Entry(row0, textvariable=self.combo_name, font=FONT, width=22,
                        relief="flat", highlightthickness=1, highlightbackground=LINE,
-                       highlightcolor=ACCENT, bg="#fbfcfe", fg=TEXT)
+                       highlightcolor=ACCENT, bg=FIELD, fg=TEXT)
         ent.pack(side="left", padx=(8, 0))
         ent.focus_set()
 
         self.combo_loop = tk.BooleanVar(value=bool(combo and combo.get("loop")))
         tk.Checkbutton(inner, text="播完后循环（不勾则停在最后一段）", font=FONT,
                        bg=CARD, fg=TEXT, variable=self.combo_loop,
-                       activebackground=CARD, selectcolor="#fbfcfe").pack(
+                       activebackground=CARD, selectcolor=SELECT).pack(
             anchor="w", pady=(6, 0))
 
         tk.Label(inner, text="按顺序播放（最多 %d 段，每段都要填时间）"
@@ -1610,7 +1794,7 @@ class App:
                 "重新选好场景后保存即可。" % n))
 
         self.btn_combo_add = tk.Button(inner, text="＋ 添加一段", font=FONT,
-                                       bg="#eef2f7", fg=ACCENT, relief="flat",
+                                       bg=BTN2, fg=ACCENT, relief="flat",
                                        padx=10, pady=3, cursor="hand2",
                                        command=lambda: self._combo_add_row())
         self.btn_combo_add.pack(anchor="w", pady=(6, 0))
@@ -1623,7 +1807,7 @@ class App:
                   command=self.save_combo).pack(side="left")
         # 查看已有组合时，删除入口就在这扇窗里：不用先切回主界面再找删除
         self.btn_combo_del_in = tk.Button(bar, text="🗑 删除该组合", font=FONT,
-                                           bg="#eef2f7", fg="#c0392b", relief="flat",
+                                           bg=BTN2, fg=ERR, relief="flat",
                                            padx=12, pady=5, cursor="hand2",
                                            command=self._combo_delete_in_editor)
         # 不放「取消」按钮：标题栏右上角的 ✕ 干的是同一件事（都是不保存直接关），
@@ -1871,10 +2055,10 @@ class App:
         allmode = (W.G.scope_mode == "all")
         self.scope_all_btn.config(
             text=("✔ " if allmode else "") + "接管一切",
-            bg=ACCENT if allmode else "#eef2f7", fg="white" if allmode else TEXT)
+            bg=ACCENT if allmode else BTN2, fg="white" if allmode else TEXT)
         self.scope_open_btn.config(
             text=("✔ " if not allmode else "") + "接管范围…",
-            bg=ACCENT if not allmode else "#eef2f7", fg="white" if not allmode else TEXT)
+            bg=ACCENT if not allmode else BTN2, fg="white" if not allmode else TEXT)
 
     def scope_all(self):
         """「接管一切」：一键回到全部接管（已是全部就不重复写，免得多一条无用日志）"""
@@ -1926,7 +2110,7 @@ class App:
                           ("only", "仅接管选定程序"),
                           ("exclude", "排除选定程序")]:
             tk.Radiobutton(modes, text=text, variable=self.scope_mode, value=val,
-                           bg=BG, fg=TEXT, font=FONT, selectcolor="#eef3ff",
+                           bg=BG, fg=TEXT, font=FONT, selectcolor=SELECT,
                            activebackground=BG, highlightthickness=0,
                            command=self._scope_sync_count).pack(side="left", padx=(0, 14))
 
@@ -1939,13 +2123,13 @@ class App:
 
         bar = tk.Frame(win, bg=BG)
         bar.pack(fill="x", padx=12, pady=(8, 0))
-        tk.Button(bar, text="全选", font=FONT, bg="#eef2f7", fg=TEXT, relief="flat",
+        tk.Button(bar, text="全选", font=FONT, bg=BTN2, fg=TEXT, relief="flat",
                   padx=12, pady=4, cursor="hand2",
                   command=lambda: self._scope_all(True)).pack(side="left")
-        tk.Button(bar, text="清空", font=FONT, bg="#eef2f7", fg=TEXT, relief="flat",
+        tk.Button(bar, text="清空", font=FONT, bg=BTN2, fg=TEXT, relief="flat",
                   padx=12, pady=4, cursor="hand2",
                   command=lambda: self._scope_all(False)).pack(side="left", padx=(8, 0))
-        tk.Button(bar, text="刷新列表", font=FONT, bg="#eef2f7", fg=TEXT, relief="flat",
+        tk.Button(bar, text="刷新列表", font=FONT, bg=BTN2, fg=TEXT, relief="flat",
                   padx=12, pady=4, cursor="hand2",
                   command=self.reload_scope).pack(side="left", padx=(8, 0))
         self.lab_scope_list = tk.Label(bar, text="", font=FONT, bg=BG, fg=MUTED)
@@ -1958,7 +2142,7 @@ class App:
                                     bg=CARD, fg=TEXT, relief="flat",
                                     highlightthickness=1, highlightbackground=LINE,
                                     bd=0, exportselection=False)
-        sb = tk.Scrollbar(wrap, command=self.scope_box.yview)
+        sb = _scrollbar(wrap, command=self.scope_box.yview)
         self.scope_box.configure(yscrollcommand=sb.set)
         self.scope_box.pack(side="left", fill="both", expand=True)
         sb.pack(side="right", fill="y")
@@ -2150,7 +2334,7 @@ class App:
                        highlightcolor=ACCENT, bg=CARD, fg=TEXT)
         ent.pack(side="left", fill="x", expand=True, padx=(6, 8))
         ent.bind("<Return>", lambda _e: self.save_share_name())
-        tk.Button(row, text="保存名字", font=FONT, bg="#eef2f7", fg=TEXT,
+        tk.Button(row, text="保存名字", font=FONT, bg=BTN2, fg=TEXT,
                   relief="flat", padx=12, pady=4, cursor="hand2",
                   command=self.save_share_name).pack(side="left")
 
@@ -2166,10 +2350,10 @@ class App:
                         highlightcolor=ACCENT, bg=CARD, fg=TEXT, justify="center")
         pent.pack(side="left", padx=(6, 6))
         pent.bind("<Return>", lambda _e: self.save_share_pin())
-        tk.Button(prow, text="保存 PIN", font=FONT, bg="#eef2f7", fg=TEXT,
+        tk.Button(prow, text="保存 PIN", font=FONT, bg=BTN2, fg=TEXT,
                   relief="flat", padx=10, pady=4, cursor="hand2",
                   command=self.save_share_pin).pack(side="left")
-        tk.Button(prow, text="随机换一个", font=FONT, bg="#eef2f7", fg=TEXT,
+        tk.Button(prow, text="随机换一个", font=FONT, bg=BTN2, fg=TEXT,
                   relief="flat", padx=10, pady=4, cursor="hand2",
                   command=self.refresh_share_pin).pack(side="left", padx=(8, 0))
 
@@ -2178,13 +2362,13 @@ class App:
         self.share_legacy = tk.BooleanVar(value=bool(W.G.allow_legacy))
         tk.Checkbutton(lrow, text="允许旧版设备推送（无 PIN，内容只进收件箱）",
                        variable=self.share_legacy, font=FONT, bg=BG, fg=MUTED,
-                       activebackground=BG, selectcolor=CARD, anchor="w",
+                       activebackground=BG, selectcolor=SELECT, anchor="w",
                        command=self.toggle_share_legacy).pack(side="left")
 
         self.share_peers = self._share_group(win, "局域网里的设备", 5)
         bar = tk.Frame(win, bg=BG)
         bar.pack(fill="x", padx=12, pady=(6, 0))
-        tk.Button(bar, text="刷新", font=FONT, bg="#eef2f7", fg=TEXT, relief="flat",
+        tk.Button(bar, text="刷新", font=FONT, bg=BTN2, fg=TEXT, relief="flat",
                   padx=12, pady=4, cursor="hand2",
                   command=self.reload_share).pack(side="left")
         self.share_peers.bind("<<ListboxSelect>>", lambda _e: self._share_sync_btns())
@@ -2208,17 +2392,17 @@ class App:
         self.share_inbox = self._share_group(win, "收到的内容（同名待处理）", 4)
         bar3 = tk.Frame(win, bg=BG)
         bar3.pack(fill="x", padx=12, pady=(6, 0))
-        self.btn_in_over = tk.Button(bar3, text="覆盖本地", font=FONT, bg="#eef2f7",
+        self.btn_in_over = tk.Button(bar3, text="覆盖本地", font=FONT, bg=BTN2,
                                      fg=TEXT, relief="flat", padx=12, pady=4,
                                      cursor="hand2",
                                      command=lambda: self.resolve_share("overwrite"))
         self.btn_in_over.pack(side="left")
-        self.btn_in_keep = tk.Button(bar3, text="保留本地", font=FONT, bg="#eef2f7",
+        self.btn_in_keep = tk.Button(bar3, text="保留本地", font=FONT, bg=BTN2,
                                      fg=TEXT, relief="flat", padx=12, pady=4,
                                      cursor="hand2",
                                      command=lambda: self.resolve_share("keep"))
         self.btn_in_keep.pack(side="left", padx=(8, 0))
-        self.btn_in_save = tk.Button(bar3, text="另存为…", font=FONT, bg="#eef2f7",
+        self.btn_in_save = tk.Button(bar3, text="另存为…", font=FONT, bg=BTN2,
                                      fg=TEXT, relief="flat", padx=12, pady=4,
                                      cursor="hand2",
                                      command=lambda: self.resolve_share("rename"))
@@ -2250,7 +2434,7 @@ class App:
         box = tk.Listbox(wrap, height=height, font=("Consolas", 9), bg=CARD, fg=TEXT,
                          relief="flat", highlightthickness=1,
                          highlightbackground=LINE, bd=0, exportselection=False)
-        sb = tk.Scrollbar(wrap, command=box.yview)
+        sb = _scrollbar(wrap, command=box.yview)
         box.configure(yscrollcommand=sb.set)
         box.pack(side="left", fill="x", expand=True)
         sb.pack(side="right", fill="y")
@@ -2465,13 +2649,13 @@ class App:
         # 右栏一整列都给它，所以不写死行数，跟着窗口高度长。
         # 用 Text 而不是 Listbox：Listbox 不能换行，长日志只能被截掉右半截，
         # 也没有横向滚动可拖，等于永远看不全。
-        self.logbox = tk.Text(wrap, font=("Consolas", 9), bg="#fbfcfe",
+        self.logbox = tk.Text(wrap, font=("Consolas", 9), bg=FIELD,
                               fg=TEXT, relief="flat", highlightthickness=1,
                               highlightbackground=LINE, bd=0,
                               wrap="char",          # 中文没有空格，按字符换行才不会溢出
                               spacing1=1, spacing3=2, padx=6, pady=4,
                               takefocus=0, cursor="arrow")
-        sb = tk.Scrollbar(wrap, command=self.logbox.yview)
+        sb = _scrollbar(wrap, command=self.logbox.yview)
         self.logbox.configure(yscrollcommand=sb.set)
         self.logbox.pack(side="left", fill="both", expand=True)
         sb.pack(side="right", fill="y")
@@ -2501,7 +2685,7 @@ class App:
                                       width=20, state="readonly")
         self.usb_combo.pack(side="left", fill="x", expand=True)
         self.usb_combo.bind("<<ComboboxSelected>>", self._usb_pick)
-        self.btn_usb_scan = tk.Button(row1, text="🔄 刷新设备", font=FONT, bg="#eef2f7",
+        self.btn_usb_scan = tk.Button(row1, text="🔄 刷新设备", font=FONT, bg=BTN2,
                                       fg=TEXT, relief="flat", padx=8, pady=3,
                                       cursor="hand2", command=lambda: self.usb_refresh())
         self.btn_usb_scan.pack(side="left", padx=(6, 0))
@@ -2512,11 +2696,11 @@ class App:
                                       fg="white", relief="flat", padx=12, pady=4,
                                       cursor="hand2", command=self.usb_connect)
         self.btn_usb_conn.pack(side="left")
-        self.btn_usb_cut = tk.Button(row2, text="断开", font=FONT, bg="#eef2f7", fg=TEXT,
+        self.btn_usb_cut = tk.Button(row2, text="断开", font=FONT, bg=BTN2, fg=TEXT,
                                      relief="flat", padx=12, pady=4, cursor="hand2",
                                      command=lambda: self.usb_disconnect("手动断开"))
         self.btn_usb_cut.pack(side="left", padx=(6, 0))
-        self.btn_usb_adb = tk.Button(row2, text="选择 adb", font=FONT, bg="#eef2f7",
+        self.btn_usb_adb = tk.Button(row2, text="选择 adb", font=FONT, bg=BTN2,
                                      fg=TEXT, relief="flat", padx=8, pady=4,
                                      cursor="hand2", command=self.usb_pick_adb)
         self.btn_usb_adb.pack(side="right")
@@ -2683,6 +2867,11 @@ class App:
 
         self.usb_on = True
         W.log_event("usb", "USB 手机已接管：%s → %s" % (serial, res.get("proxy")))
+        if res.get("watch"):
+            W.log_event("usb", "已装拔线守护：反向端口消失后手机自动恢复直连")
+        else:
+            W.log_event("usb", "拔线守护未装上（%s）：拔线后手机可能仍指向本地代理，需插回清理"
+                        % (res.get("watch_msg") or "未知原因"))
         if W.G.limit_on:
             self._usb_state("已接管 %s → %s" % (serial, res.get("proxy")), OK)
         else:
@@ -2909,7 +3098,7 @@ class App:
             return
         on = W.G.limit_on
         self.btn_run.config(text=("⏹ 停止限速（恢复直连）" if on else "▶ 开启限速"),
-                            bg="#eef2f7" if on else ACCENT,
+                            bg=BTN2 if on else ACCENT,
                             fg=TEXT if on else "white")
 
     def toggle_run(self):
@@ -2991,7 +3180,7 @@ class App:
             return
         setattr(self, attr, sel_key)
         for key, btn in btns.items():
-            btn.config(bg=ACCENT if key == sel_key else "#eef2f7",
+            btn.config(bg=ACCENT if key == sel_key else BTN2,
                        fg="white" if key == sel_key else TEXT)
 
     def refresh(self):
@@ -3105,22 +3294,74 @@ def pick_ports(proxy_port, ctrl_port):
     return proxy_port, ctrl_port
 
 
+def _announce(tag, payload, ready_file=None):
+    """向宿主报告启动结果：stdout 打一行 WEAKNET_<TAG> <json>；给了 --ready-file 再写一份。
+
+    --windowed 打包出来没有控制台（sys.stdout 为 devnull），所以文件通道才是可靠的那条；
+    stdout 那条留给源码运行 / 调试。
+    """
+    line = "WEAKNET_%s %s" % (tag, json.dumps(payload, ensure_ascii=False))
+    try:
+        print(line, flush=True)
+    except Exception:
+        pass
+    if not ready_file:
+        return
+    try:
+        tmp = ready_file + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write(json.dumps(payload, ensure_ascii=False))
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, ready_file)
+    except Exception:
+        pass
+
+
+def _headless_ready(proxy_port, ctrl_port, ready_file, timeout=20.0):
+    """等引擎真正能应答 /api/status 再报告端口 —— 端口顺延后的实际值必须让宿主知道。"""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if W.is_weaknet_running(ctrl_port):
+            _announce("READY", {"status": "ready", "proxy_port": proxy_port,
+                                "ctrl_port": ctrl_port, "pid": os.getpid(),
+                                "version": getattr(W, "VERSION", "")}, ready_file)
+            return True
+        time.sleep(0.3)
+    _announce("FAILED", {"status": "failed", "reason": "控制接口 %d 未在 %.0f 秒内就绪"
+                         % (ctrl_port, timeout), "pid": os.getpid()}, ready_file)
+    return False
+
+
 def main():
-    ap = argparse.ArgumentParser(description="WeakNet GUI")
+    global _HEADLESS
+    ap = argparse.ArgumentParser(description="WeakNet")
     ap.add_argument("--proxy-port", type=int, default=8888)
     ap.add_argument("--ctrl-port", type=int, default=8899)
+    ap.add_argument("--theme", choices=("light", "dark"), default=None,
+                    help="界面配色；默认浅色，随宿主（resources/weaknet）运行时自动深色")
+    ap.add_argument("--headless", action="store_true",
+                    help="只跑引擎、不建窗口（由宿主进程驱动界面）；就绪后报告实际端口")
+    ap.add_argument("--ready-file", default=None,
+                    help="把就绪信息写进该文件（无控制台打包时用这个，而不是 stdout）")
     args = ap.parse_args()
+
+    _HEADLESS = bool(args.headless)
 
     W.G.lan_ip = W.detect_lan_ip()
     proxy_port, ctrl_port = pick_ports(args.proxy_port, args.ctrl_port)
     if proxy_port is None:
-        root = tk.Tk()
-        root.withdraw()
-        messagebox.showinfo(
-            "WeakNet",
-            f"已经有一个 WeakNet 实例在运行（控制接口 http://127.0.0.1:{args.ctrl_port}/）。\n\n"
-            "本程序不再重复启动，请直接使用已经打开的那个界面。")
-        root.destroy()
+        _announce("ALREADY", {"status": "already", "ctrl_port": args.ctrl_port,
+                              "pid": os.getpid(),
+                              "version": getattr(W, "VERSION", "")}, args.ready_file)
+        if not args.headless:
+            root = tk.Tk()
+            root.withdraw()
+            messagebox.showinfo(
+                "WeakNet",
+                f"已经有一个 WeakNet 实例在运行（控制接口 http://127.0.0.1:{args.ctrl_port}/）。\n\n"
+                "本程序不再重复启动，请直接使用已经打开的那个界面。")
+            root.destroy()
         return
 
     ready = threading.Event()
@@ -3139,6 +3380,14 @@ def main():
         loop.run_forever()
 
     threading.Thread(target=engine, daemon=True).start()
+
+    if args.headless:
+        if not _headless_ready(proxy_port, ctrl_port, args.ready_file):
+            raise SystemExit(1)
+        # 主线程只负责「活着」：窗口没了，进程不能跟着退，否则宿主一碰接口就断
+        threading.Event().wait()
+        return
+
     if not ready.wait(15):
         W.log("服务启动超时")
 
@@ -3154,7 +3403,10 @@ if __name__ == "__main__":
         import traceback
         err = traceback.format_exc()
         W.log(err)
-        # 无控制台时 raise 只是静默闪退，改用弹窗把错误报出来
+        # 无控制台时 raise 只是静默闪退，改用弹窗把错误报出来；
+        # headless 下没人点那个弹窗，宿主只会一直等，所以退化成 stdout + 退出码
+        if _HEADLESS:
+            sys.exit(1)
         try:
             root = tk.Tk()
             root.withdraw()

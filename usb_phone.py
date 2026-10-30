@@ -10,8 +10,9 @@ USB 手机弱网 —— 让电脑上的 WeakNet 代理通过 USB 线接管手机
        让手机的系统代理指向自己的 localhost:P —— 于是流量顺着 USB 进到 WeakNet
     3) settings get global http_proxy 回读校验，写不进去就如实报错
 
-断开就是反向操作：reverse --remove + settings delete。少做一步手机就上不了网，
+断开就是反向操作：reverse --remove + settings put :0 + settings delete。少做一步手机就上不了网，
 所以本模块里所有清理动作都是「尽力做完」，不会因为中间一步失败就跳过剩下的。
+（:0 不能省：MIUI 把代理镜像在 Wi-Fi 网络配置里，只 delete 全局行清不掉它。）
 
 工程约定（与 GUI 一起打包成 EXE，出问题时用户看不到任何控制台输出）：
     - 一律 subprocess.run(列表参数)，禁止 shell=True
@@ -23,9 +24,64 @@ USB 手机弱网 —— 让电脑上的 WeakNet 代理通过 USB 线接管手机
 import os
 import shutil
 import subprocess
+import tempfile
+import time
 
 ADB_TIMEOUT = 20                  # 单条 adb 命令的超时（秒）
 CREATE_NO_WINDOW = 0x08000000     # Windows：不为子进程创建控制台窗口
+
+# 哪些读回值等于「没有代理」。:0 是 Android 的无代理哨兵，MIUI 写完它就是直连。
+CLEARED_PROXY = ("", "null", "none", ":0", "0")
+
+WATCH_PATH = "/data/local/tmp/wn_proxy_watch.sh"
+WATCH_PID = "/data/local/tmp/wn_proxy_watch.pid"
+WATCH_LOG = "/data/local/tmp/wn_proxy_watch.log"
+
+# 为什么需要这个守护：global http_proxy 写在系统设置里，拔线、重启都不消失；
+# 而反向映射（adb reverse）只活在 adb 传输会话上，拔线即消失。两者一错位，
+# 手机就把所有 HTTP(S) 发给一个没人监听的 127.0.0.1 端口，看起来就是「还在断网」。
+# 拔线后电脑侧已经没有任何 adb 通道，清不了，只能由手机自己发现监听没了再清。
+_WATCH_SH = """#!/system/bin/sh
+# WeakNet USB 代理守护：反向监听消失（拔线 / 传输断开）后自动撤掉全局代理。
+# 由电脑端推送并启动，参数：<端口> <端口十六进制>；勿手工修改。
+PORT="$1"
+HEX="$2"
+EXPECT="127.0.0.1:$PORT"
+PIDF="%s"
+LOG="%s"
+
+echo "start $(date) pid=$$ expect=$EXPECT" >"$LOG"
+echo $$ >"$PIDF"
+
+listening() {
+    awk -v p=":$HEX" '$2 ~ p"$" && $4 == "0A" {f=1} END {exit !f}' /proc/net/tcp /proc/net/tcp6 2>/dev/null
+}
+
+i=0
+while [ "$i" -lt 43200 ]; do
+    i=$((i + 1))
+    sleep 2
+    listening && continue
+    sleep 2
+    listening && continue
+    # 真要删之前才读设置；值已被别人改掉就不动，不跟别的工具抢
+    v=$(settings get global http_proxy 2>/dev/null)
+    if [ "$v" != "$EXPECT" ]; then
+        echo "proxy 已是 [$v]，不接管 $(date)" >>"$LOG"
+        break
+    fi
+    # 只 delete 设置不够：MIUI 会把全局代理镜像进当前 Wi-Fi 的网络配置，删设置不动
+    # 那一份，网络校验探测还是打向旧代理，手机一直显示「无互联网」（真机实测网络
+    # 114 删完仍连 8888）。先写 :0 让系统把网络里的代理同步清掉，再收残留字段。
+    settings put global http_proxy :0 >/dev/null 2>&1
+    settings delete global global_http_proxy_host >/dev/null 2>&1
+    settings delete global global_http_proxy_port >/dev/null 2>&1
+    settings delete global http_proxy >/dev/null 2>&1
+    echo "反向监听消失，已清除全局代理 $(date)" >>"$LOG"
+    break
+done
+rm -f "$PIDF"
+""" % (WATCH_PID, WATCH_LOG)
 
 
 class AdbError(Exception):
@@ -47,6 +103,11 @@ def _decode(b):
         except Exception:
             continue
     return b.decode("utf-8", "replace").strip()
+
+
+def cleared(value):
+    """settings get global http_proxy 的返回值是否代表「没有代理」。"""
+    return (value or "").strip().lower() in CLEARED_PROXY
 
 
 def candidate_paths(saved=None):
@@ -170,6 +231,76 @@ def list_devices(adb, timeout=ADB_TIMEOUT):
     return {"devices": devices, "blocked": blocked}
 
 
+def stop_watch(adb, serial, timeout=ADB_TIMEOUT):
+    """收掉手机上的守护进程。失败只返回原因，不抛异常 —— 调用方都在清理路径上。"""
+    if not serial:
+        return {"ok": False, "msg": "没有设备"}
+    cmd = ("p=$(cat %s 2>/dev/null); "
+           "if [ -n \"$p\" ] && grep -q wn_proxy_watch /proc/$p/cmdline 2>/dev/null; "
+           "then kill $p 2>/dev/null; fi; rm -f %s %s"
+           % (WATCH_PID, WATCH_PID, WATCH_PATH))
+    try:
+        run(adb, ["-s", serial, "shell", "sh", "-c", cmd], timeout)
+    except AdbError as e:
+        return {"ok": False, "msg": str(e)}
+    return {"ok": True}
+
+
+def start_watch(adb, serial, port, timeout=ADB_TIMEOUT):
+    """在手机上启动守护：反向监听消失后自动撤掉全局代理。
+
+    返回 {"ok": True, "pid": N} 或 {"ok": False, "msg": ...}。装不上不影响代理本身，
+    只是拔线后不会自愈，所以调用方按「警告」处理即可。
+    """
+    if not serial:
+        return {"ok": False, "msg": "没有设备"}
+    stop_watch(adb, serial, timeout)          # 先收掉上一份，避免多个守护打架
+
+    tmp = None
+    try:
+        fd, tmp = tempfile.mkstemp(suffix=".sh")
+        with os.fdopen(fd, "wb") as f:
+            f.write(_WATCH_SH.encode("utf-8"))      # 二进制写：不让 Windows 把换行改成 CRLF
+        rc, out, err = run(adb, ["-s", serial, "push", tmp, WATCH_PATH], timeout)
+        if rc != 0:
+            return {"ok": False, "msg": "推送守护脚本失败：" + (err or out or "未知错误")[:200]}
+        rc, out, err = run(adb, ["-s", serial, "shell", "chmod", "755", WATCH_PATH], timeout)
+        if rc != 0:
+            return {"ok": False, "msg": "守护脚本不可执行：" + (err or out or "未知错误")[:200]}
+
+        # setsid 另起会话：拔线时 adb 传输断开会把命令会话里的进程带走，nohup 只挡
+        # SIGHUP，真机实测照样会死；setsid 起的新会话没有控制终端，能活到发现监听消失。
+        hexp = "%04X" % port
+        launch = ("if command -v setsid >/dev/null 2>&1; then "
+                  "setsid sh %s %d %s </dev/null >/dev/null 2>&1 & "
+                  "else nohup sh %s %d %s </dev/null >/dev/null 2>&1 & fi"
+                  % (WATCH_PATH, port, hexp, WATCH_PATH, port, hexp))
+        run(adb, ["-s", serial, "shell", launch], timeout)
+
+        # 回读 pid 文件并确认进程还活着：adb 返回 0 不代表后台进程没被立刻回收
+        pid = ""
+        for _ in range(6):
+            time.sleep(0.2)
+            rc, out, _e = run(adb, ["-s", serial, "shell", "cat", WATCH_PID], timeout)
+            pid = (out or "").strip()
+            if rc == 0 and pid.isdigit():
+                break
+        if not pid.isdigit():
+            return {"ok": False, "msg": "守护进程未启动"}
+        rc, _o, _e = run(adb, ["-s", serial, "shell", "kill", "-0", pid], timeout)
+        if rc != 0:
+            return {"ok": False, "msg": "守护进程启动后立即退出（日志：%s）" % WATCH_LOG}
+        return {"ok": True, "pid": int(pid)}
+    except AdbError as e:
+        return {"ok": False, "msg": str(e)}
+    finally:
+        if tmp:
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+
+
 def connect(adb, serial, port, timeout=ADB_TIMEOUT):
     """把一台手机接到 WeakNet 代理上。返回 {"ok":..., "stage":..., "msg":...}"""
     if not serial:
@@ -222,7 +353,9 @@ def connect(adb, serial, port, timeout=ADB_TIMEOUT):
         return {"ok": False, "stage": "verify",
                 "msg": "回读校验失败（期望 %s，实际 %s）" % (proxy, got or (err or "(空)")[:200])}
 
-    return {"ok": True, "stage": "done", "serial": serial, "port": port, "proxy": proxy}
+    watch = start_watch(adb, serial, port, timeout)
+    return {"ok": True, "stage": "done", "serial": serial, "port": port, "proxy": proxy,
+            "watch": bool(watch.get("ok")), "watch_msg": watch.get("msg", "")}
 
 
 def disconnect(adb, serial, port, timeout=ADB_TIMEOUT):
@@ -231,6 +364,8 @@ def disconnect(adb, serial, port, timeout=ADB_TIMEOUT):
         return {"ok": False, "stage": "serial", "msg": "没有设备可断开"}
 
     errs = []
+    # 先收守护：它盯着反向监听，正常断开时映射一撤它也会动作，别让两边同时删
+    stop_watch(adb, serial, timeout)
     try:
         rc, out, err = run(adb, ["-s", serial, "reverse", "--remove", "tcp:%d" % port], timeout)
         if rc != 0:
@@ -241,13 +376,21 @@ def disconnect(adb, serial, port, timeout=ADB_TIMEOUT):
     except AdbError as e:
         errs.append(str(e))
 
-    for key in ("http_proxy", "global_http_proxy_host", "global_http_proxy_port"):
+    # 先写 :0 再删。delete 只清全局行，MIUI 会把代理镜像进 Wi-Fi 网络配置且不跟着删，
+    # 于是「设置里已经没有代理」的手机照样把所有流量发给死端口（实测网络 114）。
+    # 写 :0 会触发一次同步，把网络里的代理一起清掉，顺带修好旧版本留下的残留。
+    try:
+        run(adb, ["-s", serial, "shell", "settings", "put", "global", "http_proxy", ":0"],
+            timeout)
+    except AdbError as e:
+        errs.append(str(e))
+    for key in ("global_http_proxy_host", "global_http_proxy_port", "http_proxy"):
         try:
             run(adb, ["-s", serial, "shell", "settings", "delete", "global", key], timeout)
         except AdbError as e:
             errs.append(str(e))
 
-    # 校验：读回来是 null / 空才算真清干净
+    # 校验：读回来是 null / 空 / :0 才算真清干净
     got, note = "", ""
     try:
         rc, out, _e = run(adb, ["-s", serial, "shell", "settings", "get", "global",
@@ -255,7 +398,7 @@ def disconnect(adb, serial, port, timeout=ADB_TIMEOUT):
         got = (out or "").strip()
         if rc != 0:
             note = "（无法回读确认，手机可能已断开连接）"
-        elif got in ("", "null", "None"):
+        elif cleared(got):
             got = ""
         else:
             errs.append("代理字段仍残留：" + got)
@@ -281,7 +424,7 @@ def status(adb, serial, port, timeout=ADB_TIMEOUT):
     try:
         rc, out, _e = run(adb, ["-s", serial, "shell", "settings", "get", "global",
                                 "http_proxy"], timeout)
-        if rc == 0 and out and out not in ("null", "None"):
+        if rc == 0 and out and not cleared(out):
             r["proxy"] = out
     except Exception:
         pass

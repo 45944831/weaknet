@@ -19,8 +19,8 @@ cd "$(dirname "$0")"
 #   AndroidManifest.xml 的 android:versionCode / versionName（aapt2 的输入）
 #   下面两行的默认值（aapt2 link --replace-version 的输入）
 # 环境变量可覆盖，方便打测试包；正式包不要覆盖。
-VERSION_CODE="${VERSION_CODE:-120}"
-VERSION_NAME="${VERSION_NAME:-1.1.10}"
+VERSION_CODE="${VERSION_CODE:-121}"
+VERSION_NAME="${VERSION_NAME:-1.1.11}"
 
 # ---------- 1. 定位 JDK ----------
 if [ -n "${JAVA_HOME:-}" ] && [ -x "$JAVA_HOME/bin/javac" ]; then
