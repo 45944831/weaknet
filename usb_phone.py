@@ -314,8 +314,13 @@ def connect(adb, serial, port, timeout=ADB_TIMEOUT):
     except AdbError as e:
         return {"ok": False, "stage": "reverse", "msg": str(e)}
     if rc != 0:
-        return {"ok": False, "stage": "reverse",
-                "msg": "端口映射失败：" + (err or out or "未知错误")[:300]}
+        txt = (err or out or "未知错误")
+        # 手机侧该端口已被占用：最常见的是 WeakNet.apk（自带代理服务）正开着 8888
+        if "address already in use" in txt.lower():
+            txt += ("\n\n手机上的 %d 端口已被占用，多半是 WeakNet.apk 正在运行"
+                    "（它自己会监听 8888）。先在手机上停掉它，或在设置里换个代理端口再连。"
+                    % port)
+        return {"ok": False, "stage": "reverse", "msg": "端口映射失败：" + txt[:400]}
 
     # 2) 确认映射真的建立（有些 ROM 上 reverse 返回 0 但没落上）
     try:

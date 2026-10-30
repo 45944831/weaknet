@@ -115,6 +115,13 @@ Windows 端可以直接给**插在 USB 上的 Android 手机**施加弱网，手
 > 只 `settings delete global http_proxy` 清不掉那一份，网络校验探测照样打向旧代理，
 > 手机一直显示「无互联网」（真机实测）。所以前后两端都先 `settings put global http_proxy :0`
 > 让系统把网络里的代理同步清空，再删残留字段。
+>
+> **手机重启后**：代理写在系统设置里不会随重启消失，反向映射和拔线守护却都没了，
+> 于是重启到重新点「连接手机」之间手机会短暂上不了网 —— 重连一次即可恢复。
+> 手边没电脑时，用 `adb shell settings put global http_proxy :0`（或手机 WLAN 里把代理改回「无」）清掉。
+>
+> **端口被占用**：`adb reverse` 报 `Address already in use` 通常是手机上的 WeakNet.apk
+> 正在运行 —— 它自己监听着 8888。先在手机上停掉它，或换个代理端口再连。
 
 > **写入失败怎么办（很常见）**：不少手机 —— 尤其是 Android 13+ 的国产 ROM（OPPO / ColorOS 等）——
 > 禁止 adb 改写全局设置，会报 `Permission denial: writing to settings requires

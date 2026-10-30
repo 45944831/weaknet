@@ -2674,8 +2674,12 @@ class App:
         box = self._card(self.col_right, "📱 USB 手机弱网（免装 APK）")
         self.usb_adb = None          # adb.exe 路径
         self.usb_devices = []        # 最近一次刷新拿到的可用设备
-        self.usb_serial = None       # 当前选中的 / 已接管的设备
+        self.usb_serial = None       # 下拉框当前选中的设备
         self.usb_on = False          # 手机代理是否已生效
+        # 已接管的那台 + 用的端口。下拉框随时能改选中项，断开必须按这本账走，
+        # 否则连上 A 之后选一下 B 再点「断开」，清的是 B，A 一直挂着代理。
+        self.usb_conn_serial = None
+        self.usb_conn_port = None
         self.usb_busy = False        # 有 adb 命令在跑，按钮先锁住
 
         row1 = tk.Frame(box, bg=CARD)
@@ -2839,12 +2843,24 @@ class App:
                                             "再从下拉框里选一台。")
             return
         serial, port = self.usb_serial, W.G.proxy_port
+        prev = (self.usb_conn_serial, self.usb_conn_port) if self.usb_on else (None, None)
         self._usb_state("正在连接 %s …" % serial, MUTED)
-        self._usb_run(lambda: UP.connect(adb, serial, port), self._usb_on_connect)
 
-    def _usb_on_connect(self, res):
-        serial = self.usb_serial or "（未知设备）"
-        port = W.G.proxy_port
+        def job():
+            # 换机 / 换端口前先把上一台还原：账本记的是「已接管的那台」，不是下拉框
+            # 当前选项。不这么做的话，旧机、旧端口的映射都会留到拔线为止。
+            if prev[0]:
+                UP.disconnect(adb, prev[0], prev[1] or port)
+            return UP.connect(adb, serial, port)
+
+        self._usb_run(job, lambda res: self._usb_on_connect(res, serial, port))
+
+    def _usb_on_connect(self, res, serial=None, port=None):
+        serial = serial or self.usb_serial or "（未知设备）"
+        port = port or W.G.proxy_port
+        self.usb_on = False                  # 连接前可能刚把上一台断开了
+        self.usb_conn_serial = None
+        self.usb_conn_port = None
         if not res.get("ok"):
             stage = res.get("stage", "")
             msg = res.get("msg", "未知错误")
@@ -2866,6 +2882,8 @@ class App:
             return
 
         self.usb_on = True
+        self.usb_conn_serial = res.get("serial") or serial
+        self.usb_conn_port = port
         W.log_event("usb", "USB 手机已接管：%s → %s" % (serial, res.get("proxy")))
         if res.get("watch"):
             W.log_event("usb", "已装拔线守护：反向端口消失后手机自动恢复直连")
@@ -2896,7 +2914,10 @@ class App:
 
     def usb_disconnect(self, reason="", wait=False):
         """还原手机直连。wait=True 时同步跑（退出程序时用，没机会等回调）。"""
-        serial = self.usb_serial
+        if self.usb_on and self.usb_conn_serial:
+            serial, port = self.usb_conn_serial, self.usb_conn_port or W.G.proxy_port
+        else:
+            serial, port = self.usb_serial, W.G.proxy_port
         if not serial:
             return
         adb = self.usb_adb or self._usb_load_adb()
@@ -2910,7 +2931,6 @@ class App:
                 "  设置 → 开发者选项 → 撤销 USB 调试授权\n"
                 "或在 WLAN 里把代理改回「无」，否则手机会一直上不了网。")
             return
-        port = W.G.proxy_port
         if wait:
             self._usb_on_disconnect(UP.disconnect(adb, serial, port, timeout=8), reason)
         else:
@@ -2921,6 +2941,8 @@ class App:
         prefix = (reason + "：") if reason else ""
         if res.get("ok"):
             self.usb_on = False
+            self.usb_conn_serial = None
+            self.usb_conn_port = None
             self._usb_state("已断开，手机恢复直连", MUTED)
             W.log_event("usb", prefix + "已断开手机代理，恢复直连")
         else:
@@ -2933,7 +2955,9 @@ class App:
                     "没能自动清除手机上的代理：\n\n" + msg +
                     "\n\n请手动处理，否则手机可能上不了网：\n"
                     "  手机「设置 → WLAN」把代理改回「无」，或\n"
-                    "  adb shell settings delete global http_proxy")
+                    # 只 delete 在 MIUI 上不够：系统会把代理镜像进当前 Wi-Fi 的网络
+                    # 配置，删全局行清不掉那一份 —— 必须写 :0 让它同步一次
+                    "  adb shell settings put global http_proxy :0")
         self._usb_sync_btns()
 
     # ---- 线程与状态 ----
