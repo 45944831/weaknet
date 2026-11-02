@@ -154,7 +154,13 @@ for _ in range(40):                       # onefile 解压 + tkinter 起来要�
     time.sleep(0.5)
 check("GUI 主窗口存在且有标题", bool(title), f"title={title!r}")
 
-proc.terminate()
+# onefile 是「引导进程 + 应用进程」两级：只 terminate 外层，内层应用会活下来
+# 继续占着 8888/8899，下一次启动就变成「已经有一个实例在运行」。
+subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+for pid in sorted(tree, reverse=True):
+    subprocess.run(["taskkill", "/F", "/PID", str(pid)],
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 try:
     proc.wait(10)
 except Exception:

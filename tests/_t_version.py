@@ -98,7 +98,8 @@ def check_exe():
     spec = read(os.path.join(ROOT, "_build_gui", "WeakNet.spec"))
     rec("C2 PyInstaller spec 带版本资源", "version_info.txt" in spec
         and re.search(r"version\s*=\s*os\.path\.join", spec) is not None)
-    rec("C3 PyInstaller spec 把 spec.json 打进包", "'spec', 'spec.json'" in spec)
+    rec("C3 PyInstaller spec 把 spec.json 打进包",
+        any(t in spec for t in ("spec/spec.json', 'spec'", "'spec', 'spec.json'")))
 
     vi = read(os.path.join(ROOT, "_build_gui", "version_info.txt"))
     nums = [int(x) for x in W.VERSION.split(".")] + [0]

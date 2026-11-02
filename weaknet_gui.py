@@ -15,6 +15,7 @@ WeakNet —— App 弱网测试工具（桌面 GUI 版）
 
 import argparse
 import asyncio
+import atexit
 import json
 import os
 import queue
@@ -2878,7 +2879,9 @@ class App:
                 body = msg
             self._usb_state("连接失败（%s）" % (stage or "adb"), WARN)
             W.log_event("usb", "USB 手机连接失败（%s）：%s" % (stage, msg[:150]))
-            messagebox.showerror(title, body)
+            # 关窗过程中不能再弹模态框：窗口马上销毁，没人点它，进程会一直挂着
+            if not self._closing:
+                messagebox.showerror(title, body)
             return
 
         self.usb_on = True
@@ -2925,11 +2928,14 @@ class App:
             # adb 都没了就清不掉，只能让用户自己动手 —— 这时候必须说清楚，
             # 否则用户会以为已经还原了
             self._usb_state("adb 不见了，无法自动还原！请手动检查手机代理。", WARN)
-            messagebox.showwarning(
-                "无法还原手机", "找不到 adb.exe，没法自动清除手机上的代理。\n\n"
-                "请手动在手机上执行：\n"
-                "  设置 → 开发者选项 → 撤销 USB 调试授权\n"
-                "或在 WLAN 里把代理改回「无」，否则手机会一直上不了网。")
+            W.log_event("usb", "找不到 adb.exe，无法自动还原手机代理")
+            # 关窗时没机会让人点确认框，弹出来就是永远关不掉
+            if not self._closing:
+                messagebox.showwarning(
+                    "无法还原手机", "找不到 adb.exe，没法自动清除手机上的代理。\n\n"
+                    "请手动在手机上执行：\n"
+                    "  设置 → 开发者选项 → 撤销 USB 调试授权\n"
+                    "或在 WLAN 里把代理改回「无」，否则手机会一直上不了网。")
             return
         if wait:
             self._usb_on_disconnect(UP.disconnect(adb, serial, port, timeout=8), reason)
@@ -3148,35 +3154,89 @@ class App:
         if self._closing:
             return
         self._closing = True
-        self.close_share()          # 先关二级窗口：它上面挂着定时刷新，别等主窗销毁才取消
-        self.close_preset_notes()   # 场景说明只是只读参考，直接关掉即可
-        self.close_param_note()     # 单个参数的「！」小窗同理
-        self.close_combo_editor()   # 组合编辑器可能还开着（没保存的内容随之丢弃）
-        # 手机上还挂着代理就退出 = 手机直接断网，用户根本想不到是这边造成的。
-        # 必须同步做完（wait=True）：主线程马上就要销毁窗口，等不到后台回调
-        if getattr(self, "usb_on", False):
+        try:
+            self.close_share()          # 先关二级窗口：它上面挂着定时刷新，别等主窗销毁才取消
+            self.close_preset_notes()   # 场景说明只是只读参考，直接关掉即可
+            self.close_param_note()     # 单个参数的「！」小窗同理
+            self.close_combo_editor()   # 组合编辑器可能还开着（没保存的内容随之丢弃）
             try:
-                self.usb_disconnect("退出程序", wait=True)
+                # 刚点「连接」就关窗：先让在途 adb 操作落地（最多 3 秒），
+                # 否则可能在进程退出后才把代理写进手机，没人再清
+                deadline = time.time() + 3.0
+                while self.usb_busy and time.time() < deadline:
+                    self._usb_pump()
+                    time.sleep(0.05)
+                self._usb_pump()
             except Exception as e:
-                W.log("退出时还原手机失败：%r" % e)
-        try:
-            if W.sysproxy_enabled():
-                W.set_sysproxy(False)
-                W.log_event("config", "退出：已解除本机流量接管")
-        except Exception:
-            pass
-        try:
-            # 撤掉定时刷新再销毁窗口：否则 after 回调会在控件已销毁后触发，
-            # 在控制台里刷一行 invalid command name（窗口版看不到，但一样是错）
-            if getattr(self, "_after_id", None):
-                self.root.after_cancel(self._after_id)
-        except Exception:
-            pass
-        try:
-            self.loop.call_soon_threadsafe(self.loop.stop)
-        except Exception:
-            pass
-        self.root.destroy()
+                W.log("退出时收尾 USB 操作失败：%r" % e)
+            # 手机上还挂着代理就退出 = 手机直接断网，用户根本想不到是这边造成的。
+            # 还原放到后台线程并限时等待：adb 卡住时同步跑会让窗口关不掉。
+            if getattr(self, "usb_on", False):
+                try:
+                    self._usb_restore_on_close("退出程序")
+                except Exception as e:
+                    W.log("退出时还原手机失败：%r" % e)
+            try:
+                if W.sysproxy_enabled():
+                    W.set_sysproxy(False)
+                    W.log_event("config", "退出：已解除本机流量接管")
+            except Exception:
+                pass
+        finally:
+            try:
+                # 撤掉定时刷新再销毁窗口：否则 after 回调会在控件已销毁后触发，
+                # 在控制台里刷一行 invalid command name（窗口版看不到，但一样是错）
+                if getattr(self, "_after_id", None):
+                    self.root.after_cancel(self._after_id)
+            except Exception:
+                pass
+            try:
+                self.loop.call_soon_threadsafe(self.loop.stop)
+            except Exception:
+                pass
+            try:
+                self.root.destroy()
+            finally:
+                # 日志是攒批落盘的：不在这里冲一次，最后几秒（含退出还原结果）会丢
+                try:
+                    W.flush_logs()
+                except Exception:
+                    pass
+
+    def _usb_restore_on_close(self, reason="退出程序", budget=10.0):
+        """退出时还原手机：后台跑、最多等 budget 秒，绝不弹模态框。
+
+        adb 服务重启/拔线后，一串 adb 命令可能各卡到超时；同步跑完再销毁
+        窗口，用户看到的就是「点了关闭进程也不消失」。
+        """
+        if self.usb_on and self.usb_conn_serial:
+            serial, port = self.usb_conn_serial, self.usb_conn_port or W.G.proxy_port
+        else:
+            serial, port = self.usb_serial, W.G.proxy_port
+        if not serial:
+            return
+        adb = self.usb_adb or self._usb_load_adb()
+        if not adb:
+            self._usb_state("adb 不见了，无法自动还原！请手动检查手机代理。", WARN)
+            W.log_event("usb", "退出：找不到 adb.exe，未能自动还原手机代理")
+            return
+        box = {}
+
+        def job():
+            try:
+                box["res"] = UP.disconnect(adb, serial, port, timeout=4)
+            except Exception as e:
+                box["res"] = {"ok": False, "stage": "cleanup",
+                              "msg": "%s: %s" % (type(e).__name__, e)}
+
+        th = threading.Thread(target=job, daemon=True)
+        th.start()
+        th.join(budget)
+        if th.is_alive():
+            W.log_event("usb", "退出：还原手机超过 %.0f 秒未完成，先退出；"
+                        "若手机仍上不了网，请插回后点「断开」" % budget)
+            return
+        self._usb_on_disconnect(box.get("res") or {"ok": False, "msg": "没有返回结果"}, reason)
 
     # ---------------- 刷新 ----------------
 
@@ -3371,6 +3431,8 @@ def main():
     args = ap.parse_args()
 
     _HEADLESS = bool(args.headless)
+    # 日志攒批落盘；GUI 没有 CLI 那条 atexit 链，进程异常退出时最后几秒会丢
+    atexit.register(W.flush_logs)
 
     W.G.lan_ip = W.detect_lan_ip()
     proxy_port, ctrl_port = pick_ports(args.proxy_port, args.ctrl_port)
