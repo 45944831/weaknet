@@ -27,6 +27,23 @@ def combo_api(name, steps, loop=False):
     return D.api_try("/api/combo", payload)
 
 
+def profile_seq(seconds, step=0.35):
+    """按时间采样「当前生效剖面」，只留变化点。
+
+    组合的段推进体现在真实生效的剖面上，事件日志里并不为每一段单独记一行
+    （早先这里按日志文本判「第 2 段」，包一改文案就误报）。采样剖面更可靠。
+    """
+    seq = []
+    t0 = time.time()
+    while time.time() - t0 < seconds:
+        s = D.api("/api/status")
+        nm = (s.get("profile") or {}).get("name") or ""
+        if nm and (not seq or seq[-1] != nm):
+            seq.append(nm)
+        time.sleep(step)
+    return seq
+
+
 def main():
     D.setup_forward()
     D.app_restart()
@@ -34,7 +51,9 @@ def main():
     time.sleep(2.0)
 
     D.section("A-301 新建组合（API）")
-    r = combo_api("真机地铁通勤", [("5g", 0, 3), ("tunnel", 0, 2), ("blackhole", 0, 1)], loop=True)
+    # 段里只能放「当前还在位」的内置档位：早先用过 tunnel，那个键已下线，
+    # 落库时会被归一化成直连，段推进就看不出来了。
+    r = combo_api("真机地铁通勤", [("5g", 0, 3), ("4g_weak", 0, 2), ("blackhole", 0, 1)], loop=True)
     cid = r.get("id") or r.get("cid")
     D.rec("A-301-a 组合创建成功", r.get("ok") or cid, json.dumps(r, ensure_ascii=False)[:160])
     combos = D.api("/api/combos")
@@ -54,7 +73,7 @@ def main():
           (len(six[0].get("steps", [])) if six else "拒绝"))
 
     D.section("A-303 时间校验（分秒全 0）")
-    r0 = combo_api("全零段", [("5g", 0, 0), ("tunnel", 0, 0)])
+    r0 = combo_api("全零段", [("5g", 0, 0), ("4g_weak", 0, 0)])
     lst = D.api("/api/combos")
     items = lst.get("items", lst if isinstance(lst, list) else [])
     zero = [c for c in items if c.get("name") == "全零段"]
@@ -78,22 +97,17 @@ def main():
     s = D.status()
     pk = s.get("preset_key", "")
     D.rec("A-305-a 起播后 preset_key 指向组合", pk.startswith("c:"), "preset_key=%s" % pk)
-    # 观察两拍：第 1 段 3 秒 → 4 秒后应该在第 2 段
-    time.sleep(4.0)
-    s1 = D.status()
-    ev1 = [e.get("msg", "") for e in s1.get("events", [])[-8:]]
-    D.rec("A-305-b 4 秒后推进到后续段（事件日志可见切段）",
-          any(("第 2" in m or "2/3" in m or "段" in m) for m in ev1),
-          " | ".join(ev1)[-220:])
+    # 观察两拍：第 1 段 3 秒 → 4 秒后应该已经在别的段上
+    seq1 = profile_seq(4.2)
+    D.rec("A-305-b 4 秒后推进到后续段（剖面真的换了）",
+          len(seq1) >= 2, "剖面序列=%s" % " → ".join(seq1))
     D.shot("03_combo_playing")
-    # 总时长 3+2+1=6s，循环开启：12 秒后应至少跑完 1 轮回到第 1 段
-    time.sleep(8.0)
-    s2 = D.status()
-    ev2 = [e.get("msg", "") for e in s2.get("events", [])[-14:]]
-    seg_msgs = [m for m in ev2 if "段" in m or "5G" in m or "隧道" in m or "黑洞" in m]
-    D.rec("A-306 循环回绕（12 秒后仍在播放且事件持续推进）",
-          s2.get("limit_on") is True and len(seg_msgs) >= 2,
-          " | ".join(ev2)[-260:])
+    # 总时长 3+2+1=6s，循环开启：再跑 8 秒应至少完整走完一轮
+    seq2 = profile_seq(8.0)
+    seg = seq1 + [x for x in seq2 if x != seq1[-1]]
+    D.rec("A-306 循环回绕（12 秒后仍在播放且段在推进）",
+          D.status().get("limit_on") is True and len(seg) >= 3,
+          "累计剖面=%s" % " → ".join(seg))
 
     D.section("A-307 播放中切场景 = 抢占")
     D.api("/api/preset", {"key": "elevator"})

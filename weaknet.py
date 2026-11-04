@@ -465,6 +465,14 @@ PARAM_NOTES = dict(SPEC["param_notes"])
 PROF_LIMITS = {p["key"]: int(p["max"]) for p in PARAM_SPECS}
 DEFAULT_PROFILE_NAME = PRESETS.get("direct", ("直连（不限制）",))[0]
 
+# 出厂默认：首次启动时一次性写进「我的自定义」与「弱网组合」的示例条目。
+# 与内置预设同在 spec.json 里，Windows 直读、Android 由 gen_spec.py 生成常量，
+# 两端拿到的名字和参数永远不会漂移。seed 改一次才会重新注入一轮（见 _ensure_seeded）。
+DEFAULTS = SPEC["defaults"]
+DEFAULT_SEED = str(DEFAULTS["seed"])
+DEFAULT_SCENES = DEFAULTS["scenes"]
+DEFAULT_COMBOS = DEFAULTS["combos"]
+
 COMBO_SPEC = SPEC["combo"]
 MAX_COMBO_STEPS = int(COMBO_SPEC["max_steps"])
 STEP_MAX_MINUTES = int(COMBO_SPEC["max_minutes"])
@@ -475,6 +483,23 @@ SHARE_VER = int(SHARE_SPEC["ver"])
 PIN_LEN = int(SHARE_SPEC["pin_len"])
 MAX_INBOX = int(SHARE_SPEC["inbox_max"])
 MAX_SHARED_STEPS = int(SHARE_SPEC["max_shared_steps"])
+
+# 自定义场景 / 弱网组合的「取名」上限（字符数，中文一个算一个）。
+# 只管用户起的这两类名字：内置预设的显示名最长 14 字（如「弱 Wi-Fi（隔墙/远端）」），
+# 设备昵称走 clean_name（24 字），都不归这里管。
+NAME_MAX = int(SPEC["name_max"])
+
+
+def limit_item_name(name, fallback=""):
+    """自定义场景 / 弱网组合的名字：压空白 + 截到 NAME_MAX 个字符。
+
+    所有会写出名字的入口（GUI / API / 共享 / 出厂默认 / 读老存档）都过这里，
+    保证落库的名字一律不超上限；输入侧的 maxlength 只是少打几个字的体验优化。
+    """
+    s = " ".join(str(name or "").split())[:NAME_MAX].rstrip()
+    if s:
+        return s
+    return " ".join(str(fallback or "").split())[:NAME_MAX].rstrip()
 
 
 # 未命中「接管范围」的程序走直通：原样转发，不注入任何弱网参数。
@@ -942,11 +967,14 @@ def load_user_presets():
         out = []
         for it in (raw or []):
             try:
-                name = str(it.get("name", "")).strip()
+                name = limit_item_name(it.get("name"))
                 if not name:
                     continue
+                # 老存档里可能有超长名字：截断后撞名的按重名规则加序号，
+                # 免得列表出现两条一模一样的名字分不清
+                name = _unique_name(out, name)
                 out.append({"id": str(it.get("id") or ""),
-                            "name": name[:40],
+                            "name": name,
                             "profile": _norm_user_profile(name, it.get("profile"))})
             except Exception:
                 continue
@@ -986,7 +1014,10 @@ def _dump_store(items=None, combos=None):
         items = get_user_presets()
     if combos is None:
         combos = get_combos()
+    # seed 是「这轮出厂默认已经注入过」的凭据：用户把默认项全删了也不该在下次
+    # 启动时复活，所以标记必须跟着每次写盘一起落下去。
     payload = json.dumps({"version": 1,
+                          "seed": DEFAULT_SEED,
                           "items": _items_payload(items),
                           "combos": _combos_payload(combos)},
                          ensure_ascii=False, indent=2).encode("utf-8")
@@ -1006,8 +1037,91 @@ def _dump_user_presets(items):
     return _dump_store(items=items)
 
 
+# --------------------------------------------------------------------------
+# 出厂默认（5 支自定义场景 + 5 支弱网组合）
+#
+# 只在「这台机器第一次跑这个 seed」时注入一次，写进的仍是普通用户条目：
+# 能改、能删、能共享，删掉后不会在下次启动复活。判定靠存储文件里的 seed 字段，
+# 不靠「列表是不是空的」——否则用户把自己建的全删了，默认项就会自己长回来。
+#
+# 已有存档一律保留（升级上来的用户也有自己的场景与组合），只在末尾追加，
+# 同名跳过。默认组合只引用内置预设 key：自定义场景 id 是各端现编的，
+# 跨端对不上，写进组合会变成「已删除的场景」。
+# --------------------------------------------------------------------------
+
+_seeded = False
+
+
+def _store_seeded():
+    """磁盘上的存档是否已经打过本轮 seed 标记（损坏的文件跳过，与 load_* 一致）"""
+    for f in _preset_files():
+        try:
+            if not f.exists():
+                continue
+            data = json.loads(f.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        return isinstance(data, dict) and data.get("seed") == DEFAULT_SEED
+    return False
+
+
+def _ensure_seeded():
+    """首次访问用户数据时注入出厂默认；get_user_presets / get_combos 都会先过这里。
+
+    本函数里的 load_combos / norm_combo_steps / _dump_store 定义在文件更下方，
+    但调用发生在模块加载完毕之后，所以顺序不影响。
+    """
+    global _seeded
+    if _seeded:
+        return
+    _seeded = True
+    if _store_seeded():
+        return
+
+    items = load_user_presets()
+    combos = load_combos()
+    used = {x["id"] for x in items} | {c["id"] for c in combos}
+    names = {x["name"] for x in items}
+    cnames = {c["name"] for c in combos}
+    added = [0, 0]
+
+    for d in DEFAULT_SCENES:
+        name = limit_item_name(d.get("name"))
+        if not name or name in names:
+            continue
+        pid = _new_pid(used)
+        used.add(pid)
+        items.append({"id": pid, "name": name,
+                      "profile": _norm_user_profile(name, d.get("params"))})
+        names.add(name)
+        added[0] += 1
+
+    for d in DEFAULT_COMBOS:
+        name = limit_item_name(d.get("name"))
+        if not name or name in cnames:
+            continue
+        steps = norm_combo_steps(d.get("steps"))
+        if not steps:
+            continue
+        cid = _new_pid(used)
+        used.add(cid)
+        combos.append({"id": cid, "name": name,
+                       "loop": bool(d.get("loop")), "steps": steps})
+        cnames.add(name)
+        added[1] += 1
+
+    # 先落内存再写盘：_dump_store → combo_summary → scene_name 会反查自定义场景，
+    # 缓存没就绪会绕回 get_user_presets 读到空列表。
+    G.user_presets = items
+    G.combos = combos
+    _dump_store(items, combos)        # 无论有没有追加都要写标记，避免每次启动重扫
+    if added[0] or added[1]:
+        log("已载入出厂默认：%d 支自定义场景、%d 支弱网组合" % (added[0], added[1]))
+
+
 def get_user_presets():
-    """内存缓存的自定义场景列表（首次调用时从磁盘加载）"""
+    """内存缓存的自定义场景列表（首次调用时从磁盘加载并注入出厂默认）"""
+    _ensure_seeded()
     if G.user_presets is None:
         G.user_presets = load_user_presets()
     return G.user_presets
@@ -1033,21 +1147,27 @@ def build_user_profile(key):
 
 
 def _unique_name(items, name, self_id=None):
-    """同名自动加序号，避免列表里出现两个一样名字分不清"""
+    """同名自动加序号，避免列表里出现两个一样名字分不清。
+
+    加后缀也要守住 NAME_MAX：10 字满了就先截短基础名再拼 " (2)"，
+    否则自动去重反而造出一条超长名字。
+    """
+    name = limit_item_name(name)
     others = {it["name"] for it in items if it["id"] != self_id}
     if name not in others:
         return name
     for i in range(2, 100):
-        cand = f"{name} ({i})"
+        suffix = f" ({i})"
+        cand = name[:NAME_MAX - len(suffix)].rstrip() + suffix
         if cand not in others:
             return cand
-    return f"{name} {int(time.time())}"
+    return limit_item_name(f"{name} {int(time.time())}")
 
 
 def upsert_user_preset(name, prof, pid=None):
     """新增或覆盖一条自定义场景，返回 (item, items)"""
     items = get_user_presets()
-    name = str(name or "").strip()[:40] or "自定义"
+    name = limit_item_name(name, "自定义")
     item = find_user_preset(pid) if pid else None
     if item is None:
         item = {"id": _new_pid({it["id"] for it in items}), "name": "", "profile": None}
@@ -1164,13 +1284,14 @@ def load_combos():
         out = []
         for c in (raw or []):
             try:
-                name = str(c.get("name", "")).strip()
+                name = limit_item_name(c.get("name"))
                 if not name:
                     continue
                 steps = norm_combo_steps(c.get("steps"))
                 if not steps:              # 全被拦掉的空壳组合没必要显示
                     continue
-                out.append({"id": str(c.get("id") or ""), "name": name[:40],
+                name = _unique_name(out, name)
+                out.append({"id": str(c.get("id") or ""), "name": name,
                             "loop": bool(c.get("loop")), "steps": steps})
             except Exception:
                 continue
@@ -1184,7 +1305,8 @@ def load_combos():
 
 
 def get_combos():
-    """内存缓存的弱网组合（首次调用时从磁盘加载）"""
+    """内存缓存的弱网组合（首次调用时从磁盘加载并注入出厂默认）"""
+    _ensure_seeded()
     if G.combos is None:
         G.combos = load_combos()
     return G.combos
@@ -1229,7 +1351,7 @@ def upsert_combo(name, steps, loop=False, cid=None):
     覆盖已有组合时原组合保持不变 —— 传了个空壳不该把人家排好的那支抹掉。
     """
     combos = get_combos()
-    name = str(name or "").strip()[:40] or "弱网组合"
+    name = limit_item_name(name, "弱网组合")
     combo = find_combo(cid) if cid else None
     bad = []
     steps = norm_combo_steps(steps, bad)
@@ -1299,6 +1421,9 @@ def share_steps(combo):
             prof = scene_profile(key)
         except Exception:
             prof = None
+        # 这是「段里引用的场景显示名」，不是用户给组合起的名字：内置预设
+        # 最长 14 字（弱 Wi-Fi（隔墙/远端）），不能按 NAME_MAX 截，否则共享
+        # 到对端按名字反查自定义场景时会对不上。只防脏数据撑爆协议包。
         item["scene"] = str((prof or {}).get("name") or key)[:40]
         if key.startswith(USER_PRESET_KEY_PREFIX):
             item["profile"] = dict(prof) if prof else None
@@ -1307,7 +1432,11 @@ def share_steps(combo):
 
 
 def _share_clean(name, fallback=""):
-    """共享过来的名字：压空白 + 限长（与本地自定义场景同一上限）"""
+    """共享段里的场景标签：压空白 + 协议限长（40）。
+
+    注意不是「组合取名」——内置预设显示名最长 14 字，这里必须留够；
+    用户给场景/组合起的名字一律走 limit_item_name（NAME_MAX）。
+    """
     s = " ".join(str(name or "").split())[:40]
     return s or fallback
 
@@ -3110,7 +3239,7 @@ def receive_share(payload, only_inbox=False):
     for it in items[:20]:
         if not isinstance(it, dict):
             continue
-        name = clean_name(it.get("name"), "")
+        name = limit_item_name(it.get("name"))
         if not name:
             continue
         prof = _norm_user_profile(name, it.get("profile") or {})
@@ -3132,7 +3261,7 @@ def receive_share(payload, only_inbox=False):
     for c in combos[:20]:
         if not isinstance(c, dict):
             continue
-        name = _share_clean(c.get("name"))
+        name = limit_item_name(c.get("name"))
         if not name:
             continue
         raw_steps = c.get("steps") if isinstance(c.get("steps"), list) else []
@@ -3198,7 +3327,7 @@ def resolve_inbox(iid, action, new_name=None):
             return {"ok": False, "error": "这个组合里没有任何一段在本机可用"}
         loop = bool(raw.get("loop"))
         if action == "rename":
-            nm = _share_clean(new_name) or _share_clean(
+            nm = limit_item_name(new_name) or limit_item_name(
                 "%s（来自 %s）" % (name, item["from"]), "收到的组合")
             combo, _all = upsert_combo(nm, steps, loop)   # 另存 = 新开一条，不动本地那条
             if combo is None:
@@ -3217,9 +3346,9 @@ def resolve_inbox(iid, action, new_name=None):
             log_event("share", "组合「%s」丢掉 %s" % (combo["name"], "、".join(dropped)))
         return {"ok": True, "action": "overwrite", "name": combo["name"], "kind": kind}
     if action == "rename":
-        nm = clean_name(new_name, "")
+        nm = limit_item_name(new_name)
         if not nm:
-            nm = clean_name("%s（来自 %s）" % (name, item["from"]), "")
+            nm = limit_item_name("%s（来自 %s）" % (name, item["from"]), "自定义")
         it, _all = upsert_user_preset(nm, item["profile"])
         log_event("share", "已把 %s 推送的环境另存为「%s」" % (item["from"], it["name"]))
         return {"ok": True, "action": "rename", "name": it["name"]}

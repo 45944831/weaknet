@@ -25,14 +25,16 @@ import android.widget.Toast;
 
 
 /**
- * 悬浮二级界面（设置）——**只管限速飘窗一件事**。
+ * 悬浮二级界面（设置）——限速飘窗开关 + 关于/版本更新提示。
  *
  * 限速总开关、测试场景、自定义场景、环境共享、事件日志全部在主界面上
  * （见 {@link MainActivity} 与 {@link MainPanels}）：它们都是高频操作，
- * 再套一层浮层纯属多余。这里只留下低频、且必须有个「去授权」入口的飘窗设置。
+ * 再套一层浮层纯属多余。这里只留下低频、且必须有个「去授权」入口的飘窗设置，
+ * 以及一行只读的版本号（显示启动那次检查的结果，点它跳 GitHub 下载页）。
  *
+ * 这里不发起任何网络请求：版本检查只在 App 启动时做一次（见 {@link UpdateCheck}）。
  * 关闭后设置依然生效；弹窗打开期间主界面的 3 秒状态循环会调用 {@link #sync()}
- * 同步按钮文字，避免「外面状态变了、弹窗里还显示旧值」。
+ * 同步按钮文字与版本结果，避免「外面状态变了、弹窗里还显示旧值」。
  */
 public class SettingsSheet {
     private final MainActivity a;
@@ -42,6 +44,9 @@ public class SettingsSheet {
     private Button btnFloat;
     private Button btnPerm;
     private TextView tvPerm;
+
+    // 关于 / 版本更新：只渲染「启动那一次检查」的结果，这里绝不发起网络请求
+    private TextView tvVer;
 
     SettingsSheet(MainActivity a) {
         this.a = a;
@@ -53,6 +58,7 @@ public class SettingsSheet {
         if (a == null || a.isFinishing()) return;
         if (dlg == null) build();
         sync();
+        // 不在这里联网：MainActivity 启动时已查过一次，sync() 会渲染那份结果。
         if (dlg != null) {
             dlg.setOnDismissListener(new DialogInterface.OnDismissListener() {
                 public void onDismiss(DialogInterface d) {
@@ -89,6 +95,7 @@ public class SettingsSheet {
         tvPerm.setText(granted ? "悬浮窗权限：已授予" : "悬浮窗权限：未授予（飘窗显示不出来）");
         tvPerm.setTextColor(granted ? 0xFF2E7D32 : 0xFFD93025);
         btnPerm.setVisibility(granted ? View.GONE : View.VISIBLE);
+        renderUpdate();
     }
 
     // ---------------------------------------------------------------- 布局
@@ -169,6 +176,25 @@ public class SettingsSheet {
         card.addView(hint("限速总开关、接管范围、测试场景、自定义场景、环境共享与事件日志"
                 + "都在主界面上，直接滚下去就能改。"));
 
+        // ---- 关于 / 版本更新 ----
+        // 有新版本时整行变红加粗并写出新版本号；点一下用浏览器打开该版本发布页。
+        card.addView(divider(dp(6)));
+        card.addView(label("关于 · 版本更新"));
+
+        tvVer = new TextView(a);
+        tvVer.setTextSize(13);
+        tvVer.setPadding(dp(12), dp(10), dp(12), dp(10));
+        tvVer.setOnClickListener(new View.OnClickListener() {
+            public void onClick(View v) {
+                // 只负责跳转，不重新联网检查（检查失败时也照样给发布页）
+                UpdateCheck.State s = UpdateCheck.cached();
+                openPage(s != null && s.ok && s.hasNew ? s.page : UpdateCheck.PAGE_LATEST);
+            }
+        });
+        card.addView(tvVer, full(0, 0, 0, 4));
+        card.addView(hint("每次启动检查一次新版本，运行中不再联网复查。"
+                + "发现新版本后点版本号即可打开下载页；检查结果不上传任何数据。"));
+
         int m = dp(12);
         FrameLayout.LayoutParams fl = new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
@@ -206,6 +232,48 @@ public class SettingsSheet {
             w.setLayout(WindowManager.LayoutParams.MATCH_PARENT, Math.min(h, maxH));
         } catch (Exception e) {
             // 测量失败就保持系统默认，不影响功能
+        }
+    }
+
+    // ---------------------------------------------------------------- 版本更新
+
+    /**
+     * 只渲染缓存，不联网。主界面 3 秒状态循环会走 sync() → 这里，
+     * 所以启动时那次检查若晚于用户打开设置才返回，最多 3 秒也会自动补上。
+     */
+    private void renderUpdate() {
+        if (tvVer == null) return;
+        String head = "v" + UpdateCheck.currentVersion(a);
+        UpdateCheck.State s = UpdateCheck.cached();
+        if (s != null && s.ok && s.hasNew) {
+            setVerStyle(head + "  ·  发现新版本 " + s.latest + "（点击下载）", true);
+        } else if (s != null && s.ok) {
+            setVerStyle(head + "  ·  已是最新版（点击查看发布页）", false);
+        } else if (UpdateCheck.isChecking()) {
+            setVerStyle(head + "  ·  正在检查更新…", false);
+        } else {
+            setVerStyle(head + "  ·  检查更新失败（下次启动重试）", false);
+        }
+    }
+
+    private void setVerStyle(String text, boolean red) {
+        boolean changed = !text.equals(tvVer.getText().toString());
+        tvVer.setText(text);
+        tvVer.setTextColor(red ? 0xFFD93025 : 0xFF5A6472);
+        tvVer.setTypeface(null, red ? Typeface.BOLD : Typeface.NORMAL);
+        tvVer.setBackground(box(red ? 0xFFFDECEC : 0xFFF1F4FA,
+                red ? 0xFFF3C3C0 : 0xFFD7DEEA, 8));
+        if (changed && isShowing()) resize();    // 文案变长可能撑高卡片
+    }
+
+    /** 用浏览器打开 GitHub 发布页（含附件下载）；打不开就把链接完整提示出来。 */
+    private void openPage(String url) {
+        try {
+            Intent i = new Intent(Intent.ACTION_VIEW, Uri.parse(url));
+            i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            a.startActivity(i);
+        } catch (Exception e) {
+            Toast.makeText(a, "打不开浏览器，请手动访问：\n" + url, Toast.LENGTH_LONG).show();
         }
     }
 

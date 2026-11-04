@@ -627,7 +627,11 @@ public class ShareNet {
         dropped.put("第" + idx + "段（" + why + "）");
     }
 
-    /** 别人给的名字：压空白 + 限长（与本地限制一致） */
+    /**
+     * 共享段里的场景标签：压空白 + 协议限长（40），不是用户给组合起的名字。
+     * 内置预设显示名最长 14 字，组合里引用的自定义场景名最长 NAME_MAX 字，
+     * 两者都要留够，跨端按名字反查才对得上。组合 / 场景的取名一律走 NameLimit。
+     */
     private static String cleanScene(String s) {
         String t = s == null ? "" : s.trim().replaceAll("\\s+", " ");
         return t.length() > 40 ? t.substring(0, 40) : t;
@@ -671,7 +675,7 @@ public class ShareNet {
                 for (int i = 0; i < items.length() && i < 20; i++) {
                     JSONObject it = items.optJSONObject(i);
                     if (it == null) continue;
-                    String name = cleanName(it.optString("name", ""), "");
+                    String name = NameLimit.clean(it.optString("name", ""), "");
                     if (name.length() == 0) continue;
                     JSONObject prof = it.optJSONObject("profile");
                     if (prof == null) prof = new JSONObject();
@@ -710,7 +714,7 @@ public class ShareNet {
                 for (int i = 0; i < combos.length() && i < 20; i++) {
                     JSONObject c = combos.optJSONObject(i);
                     if (c == null) continue;
-                    String name = cleanScene(c.optString("name", ""));
+                    String name = NameLimit.clean(c.optString("name", ""), "");
                     if (name.length() == 0) continue;
                     JSONObject keep = new JSONObject();
                     keep.put("loop", c.optBoolean("loop", false));
@@ -877,8 +881,10 @@ public class ShareNet {
                 boolean loop = item.combo.optBoolean("loop", false);
                 MyCombos.Item saved;
                 if ("rename".equals(action)) {
-                    String nm = cleanScene(newName);
-                    if (nm.length() == 0) nm = cleanScene(item.name + "（来自 " + item.from + "）");
+                    String nm = NameLimit.clean(newName, "");
+                    if (nm.length() == 0) {
+                        nm = NameLimit.clean(item.name + "（来自 " + item.from + "）", "收到的组合");
+                    }
                     if (nm.length() == 0) nm = "收到的组合";
                     saved = MyCombos.save(null, nm, loop, steps);
                     if (saved == null) {
@@ -907,8 +913,10 @@ public class ShareNet {
                 return res;
             }
             if ("rename".equals(action)) {
-                String nm = cleanName(newName, "");
-                if (nm.length() == 0) nm = cleanName(item.name + "（来自 " + item.from + "）", "自定义");
+                String nm = NameLimit.clean(newName, "");
+                if (nm.length() == 0) {
+                    nm = NameLimit.clean(item.name + "（来自 " + item.from + "）", "自定义");
+                }
                 MyPresets.Item it = MyPresets.save(null, nm, item.profile);
                 WeakNet.I.log("share", "已把 " + item.from + " 推送的环境另存为「" + it.name + "」");
                 res.put("ok", true);
@@ -1286,6 +1294,7 @@ public class ShareNet {
 
     // ---------------------------------------------------------------- 工具
 
+    /** 设备昵称 / 推送方名字：24 字。场景与组合的取名不走这里，走 NameLimit。 */
     private static String cleanName(String s, String def) {
         if (s == null) return def;
         String t = s.replace("\r", " ").replace("\n", " ").replace("\t", " ").trim();

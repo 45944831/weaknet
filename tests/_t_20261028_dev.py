@@ -448,6 +448,15 @@ def part_share_p0():
     subprocess.run([ADB, "forward", "tcp:18890", "tcp:8900"], env=env,
                    capture_output=True, timeout=60)
 
+    # 手机侧共享从协议 v2 起必须带 PIN，不带一律 403：
+    # 以前这里只传 "ip:port"，PIN 开着的新包全被拒，看着像「中文名推不过去」。
+    # 直接从手机控制接口取当前 PIN，脚本就能独立跑。
+    try:
+        pin = str(api("/api/share/pin").get("pin") or "")
+    except Exception:
+        pin = ""
+    peer = {"ip": "127.0.0.1", "share": 18890, "name": "PEYM00", "pin": pin}
+
     # 清掉 PC 侧同名测试环境
     ups = wapi("/api/upresets")
     ups = ups if isinstance(ups, list) else ups.get("items", [])
@@ -458,7 +467,7 @@ def part_share_p0():
     # 对照组：ASCII 名
     r_ascii = wapi("/api/upreset", {"name": "P0probe_ascii",
                                     "profile": {"down_kbps": 888, "up_kbps": 111}})
-    res_ascii = wapi("/api/push", {"peer": "127.0.0.1:18890",
+    res_ascii = wapi("/api/push", {"peer": peer,
                                    "ids": [r_ascii.get("id")], "combo_ids": []})
     D.rec("D-50 对照组：ASCII 名环境推送成功", res_ascii.get("ok") is True,
           json.dumps(res_ascii, ensure_ascii=False)[:140])
@@ -467,7 +476,7 @@ def part_share_p0():
     r_cn = wapi("/api/upreset", {"name": "P0探针中文环境",
                                  "profile": {"down_kbps": 999, "up_kbps": 222}})
     t0 = time.time()
-    res_cn = wapi("/api/push", {"peer": "127.0.0.1:18890",
+    res_cn = wapi("/api/push", {"peer": peer,
                                 "ids": [r_cn.get("id")], "combo_ids": []})
     el = time.time() - t0
     D.rec("D-51 【P0】中文名环境推送应成功", res_cn.get("ok") is True,

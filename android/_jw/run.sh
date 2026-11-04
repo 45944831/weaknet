@@ -66,7 +66,8 @@ javac -encoding UTF-8 -nowarn \
       src/com/weaknet/app/ComboStep.java \
       src/com/weaknet/app/Profile.java \
       src/com/weaknet/app/SpecGen.java \
-      src/com/weaknet/app/ComboPlan.java
+      src/com/weaknet/app/ComboPlan.java \
+      src/com/weaknet/app/TabSync.java
 
 javac -encoding UTF-8 -nowarn \
       -cp "$AJAR$CPSEP$OUTW" \
@@ -76,7 +77,7 @@ javac -encoding UTF-8 -nowarn \
       _jw/com/weaknet/app/_*Test.java
 
 FAIL=0
-for T in _PortIdxTest _FlowMatchTest _ScopeTest _BucketConcTest _PresetNotesTest _ParamNotesTest _NoteWrapTest _ComboNewAgainTest _PauseResumeTest _DelayLineTest; do
+for T in _PortIdxTest _FlowMatchTest _ScopeTest _BucketConcTest _PresetNotesTest _ParamNotesTest _NoteWrapTest _ComboNewAgainTest _PauseResumeTest _DelayLineTest _NameLimitTest _ComboCardTest _TabSyncTest; do
   echo ""
   echo "== $T =="
   if java -cp "$OUT$CPSEP$AJAR" "com.weaknet.app.$T"; then

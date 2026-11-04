@@ -1,8 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     package="com.weaknet.app"
-    android:versionCode="124"
-    android:versionName="1.1.14">
+    android:versionCode="125"
+    android:versionName="1.1.15">
 
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
@@ -19,6 +19,13 @@
         <intent>
             <action android:name="android.intent.action.MAIN" />
             <category android:name="android.intent.category.LAUNCHER" />
+        </intent>
+        <!-- Android 11+ 包可见性：设置界面点版本号要用 ACTION_VIEW 打开 GitHub 下载页，
+             不声明 VIEW/https 时部分 ROM 上 resolveActivity 会拿不到浏览器。 -->
+        <intent>
+            <action android:name="android.intent.action.VIEW" />
+            <category android:name="android.intent.category.BROWSABLE" />
+            <data android:scheme="https" />
         </intent>
     </queries>
 

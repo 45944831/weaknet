@@ -33,6 +33,17 @@ public class ComboPlan {
         return stepMs(s) > 0;
     }
 
+    /** 组合列表卡片副标题：「3 段 · 约 2 分 30 秒 · 循环」（纯文本，不掺 emoji） */
+    public static String brief(int steps, long totalMs, boolean loop) {
+        long sec = Math.max(0L, totalMs) / 1000L;
+        long mi = sec / 60;
+        long se = sec % 60;
+        String dur = mi > 0 ? (se > 0 ? mi + " 分 " + se + " 秒" : mi + " 分")
+                            : se + " 秒";
+        String s = steps + " 段 · " + dur;
+        return loop ? s + " · 循环" : s;
+    }
+
     /** 界面上这段时长怎么写：「2 分 30 秒」 */
     public static String stepText(ComboStep s) {
         if (s == null) return "0 秒";

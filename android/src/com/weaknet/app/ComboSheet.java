@@ -3,6 +3,7 @@ package com.weaknet.app;
 import android.app.AlertDialog;
 import android.app.Dialog;
 import android.content.DialogInterface;
+import android.graphics.Color;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
 import android.text.InputType;
@@ -27,10 +28,14 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * 主界面的「🔀 我的弱网组合」卡片：新建 / 编辑 / 删除 / 选中后按序列播放。
+ * 主界面的「我的弱网组合」卡片：新建 / 编辑 / 删除 / 选中后按序列播放。
  *
  * 悬浮窗面板（{@link FloatScenePanel}）只负责「切换」，组合本身得有个能创建的地方，
  * 否则手机上永远列不出任何组合 —— 这个卡片就是那个入口。
+ *
+ * 列表排版与「自定义场景」共用一套：3 列等宽小方块（{@link #COLS}），
+ * 选中整块染主色 + 白字，段数/时长这类副信息挪到选中后的摘要行 ——
+ * 早先的整宽 Button 会把名字居中、左边空一大片，和场景那排小方块明显不是一路。
  *
  * 生效规矩与场景按钮完全一致（见 {@link WeakNet#selectCombo}）：
  *  - 弱网已在测试中：点一下立即从第一段开始播，到点自动切下一段
@@ -39,9 +44,13 @@ import java.util.Map;
 public class ComboSheet {
     private final MainActivity a;
 
+    /** 与「自定义场景」完全一致：一行 3 个、等宽、末尾一行自然撑满 */
+    private static final int COLS = 3;
+
     private LinearLayout grid;
     private LinearLayout tailRow;
-    private final Map<String, Button> btns = new LinkedHashMap<String, Button>();
+    private TextView selInfo;                 // 选中组合的「N 段 · 时长 · 循环」摘要
+    private final Map<String, Button> chips = new LinkedHashMap<String, Button>();
     private String sig = null;                // 列表签名：没变就不重画按钮
     private ComboNotesSheet notes;            // 「！」打开的组合说明二级界面
 
@@ -87,6 +96,7 @@ public class ComboSheet {
         bNew.setTextColor(0xFF1F8A70);
         bNew.setBackground(box(0xFFEAF7F3, 0xFFBFE9DA, 8));
         bNew.setPadding(dp(10), dp(4), dp(10), dp(4));
+        // 紧凑小按钮，和「➕ 新建场景」一样贴着左边，不再拉一条整宽横条
         bNew.setContentDescription("新建弱网组合");
         bNew.setOnClickListener(new View.OnClickListener() {
             public void onClick(View v) {
@@ -94,11 +104,16 @@ public class ComboSheet {
             }
         });
         head.addView(bNew);
-        page.addView(head, full(0, 2, 0, 2));
+        page.addView(head, full(0, 0, 0, 2));
 
         grid = new LinearLayout(a);
         grid.setOrientation(LinearLayout.VERTICAL);
-        page.addView(grid, full(0, 4, 0, 4));
+        page.addView(grid, full(0, 4, 0, 0));
+
+        // 摘要行：组合的段数/时长塞不进小方块，选中后在列表下方补一行说明
+        selInfo = hint("");
+        selInfo.setVisibility(View.GONE);
+        page.addView(selInfo, full(0, 6, 0, 0));
 
         // 编辑 + 删除：选中了某支组合才出现（与自定义卡片一个路子）
         tailRow = new LinearLayout(a);
@@ -164,62 +179,99 @@ public class ComboSheet {
         } catch (Exception e) {
             items = new ArrayList<MyCombos.Item>();
         }
+        // 段数 / 循环 / 总时长也进签名：编辑完回到列表，摘要行要立刻跟着变
         StringBuilder sb = new StringBuilder();
-        for (MyCombos.Item c : items) sb.append(c.id).append(",").append(c.name).append(";");
+        for (MyCombos.Item c : items) {
+            sb.append(c.id).append(',').append(c.name).append(',')
+              .append(c.steps.size()).append(',').append(c.loop).append(',')
+              .append(totalMs(c)).append(';');
+        }
         String now = sb.toString();
         if (force || !now.equals(sig)) {
             sig = now;
-            for (Button b : btns.values()) grid.removeView(b);
-            btns.clear();
-            for (final MyCombos.Item c : items) {
-                Button b = new Button(a);
-                b.setAllCaps(false);
-                b.setTextSize(13);
-                b.setText("🔀 " + c.name);
-                b.setTextColor(0xFF2F3F52);
-                b.setBackground(box(0xFFFFFFFF, 0xFFD7DEEA, 8));
-                b.setPadding(dp(12), dp(9), dp(12), dp(9));
-                b.setContentDescription("组合 " + c.name);
-                b.setOnClickListener(new View.OnClickListener() {
-                    public void onClick(View v) {
-                        MyCombos.Item cur = MyCombos.find(c.id);
-                        if (cur == null) {
-                            Toast.makeText(a, "这条组合已不存在", Toast.LENGTH_SHORT).show();
-                            refresh(true);
-                            return;
-                        }
-                        pick(cur);
-                    }
-                });
-                // 长按 = 打开查看/编辑（里面有删除按钮）；单击留给「选中/播放」
-                b.setOnLongClickListener(new View.OnLongClickListener() {
-                    public boolean onLongClick(View v) {
-                        openEditor(c.id);
-                        return true;
-                    }
-                });
-                grid.addView(b, full(0, 4, 0, 0));
-                btns.put(MyCombos.KEY_PREFIX + c.id, b);
-            }
+            grid.removeAllViews();
+            chips.clear();
             if (items.isEmpty()) {
-                TextView empty = new TextView(a);
-                empty.setText("还没有组合，点右上「＋ 新建」排一支");
-                empty.setTextSize(12);
-                empty.setTextColor(0xFF8A94A6);
-                empty.setPadding(dp(2), dp(4), dp(2), dp(2));
-                grid.addView(empty);
+                grid.addView(hint("还没有组合，点上面「＋ 新建组合」排一支"));
+            } else {
+                LinearLayout row = null;
+                for (int i = 0; i < items.size(); i++) {
+                    if (i % COLS == 0) {
+                        row = new LinearLayout(a);
+                        row.setOrientation(LinearLayout.HORIZONTAL);
+                        grid.addView(row, new LinearLayout.LayoutParams(
+                                ViewGroup.LayoutParams.MATCH_PARENT,
+                                ViewGroup.LayoutParams.WRAP_CONTENT));
+                    }
+                    final MyCombos.Item c = items.get(i);
+                    Button b = new Button(a);
+                    b.setAllCaps(false);
+                    b.setTextSize(12);
+                    b.setSingleLine(true);
+                    b.setEllipsize(TextUtils.TruncateAt.END);
+                    b.setText(c.name);
+                    b.setTextColor(0xFF2F3F52);
+                    b.setBackground(box(0xFFF1F4FA, 0xFFD7DEEA, 8));
+                    b.setPadding(dp(6), dp(8), dp(6), dp(8));
+                    // 等宽小方块：与「自定义场景」同一套网格，最后一行几个就撑几个
+                    LinearLayout.LayoutParams bp = new LinearLayout.LayoutParams(
+                            0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
+                    bp.setMargins(0, dp(3), dp(6), dp(3));
+                    b.setLayoutParams(bp);
+                    b.setContentDescription("组合 " + c.name);
+                    b.setOnClickListener(new View.OnClickListener() {
+                        public void onClick(View v) {
+                            MyCombos.Item cur = MyCombos.find(c.id);
+                            if (cur == null) {
+                                Toast.makeText(a, "这条组合已不存在", Toast.LENGTH_SHORT).show();
+                                refresh(true);
+                                return;
+                            }
+                            pick(cur);
+                        }
+                    });
+                    // 长按 = 打开查看/编辑（里面有删除按钮）；单击留给「选中/播放」
+                    b.setOnLongClickListener(new View.OnLongClickListener() {
+                        public boolean onLongClick(View v) {
+                            openEditor(c.id);
+                            return true;
+                        }
+                    });
+                    row.addView(b);
+                    chips.put(MyCombos.KEY_PREFIX + c.id, b);
+                }
             }
         }
-        // 高亮 + 编辑/删除行
+        // 高亮：与「自定义场景」完全一致——选中整块染主色、白字
         String key = WeakNet.I.presetKey;
         boolean mine = key != null && key.startsWith(MyCombos.KEY_PREFIX);
-        for (Map.Entry<String, Button> e : btns.entrySet()) {
+        for (Map.Entry<String, Button> e : chips.entrySet()) {
             boolean on = e.getKey().equals(key);
-            e.getValue().setBackground(box(on ? 0xFF1F8A70 : 0xFFFFFFFF,
+            e.getValue().setBackground(box(on ? 0xFF1F8A70 : 0xFFF1F4FA,
                     on ? 0xFF1F8A70 : 0xFFD7DEEA, 8));
-            e.getValue().setTextColor(on ? 0xFFFFFFFF : 0xFF2F3F52);
+            e.getValue().setTextColor(on ? Color.WHITE : 0xFF2F3F52);
+        }
+        // 摘要行：段数 / 时长 / 循环塞不进小方块，选中哪支就在下面补一行
+        if (selInfo != null) {
+            MyCombos.Item sel = mine
+                    ? MyCombos.find(key.substring(MyCombos.KEY_PREFIX.length())) : null;
+            if (sel == null) {
+                selInfo.setVisibility(View.GONE);
+            } else {
+                selInfo.setText("已选「" + sel.name + "」 "
+                        + ComboPlan.brief(sel.steps.size(), totalMs(sel), sel.loop));
+                selInfo.setVisibility(View.VISIBLE);
+            }
         }
         if (tailRow != null) tailRow.setVisibility(mine ? View.VISIBLE : View.GONE);
+    }
+
+    /** 一支组合所有段加起来跑多久（毫秒），副标题和列表签名共用 */
+    private static long totalMs(MyCombos.Item c) {
+        long t = 0;
+        if (c == null || c.steps == null) return 0;
+        for (MyCombos.Step s : c.steps) t += ComboPlan.stepMs(s);
+        return t;
     }
 
     private void pick(MyCombos.Item c) {
@@ -416,10 +468,10 @@ public class ComboSheet {
         card.addView(thead, full(0, 0, 0, 8));
 
         edName = new EditText(a);
-        edName.setHint("组合名称");
-        edName.setSingleLine(true);
+        edName.setHint("组合名称（最多 " + NameLimit.MAX + " 字）");
         edName.setTextSize(14);
-        edName.setText(cur == null ? "" : cur.name);
+        edName.setText(cur == null ? "" : NameLimit.clean(cur.name, ""));
+        NameLimit.apply(edName);
         card.addView(edName, full(0, 0, 0, 8));
 
         cbLoop = new CheckBox(a);
@@ -784,7 +836,8 @@ public class ComboSheet {
     }
 
     private void doSave() {
-        String name = edName.getText() == null ? "" : edName.getText().toString().trim();
+        String name = NameLimit.clean(
+                edName.getText() == null ? "" : edName.getText().toString(), "");
         if (name.length() == 0) {
             Toast.makeText(a, "请先给这个组合起个名字。", Toast.LENGTH_SHORT).show();
             return;

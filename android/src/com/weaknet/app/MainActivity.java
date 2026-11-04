@@ -195,6 +195,16 @@ public class MainActivity extends Activity {
         // 启动时不自动接管：接管与限速是一体的，只能由用户点总开关触发。
         // 早期版本会在这里 requestVpn(false) 自动接管，结果是刚打开 App 就已经把
         // 流量拽进通道（状态栏挂着 VPN 图标，却什么都没限），与「手动启动才生效」相悖。
+        // 真机测试用：adb shell am start ... --es update_api <url> 可临时替换检查接口；
+        // 正式使用时这个 extra 不存在，始终访问 GitHub 官方 API。
+        String apiOverride = getIntent() == null ? null : getIntent().getStringExtra("update_api");
+        if (apiOverride != null) UpdateCheck.setApiOverride(apiOverride);
+
+        // 本次启动唯一的一次版本检查：设置界面只读结果，运行中不再联网复查。
+        // 后台线程 + 失败静默，不阻塞启动、不弹错；结果晚到时由设置界面的
+        // sync()（主界面 3 秒状态循环）自动补渲染，无需额外回调。
+        UpdateCheck.check(this, null);
+
         startStatusLoop();
     }
 

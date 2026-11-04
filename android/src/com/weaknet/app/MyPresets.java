@@ -38,11 +38,15 @@ public class MyPresets {
         if (raw == null || raw.length() == 0) return out;
         try {
             JSONArray a = new JSONArray(raw);
+            List<String> seen = new ArrayList<String>();
             for (int i = 0; i < a.length(); i++) {
                 JSONObject o = a.optJSONObject(i);
                 if (o == null) continue;
-                String name = o.optString("name", "").trim();
+                String name = NameLimit.clean(o.optString("name", ""), "");
                 if (name.length() == 0) continue;
+                // 老存档的超长名字截短后可能撞名，沿用保存时的序号规则
+                name = NameLimit.unique(seen, name);
+                seen.add(name);
                 Item it = new Item();
                 it.id = o.optString("id", "");
                 if (it.id.length() == 0) it.id = newId();
@@ -84,9 +88,7 @@ public class MyPresets {
      */
     public static Item save(String id, String name, JSONObject prof) {
         List<Item> items = load();
-        String nm = name == null ? "" : name.trim();
-        if (nm.length() == 0) nm = "自定义";
-        if (nm.length() > 40) nm = nm.substring(0, 40);
+        String nm = NameLimit.clean(name, "自定义");
 
         Item target = null;
         if (id != null && id.length() > 0) {
@@ -147,27 +149,11 @@ public class MyPresets {
     }
 
     private static String uniqueName(List<Item> items, Item self, String name) {
-        for (int i = 0; i < items.size(); i++) {
-            Item it = items.get(i);
-            if (it == self) continue;
-            if (it.name.equals(name)) {
-                for (int n = 2; n < 100; n++) {
-                    String cand = name + " (" + n + ")";
-                    if (!taken(items, self, cand)) return cand;
-                }
-                return name + " " + System.currentTimeMillis();
-            }
+        List<String> others = new ArrayList<String>();
+        for (Item it : items) {
+            if (it != self) others.add(it.name);
         }
-        return name;
-    }
-
-    private static boolean taken(List<Item> items, Item self, String name) {
-        for (int i = 0; i < items.size(); i++) {
-            Item it = items.get(i);
-            if (it == self) continue;
-            if (it.name.equals(name)) return true;
-        }
-        return false;
+        return NameLimit.unique(others, name);
     }
 
     private static void store(List<Item> items) {

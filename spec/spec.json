@@ -1,5 +1,6 @@
 {
   "version": 1,
+  "name_max": 10,
   "presets": [
     {
       "key": "direct",
@@ -424,13 +425,144 @@
         "name": "加载渐变",
         "desc": "从慢到快再到慢，模拟带宽被逐步放开。",
         "effect": "测大文件 / 长列表的渐进加载表现：首屏慢、之后提速、快结束时又慢下来。适合验证进度条与分片下载逻辑。",
-        "steps": "极慢（100kbps）20 秒 → 4G 弱网 20 秒 → 5G 良好 20 秒 → 极慢（100kbps）20 秒"
+        "steps": "网络拥塞 20 秒 → 4G 弱网 20 秒 → 5G 良好 20 秒 → 网络拥塞 20 秒"
       }
     ],
     "tips": [
       "组合播到一半可以随时切走或暂停：切换后原组合停在原地，不会偷偷继续改参数。",
       "每一段都是完整的一支场景，段与段之间参数是整套替换的 —— 不会把上一段的丢包率带进下一段。",
       "循环组合会一直播下去，测完记得切走或暂停，别忘了它在后台改着参数。"
+    ]
+  },
+  "defaults": {
+    "seed": "v1",
+    "scenes": [
+      {
+        "name": "地铁刷视频卡顿",
+        "desc": "常用：站台有信号、隧道里带宽塌陷且偶发断流，复现短视频首帧慢与播放中缓冲。",
+        "params": {
+          "latency_down_ms": 220,
+          "latency_up_ms": 180,
+          "jitter_ms": 90,
+          "down_kbps": 600,
+          "up_kbps": 300,
+          "loss_pct": 6,
+          "disconnect_pct": 2,
+          "stall_ms": 1500
+        }
+      },
+      {
+        "name": "秒杀抢购拥塞",
+        "desc": "常用：整点高峰排队，请求变慢且一部分直接超时，验证失败提示、重试与降级。",
+        "params": {
+          "latency_down_ms": 400,
+          "latency_up_ms": 300,
+          "jitter_ms": 150,
+          "down_kbps": 1024,
+          "up_kbps": 512,
+          "loss_pct": 8,
+          "timeout_pct": 15,
+          "stall_ms": 1800
+        }
+      },
+      {
+        "name": "视频通话卡顿",
+        "desc": "常用：实时音视频对延迟和丢包最敏感，中等带宽但抖动大，复现声音断续与画面糊。",
+        "params": {
+          "latency_down_ms": 150,
+          "latency_up_ms": 150,
+          "jitter_ms": 80,
+          "down_kbps": 800,
+          "up_kbps": 500,
+          "loss_pct": 10,
+          "stall_ms": 900
+        }
+      },
+      {
+        "name": "超低速 100K",
+        "desc": "极限：带宽压到 100kbps，所有资源都要等，测首屏超时、骨架屏与分片加载。",
+        "params": {
+          "latency_down_ms": 700,
+          "latency_up_ms": 600,
+          "jitter_ms": 200,
+          "down_kbps": 100,
+          "up_kbps": 50,
+          "loss_pct": 5,
+          "stall_ms": 3000
+        }
+      },
+      {
+        "name": "极限丢包闪断",
+        "desc": "极限：一半的包丢掉、每 6 秒断网 4 秒，逼出重连、幂等与断点续传问题。",
+        "params": {
+          "latency_down_ms": 250,
+          "latency_up_ms": 250,
+          "jitter_ms": 200,
+          "down_kbps": 2000,
+          "up_kbps": 1000,
+          "loss_pct": 50,
+          "disconnect_pct": 20,
+          "flap_sec": 6,
+          "flap_blackout_sec": 4,
+          "stall_ms": 2000
+        }
+      }
+    ],
+    "combos": [
+      {
+        "name": "通勤路上",
+        "desc": "常用：进站 5G → 隧道 4G 弱网 → 短暂无网 → 出站恢复。",
+        "loop": false,
+        "steps": [
+          {"key": "5g", "minutes": 0, "seconds": 30},
+          {"key": "4g_weak", "minutes": 1, "seconds": 0},
+          {"key": "airplane", "minutes": 0, "seconds": 30},
+          {"key": "5g", "minutes": 0, "seconds": 30}
+        ]
+      },
+      {
+        "name": "抢购秒杀",
+        "desc": "常用：开抢前流畅 → 高峰拥塞 → 请求挂住 → 快速重试。",
+        "loop": false,
+        "steps": [
+          {"key": "5g", "minutes": 0, "seconds": 20},
+          {"key": "wifi_weak", "minutes": 1, "seconds": 0},
+          {"key": "blackhole", "minutes": 0, "seconds": 15},
+          {"key": "wifi_weak", "minutes": 1, "seconds": 0}
+        ]
+      },
+      {
+        "name": "网络抖动",
+        "desc": "常用：信号时好时坏，循环切换，测长连接与实时音视频的抗抖动能力。",
+        "loop": true,
+        "steps": [
+          {"key": "5g", "minutes": 0, "seconds": 20},
+          {"key": "5g_weak", "minutes": 0, "seconds": 20},
+          {"key": "5g", "minutes": 0, "seconds": 20},
+          {"key": "5g_weak", "minutes": 0, "seconds": 20}
+        ]
+      },
+      {
+        "name": "定时断网",
+        "desc": "极限：循环断网，模拟基站切换或路由重启，验证心跳、超时与自动重连。",
+        "loop": true,
+        "steps": [
+          {"key": "4g", "minutes": 1, "seconds": 0},
+          {"key": "blackhole", "minutes": 0, "seconds": 20}
+        ]
+      },
+      {
+        "name": "极限生存挑战",
+        "desc": "极限：电梯 → 频繁断连 → 高丢包 → 黑洞 → 恢复，五段连击压测恢复逻辑。",
+        "loop": false,
+        "steps": [
+          {"key": "elevator", "minutes": 0, "seconds": 30},
+          {"key": "flapping", "minutes": 0, "seconds": 30},
+          {"key": "high_loss", "minutes": 0, "seconds": 30},
+          {"key": "blackhole", "minutes": 0, "seconds": 20},
+          {"key": "5g", "minutes": 0, "seconds": 30}
+        ]
+      }
     ]
   },
   "share": {

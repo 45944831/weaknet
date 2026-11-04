@@ -7,5 +7,5 @@
   tests/_t_version.py 断言，不靠人眼核对。
 """
 
-VERSION = "1.1.14"
-BUILD = 124
+VERSION = "1.1.15"
+BUILD = 125

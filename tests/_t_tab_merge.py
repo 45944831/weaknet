@@ -193,7 +193,7 @@ def test_android():
     ck("B8 组合页仍保留说明入口与新建按钮",
        "openNotes()" in combo and "openEditor(null)" in combo, "")
     ck("B9 标签跟随选中项",
-       "syncTabToSelection()" in src and "MyCombos.KEY_PREFIX" in src, "")
+       "syncTabToSelection()" in src and "tabSync.onSelection(" in src, "")
     ck("B10 标签配色有区分",
        "syncTabStyle()" in src and "0xFF7A4FF3" in src, "")
 

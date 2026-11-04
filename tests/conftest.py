@@ -85,6 +85,9 @@ def tmp_store(tmp_path, monkeypatch):
     monkeypatch.setattr(W, "_LOG_SINK", None, raising=False)
     monkeypatch.setattr(W.G, "user_presets", None)
     monkeypatch.setattr(W.G, "combos", None)
+    # 一般用例要的是「空存档」；出厂默认注入只在 test_unit_defaults.py 里
+    # 显式把 _seeded 置 False 后再验，别让 5+5 默认项混进老断言。
+    monkeypatch.setattr(W, "_seeded", True, raising=False)
     W.G.inbox.clear()
     W.G.peers.clear()
     W.ensure_identity()

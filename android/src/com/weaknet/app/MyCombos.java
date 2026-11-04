@@ -72,6 +72,10 @@ public class MyCombos {
 
     public static void bind(Context c) {
         if (c != null) ctx = c.getApplicationContext();
+        // 两个存储类都已绑好 Context 的位置（MainActivity 与 CtrlServer 都是
+        // MyPresets.bind 在前、MyCombos.bind 在后），在这里注入出厂默认最稳：
+        // 服务先起、Activity 后起，哪条路径都不会漏。seed 自带标记，重复调用无副作用。
+        DefaultItems.seed(c);
     }
 
     public static List<Item> load() {
@@ -80,10 +84,11 @@ public class MyCombos {
         if (raw == null || raw.length() == 0) return out;
         try {
             JSONArray a = new JSONArray(raw);
+            List<String> seen = new ArrayList<String>();
             for (int i = 0; i < a.length(); i++) {
                 JSONObject o = a.optJSONObject(i);
                 if (o == null) continue;
-                String name = o.optString("name", "").trim();
+                String name = NameLimit.clean(o.optString("name", ""), "");
                 if (name.length() == 0) continue;
                 Item it = new Item();
                 it.id = o.optString("id", "");
@@ -106,6 +111,9 @@ public class MyCombos {
                 // 老存档/手改文件可能带着嵌套组合或超上限的段，这里统一收敛掉
                 it.steps = ComboPlan.norm(raw2, null);
                 if (it.steps.isEmpty()) continue;      // 全被丢掉的组合没必要显示
+                // 老存档的超长名字截短后可能撞名，沿用保存时的序号规则
+                it.name = NameLimit.unique(seen, name);
+                seen.add(it.name);
                 out.add(it);
             }
         } catch (Exception e) {
@@ -146,9 +154,7 @@ public class MyCombos {
      */
     public static Item save(String id, String name, boolean loop, List<Step> steps) {
         List<Item> items = load();
-        String nm = name == null ? "" : name.trim();
-        if (nm.length() == 0) nm = "弱网组合";
-        if (nm.length() > 40) nm = nm.substring(0, 40);
+        String nm = NameLimit.clean(name, "弱网组合");
 
         List<Step> normed = ComboPlan.norm(steps, null);
         if (normed.isEmpty()) {
@@ -224,25 +230,11 @@ public class MyCombos {
     }
 
     private static String uniqueName(List<Item> items, Item self, String name) {
+        List<String> others = new ArrayList<String>();
         for (Item it : items) {
-            if (it == self) continue;
-            if (it.name.equals(name)) {
-                for (int n = 2; n < 100; n++) {
-                    String cand = name + " (" + n + ")";
-                    if (!taken(items, self, cand)) return cand;
-                }
-                return name + " " + System.currentTimeMillis();
-            }
+            if (it != self) others.add(it.name);
         }
-        return name;
-    }
-
-    private static boolean taken(List<Item> items, Item self, String name) {
-        for (Item it : items) {
-            if (it == self) continue;
-            if (it.name.equals(name)) return true;
-        }
-        return false;
+        return NameLimit.unique(others, name);
     }
 
     private static void store(List<Item> items) {

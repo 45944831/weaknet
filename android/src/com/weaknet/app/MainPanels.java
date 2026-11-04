@@ -7,6 +7,7 @@ import android.graphics.Typeface;
 import android.graphics.drawable.ColorDrawable;
 import android.graphics.drawable.GradientDrawable;
 import android.text.InputType;
+import android.text.TextUtils;
 import android.util.TypedValue;
 import android.view.Gravity;
 import android.view.MotionEvent;
@@ -87,8 +88,21 @@ public class MainPanels {
     private LinearLayout scenePage;
     private LinearLayout comboPage;
     private String curTab = "scene";
-    /** 上一次同步时的选中项：只有它变了才自动翻标签页 */
-    private String lastTabKey = null;
+    /** 标签状态机：「手动点页」与「跟着选中项翻页」的判定收在纯逻辑类里 */
+    private final TabSync tabSync = new TabSync();
+    /**
+     * 选中项一变就即时刷标签：WeakNet.fireUiChange() 会把这个回调 post 到主线程。
+     * 主界面原本只靠 3 秒轮询，从飘窗 / Web 控制台 / 共享面板选了东西之后，
+     * 标签高亮要等下一轮才跟上，看着就像「点了没反应」。
+     */
+    private final Runnable tabWatcher = new Runnable() {
+        public void run() {
+            if (scenePage == null) return;      // build 之前 / close 之后不碰视图
+            syncTabToSelection();               // 翻页 + 染色
+            syncHighlight();                    // 两个列表里的选中高亮
+            if (comboSheet != null) comboSheet.refresh();
+        }
+    };
     private String sceneSig = null;
     private String logSig = "";
 
@@ -100,6 +114,8 @@ public class MainPanels {
 
     /** 构建三张卡片，挂到主界面的滚动容器上 */
     void build(LinearLayout host) {
+        // 先把即时通知挂上：飘窗 / 控制台 / 共享面板改选中项时不用等 3 秒轮询
+        WeakNet.I.addUiWatcher(tabWatcher);
         host.addView(builtinCard(), cardLp());
         // 「我的自定义场景」与「我的弱网组合」合成一张卡片，顶部标签切换
         host.addView(mineComboCard(), cardLp());
@@ -107,8 +123,9 @@ public class MainPanels {
         sync();
     }
 
-    /** 关窗口：共享浮层要在 Activity 销毁前收起 */
+    /** 关窗口：共享浮层要在 Activity 销毁前收起，即时回调也别留着 */
     void close() {
+        WeakNet.I.removeUiWatcher(tabWatcher);
         if (share != null) share.close();
         if (notes != null) notes.close();
         if (param != null) param.close();
@@ -262,12 +279,12 @@ public class MainPanels {
         tabCombo = tabBtn("组合");
         tabScene.setOnClickListener(new View.OnClickListener() {
             public void onClick(View v) {
-                switchTab("scene");
+                onTabClicked("scene");
             }
         });
         tabCombo.setOnClickListener(new View.OnClickListener() {
             public void onClick(View v) {
-                switchTab("combo");
+                onTabClicked("combo");
             }
         });
         LinearLayout.LayoutParams tlp = new LinearLayout.LayoutParams(
@@ -291,8 +308,7 @@ public class MainPanels {
         comboPage.addView(comboSheet.buildContent(), full(0, 0, 0, 0));
 
         // 初始停在当前选中的那一页：选中的正是组合，就别让用户再点一次标签
-        String key = WeakNet.I.presetKey;
-        switchTab(key != null && key.startsWith(MyCombos.KEY_PREFIX) ? "combo" : "scene");
+        switchTab(tabSync.onSelection(WeakNet.I.presetKey));
         return card;
     }
 
@@ -315,6 +331,9 @@ public class MainPanels {
     /** 切换「场景 / 组合」标签页：只换显示，不重建内容 */
     private void switchTab(String key) {
         boolean scene = "scene".equals(key);
+        // curTab 必须先更新：syncTabStyle 读的就是它，放在后面染色会慢一拍，
+        // 出现「组合标签高亮、下面却还是场景列表」这种对不上的状态。
+        curTab = key;
         if (scenePage != null) {
             scenePage.setVisibility(scene ? View.VISIBLE : View.GONE);
         }
@@ -322,7 +341,10 @@ public class MainPanels {
             comboPage.setVisibility(scene ? View.GONE : View.VISIBLE);
         }
         syncTabStyle();
-        curTab = key;
+        // 部分 ROM 上 Button 的按下态动画会盖住刚换的背景，看起来像「慢一拍」；
+        // 直接跳到当前 state，让选中色在手指抬起来那一帧就生效
+        if (tabScene != null) tabScene.jumpDrawablesToCurrentState();
+        if (tabCombo != null) tabCombo.jumpDrawablesToCurrentState();
     }
 
     /** 当前标签的配色：选中方染主色，另一方灰底 */
@@ -347,15 +369,20 @@ public class MainPanels {
      * 标签又拽回来，看着像标签点不动。
      */
     private void syncTabToSelection() {
-        String key = WeakNet.I.presetKey;
-        String k = key == null ? "" : key;
-        if (k.equals(lastTabKey)) return;
-        lastTabKey = k;
-        if (k.startsWith(MyCombos.KEY_PREFIX)) {
-            switchTab("combo");
-        } else if (k.startsWith("u:")) {
-            switchTab("scene");
+        String before = tabSync.tab();
+        String want = tabSync.onSelection(WeakNet.I.presetKey);
+        if (!want.equals(before)) {
+            switchTab(want);
+        } else {
+            // 没翻页也要把配色和 curTab 对齐：Button 按下态、别的路径改过背景，
+            // 到这里一律刷回来，避免标签高亮「慢一拍」
+            syncTabStyle();
         }
+    }
+
+    /** 用户手动点标签：立刻切页，并把当前选中项记为已处理，别让定时轮询翻回去 */
+    private void onTabClicked(String key) {
+        switchTab(tabSync.onClick(key, WeakNet.I.presetKey));
     }
 
     /** 「场景」页的内容：新建按钮 + 场景列表 + 编辑/删除行 + 提示 */
@@ -651,6 +678,8 @@ public class MainPanels {
             b.setAllCaps(false);
             b.setTextSize(12);
             b.setSingleLine(true);
+            // 名字最长 10 字，窄屏上仍可能放不下：统一省略号，别让字被切一半
+            b.setEllipsize(TextUtils.TruncateAt.END);
             b.setText(items.get(i)[1]);
             b.setBackground(box(0xFFF1F4FA, 0xFFD7DEEA, 8));
             b.setTextColor(0xFF2F3F52);
@@ -824,6 +853,8 @@ public class MainPanels {
             String n = (seedName == null || seedName.length() == 0) ? "自定义场景" : seedName;
             curName = n + " 副本";
         }
+        // 内置档位名最长 14 字，「XXX 副本」会超上限；老存档的名字也在这里收一遍
+        curName = NameLimit.clean(curName, "");
 
         ScrollView sv = new ScrollView(a);
         LinearLayout card = new LinearLayout(a);
@@ -866,9 +897,10 @@ public class MainPanels {
         }
 
         edName = new EditText(a);
-        edName.setHint("场景名称，例：地铁早高峰");
+        edName.setHint("场景名称（最多 " + NameLimit.MAX + " 字），例：地铁早高峰");
         edName.setText(curName);
         edName.setTextSize(14);
+        NameLimit.apply(edName);
         // content-desc：既是无障碍标签，也让 uiautomator 脚本能精确定位每个输入框
         edName.setContentDescription("场景名称");
         card.addView(edName, full(0, 0, 0, 6));
@@ -1023,8 +1055,8 @@ public class MainPanels {
 
     /** 读取表单 → 保存 → 立即应用为当前场景 */
     private void saveEdited() {
-        String name = edName == null ? "" : String.valueOf(edName.getText()).trim();
-        if (name.length() == 0) name = "自定义场景";
+        String name = NameLimit.clean(edName == null ? "" : String.valueOf(edName.getText()),
+                "自定义场景");
         JSONObject o = new JSONObject();
         try {
             for (String[] f : FIELDS) {

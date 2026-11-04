@@ -340,6 +340,22 @@ def _note_measure(text):
 # GUI 里的短名称（Web 控制台仍用全名）：与 Android / 规格同源
 SHORT = W.PRESET_SHORT
 
+
+def _cap_name_var(var):
+    """自定义场景 / 弱网组合的名字输入框统一限 10 个字符。
+
+    用 StringVar 的 write trace 而不是 Entry 的 validate：中文输入法组字过程中
+    validate 容易把候选串误判成超限、导致打不出字；trace 里就地截断对键盘、
+    粘贴、输入法上屏、代码 set() 一视同仁。真正的兜底在引擎的
+    limit_item_name（API / 共享 / 老存档也走那条路），这里只是少打几个字。
+    """
+    def _on_write(*_args):
+        s = var.get() or ""
+        if len(s) > W.NAME_MAX:
+            var.set(s[:W.NAME_MAX])
+    var.trace_add("write", _on_write)
+    return var
+
 # key, 标签, 单位, 上限 —— 顺序与标签都来自 spec/spec.json
 FIELDS = [(p["key"], p["label"], p["unit"], p["max"]) for p in W.PARAM_SPECS]
 
@@ -450,10 +466,8 @@ class App:
         self.usb_q = queue.Queue()
         # GitHub 新版本检查同理：查完只往队列里丢结果，控件由 refresh() 在主线程改
         self.update_q = queue.Queue()
-        self._update_state = None          # 最近一次 check() 的结果，None = 还没查/查失败
-        self._update_busy = False
-        self._update_next = 0.0           # monotonic 时间戳：下次允许复查的时刻
-        self._update_period = 1800.0      # 启动查一次，之后每 30 分钟复查
+        self._update_state = None          # 启动那一次 check() 的结果，None = 还没查/查失败
+        self._update_done = False          # 每次启动只查一次，运行中不再复查
 
         root.title("WeakNet %s —— App 弱网测试工具" % W.VERSION)
         _apply_window_icon(root)
@@ -517,9 +531,10 @@ class App:
         # 开着界面就先把设备列出来：插上手机进来看一眼就知道有没有被认到。
         # 用 quiet —— 没装 adb 是很常见的情况，启动时弹窗只会打扰人
         root.after(600, lambda: self.usb_refresh(quiet=True))
-        # 版本号更新提示：等窗口稳定后再查，别跟启动阶段的端口/USB 初始化抢时间。
+        # 版本号更新提示：本次启动只查这一次，运行中不再复查（不轮询、点标签也不重查）。
+        # 等窗口稳定后再查，别跟启动阶段的端口/USB 初始化抢时间；
         # 查不到（断网、GitHub 限流）就安安静静保持灰色，不弹任何窗。
-        root.after(1500, lambda: self._queue_update_check(force=True))
+        root.after(1500, self._queue_update_check)
 
     # ---------------- 界面搭建 ----------------
 
@@ -811,14 +826,15 @@ class App:
 
     # ---------------- GitHub 新版本提示 ----------------
 
-    def _queue_update_check(self, force=False):
-        """启动一次后台检查；不阻塞界面，重复调用会被合并。"""
-        if self._closing or self._update_busy:
+    def _queue_update_check(self):
+        """本次启动唯一的一次后台检查；不阻塞界面，重复调用直接忽略。
+
+        结果只往队列里丢，由 refresh() → _update_pump() 在主线程落到标签上。
+        没有定时器、没有点击重查：想看新版本就重启程序。
+        """
+        if self._closing or self._update_done:
             return
-        if not force and time.monotonic() < self._update_next:
-            return
-        self._update_busy = True
-        self._update_next = time.monotonic() + self._update_period
+        self._update_done = True
 
         def worker():
             state = UC.check(W.VERSION)
@@ -830,19 +846,15 @@ class App:
         threading.Thread(target=worker, daemon=True).start()
 
     def _update_pump(self):
-        """主线程：把后台结果落到版本号标签上，顺带做定时复查。"""
+        """主线程：只负责把启动那一次检查的结果落到版本号标签上。"""
         try:
             while True:
                 state = self.update_q.get_nowait()
-                self._update_busy = False
-                if state is not None:      # None = 断网/异常，保持上一次状态，不打扰用户
+                if state is not None:      # None = 断网/异常，保持默认灰色，不打扰用户
                     self._update_state = state
                     self._apply_update_state()
         except queue.Empty:
             pass
-        if (not self._closing and not self._update_busy
-                and time.monotonic() >= self._update_next):
-            self._queue_update_check(force=True)
 
     def _apply_update_state(self):
         if not hasattr(self, "lab_version"):
@@ -863,7 +875,7 @@ class App:
         except Exception:
             # EXE 无控制台，浏览器起不来时至少让用户看到链接
             messagebox.showinfo("WeakNet 新版本", "请用浏览器打开：\n%s" % url)
-        self._queue_update_check(force=True)
+        # 点标签只负责跳转，不重新联网检查（运行中一律不复查）
 
     def _build_stats(self):
         pass   # 实时状态已并入顶栏（见 _build_header），保留方法避免旧调用报错
@@ -969,8 +981,8 @@ class App:
         row.pack(fill="x")
         tk.Label(row, text="名称", font=FONT, bg=CARD, fg=MUTED, width=6,
                  anchor="w").pack(side="left")
-        self.mine_name = tk.StringVar()
-        ent = tk.Entry(row, textvariable=self.mine_name, font=FONT, width=26,
+        self.mine_name = _cap_name_var(tk.StringVar())
+        ent = tk.Entry(row, textvariable=self.mine_name, font=FONT, width=20,
                        relief="flat", highlightthickness=1, highlightbackground=LINE,
                        highlightcolor=ACCENT, bg=FIELD, fg=TEXT)
         ent.pack(side="left", padx=(6, 8))
@@ -980,6 +992,8 @@ class App:
         tk.Button(row, text="保存当前参数", font=FONT, bg=BTN2, fg=TEXT,
                   relief="flat", padx=12, pady=4, cursor="hand2",
                   command=self.save_mine).pack(side="left")
+        tk.Label(row, text="最多 %d 字" % W.NAME_MAX, font=FONT, bg=CARD,
+                 fg=MUTED).pack(side="left", padx=(8, 0))
         tk.Label(box, text="保存后与内置场景并排显示、点一下即切换；选中它后"
                            "「删除当前场景」按钮才会出现（存在该程序目录的 "
                            "weaknet_presets.json，重装保留）。",
@@ -1012,8 +1026,9 @@ class App:
         self.tab_btns = {}
         for key, label in (("scene", "场景"), ("combo", "组合")):
             b = tk.Button(tabs, text=label, font=FONT_B, bg=BTN2, fg=MUTED,
+                          activebackground=BTN2, activeforeground=MUTED,
                           relief="flat", padx=16, pady=3, cursor="hand2",
-                          command=lambda k=key: self.switch_tab(k))
+                          command=lambda k=key: self.switch_tab(k, manual=True))
             b.pack(side="left", padx=(0, 4))
             self.tab_btns[key] = b
 
@@ -1028,10 +1043,24 @@ class App:
         cur = W.G.preset_key or ""
         self.switch_tab("combo" if cur.startswith(W.COMBO_KEY_PREFIX) else "scene")
 
-    def switch_tab(self, key):
+    def _paint_tabs(self, key):
+        """标签配色：连鼠标悬停态一起刷。
+
+        只改 bg/fg 的话，鼠标还停在刚点过的按钮上时看到的是 hover 底色，
+        会误以为「选中特效没刷新」——tkinter 的 activebackground 优先级更高。
+        """
+        for k, b in getattr(self, "tab_btns", {}).items():
+            on = (k == key)
+            bg = ACCENT if on else BTN2
+            fg = "white" if on else MUTED
+            b.configure(bg=bg, fg=fg, activebackground=bg, activeforeground=fg)
+
+    def switch_tab(self, key, manual=False):
         """切换「场景 / 组合」标签页。
 
         只换显示，不重建内容：两个页面的按钮都是活的，切换回来还在原位。
+        manual=True 表示用户亲手点的标签：把当前选中项记为已处理，
+        免得下一次自动同步又把这一页翻回去。
         """
         pages = getattr(self, "tab_pages", None)
         if not pages:
@@ -1042,11 +1071,10 @@ class App:
                     page.pack(fill="x")
             elif page.winfo_manager():
                 page.pack_forget()
-        for k, b in getattr(self, "tab_btns", {}).items():
-            on = (k == key)
-            b.configure(bg=ACCENT if on else BTN2,
-                        fg="white" if on else MUTED)
+        self._paint_tabs(key)
         self.cur_tab = key
+        if manual:
+            self._last_tab_key = W.G.preset_key or ""
 
     def _build_mine(self, page):
         """自定义场景：与内置预设同处一张卡片、用同样的按钮样式。
@@ -1449,7 +1477,7 @@ class App:
         self.lab_mine.config(text="只删除这一条保存的场景，不影响内置预设。")
 
     def save_mine(self):
-        name = (self.mine_name.get() or "").strip()
+        name = W.limit_item_name(self.mine_name.get())
         if not name:
             messagebox.showinfo("我的自定义", "请先给这组参数起个名字，再点保存。")
             return
@@ -1665,9 +1693,10 @@ class App:
         self._sel_combo = None     # 同上：新建按钮的配色要重刷一遍
         for i, c in enumerate(self.combo_items):
             key = W.COMBO_KEY_PREFIX + c["id"]
-            b = tk.Button(self.combo_grid, text="🔀 " + c["name"], font=FONT, bg=BTN2,
-                          fg=TEXT, relief="flat", padx=9, pady=3, cursor="hand2",
-                          command=lambda k=key: self.apply_preset(k))
+            # 名字统一左对齐、不掺彩色 emoji：和 Android 组合列表保持同一观感
+            b = tk.Button(self.combo_grid, text=c["name"], font=FONT, bg=BTN2,
+                          fg=TEXT, relief="flat", padx=9, pady=3, anchor="w",
+                          cursor="hand2", command=lambda k=key: self.apply_preset(k))
             # 单击 = 选中（已开限速就立即按序播），双击 = 打开查看/编辑（里面有删除按钮）
             b.bind("<Double-Button-1>", lambda _e, cid=c["id"]: self.open_combo_editor(cid))
             b.grid(row=i // 4, column=i % 4, padx=(0, 5), pady=2, sticky="w")
@@ -1828,11 +1857,14 @@ class App:
         row0 = tk.Frame(inner, bg=CARD)
         row0.pack(fill="x")
         tk.Label(row0, text="组合名称", font=FONT_B, bg=CARD, fg=TEXT).pack(side="left")
-        self.combo_name = tk.StringVar(value=(combo["name"] if combo else ""))
-        ent = tk.Entry(row0, textvariable=self.combo_name, font=FONT, width=22,
+        self.combo_name = _cap_name_var(
+            tk.StringVar(value=(combo["name"] if combo else "")))
+        ent = tk.Entry(row0, textvariable=self.combo_name, font=FONT, width=16,
                        relief="flat", highlightthickness=1, highlightbackground=LINE,
                        highlightcolor=ACCENT, bg=FIELD, fg=TEXT)
         ent.pack(side="left", padx=(8, 0))
+        tk.Label(row0, text="最多 %d 字" % W.NAME_MAX, font=FONT, bg=CARD,
+                 fg=MUTED).pack(side="left", padx=(8, 0))
         ent.focus_set()
 
         self.combo_loop = tk.BooleanVar(value=bool(combo and combo.get("loop")))
@@ -1964,7 +1996,7 @@ class App:
             pass
 
     def save_combo(self):
-        name = (self.combo_name.get() or "").strip()
+        name = W.limit_item_name(self.combo_name.get())
         if not name:
             messagebox.showinfo("弱网组合", "请先给这个组合起个名字。")
             return
@@ -2675,11 +2707,17 @@ class App:
         if action == "rename":
             try:
                 new_name = simpledialog.askstring(
-                    "另存为", "把「%s」存成什么名字？" % it["name"],
-                    initialvalue="%s（来自 %s）" % (it["name"], it["from"]),
+                    "另存为", "把「%s」存成什么名字？（最多 %d 字）"
+                    % (it["name"], W.NAME_MAX),
+                    initialvalue=W.limit_item_name(
+                        "%s（来自 %s）" % (it["name"], it["from"]),
+                        W.limit_item_name(it["name"], "自定义")),
                     parent=self.share_win)
             except Exception:
                 new_name = None
+            if not new_name:
+                return
+            new_name = W.limit_item_name(new_name)
             if not new_name:
                 return
         res = W.resolve_inbox(it["id"], action, new_name)
@@ -3363,6 +3401,8 @@ class App:
                 self.switch_tab("combo")
             elif key.startswith("u:"):
                 self.switch_tab("scene")
+        # 每次循环都把标签配色和当前页对齐（幂等），任何路径改过背景都能立刻刷回来
+        self._paint_tabs(getattr(self, "cur_tab", "scene"))
         try:
             n = len(W.G.inbox)    # 收到的同名环境，没人管就别让按钮看着平平无奇
             self.btn_share.config(text="🔗 环境共享" + ("（%d 条待处理）" % n if n else ""))

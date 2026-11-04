@@ -72,6 +72,14 @@ def build():
     param_notes = spec["param_notes"]
     combo = spec["combo"]
     share = spec["share"]
+    defaults = spec["defaults"]
+
+    # 出厂默认原样生成两段 JSON 文本常量：设备启动时才解析，静态初始化阶段
+    # 不碰 org.json（纯 JDK 单测跑在 android.jar 的 stub 上，会抛 "Stub!"）。
+    scenes_json = json.dumps(defaults["scenes"], ensure_ascii=False,
+                             separators=(",", ":"))
+    combos_json = json.dumps(defaults["combos"], ensure_ascii=False,
+                             separators=(",", ":"))
 
     keys = [p["key"] for p in presets]
     default_name = next(p["name"] for p in presets if p["key"] == "direct")
@@ -107,12 +115,19 @@ def build():
     A("    public static final int PIN_LEN = %d;" % share["pin_len"])
     A("    public static final int INBOX_MAX = %d;" % share["inbox_max"])
     A("    public static final int SHARE_MAX_STEPS = %d;" % share["max_shared_steps"])
+    # 自定义场景 / 弱网组合的取名上限：两端共用同一份规格，别一处 10 一处 40
+    A("    public static final int NAME_MAX = %d;" % int(spec["name_max"]))
     A("    public static final int COMBO_MAX_STEPS = %d;" % combo["max_steps"])
     A("    public static final int COMBO_MAX_MINUTES = %d;" % combo["max_minutes"])
     A("    public static final int COMBO_MAX_SECONDS = %d;" % combo["max_seconds"])
     A("    public static final int COMBO_EXAMPLE_COUNT = %d;" % len(combo["examples"]))
     A("    public static final String COMBO_DOC = %s;" % literal(combo_doc))
     A("    public static final String DEFAULT_PROFILE_NAME = %s;" % literal(default_name))
+    A("")
+    A("    /** 出厂默认：seed 版本 + 5 支自定义场景 / 5 支弱网组合的 JSON 文本 */")
+    A("    public static final String DEFAULT_SEED = %s;" % literal(defaults["seed"]))
+    A("    public static final String DEFAULT_SCENES_JSON = %s;" % literal(scenes_json))
+    A("    public static final String DEFAULT_COMBOS_JSON = %s;" % literal(combos_json))
     A("")
     A("    // ---------------------------------------------------------------- 预置场景")
     A("")

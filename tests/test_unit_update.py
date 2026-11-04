@@ -5,6 +5,7 @@
 ProxyHandler 直连兜底），不 mock 掉网络层；断网用例则指向一个没人监听的端口。
 """
 import json
+import queue
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -162,4 +163,44 @@ def test_gui_wires_version_label_and_click():
     assert "webbrowser.open(url)" in GUI
     assert "UC.PAGE_LATEST" in GUI
     assert "self._update_pump()" in GUI        # 结果必须回主线程
-    assert "_queue_update_check(force=True)" in GUI
+    assert "root.after(1500, self._queue_update_check)" in GUI
+    # 只在启动时查一次：没有 30 分钟定时复查，点标签也不再联网
+    assert "_update_period" not in GUI and "_update_next" not in GUI
+    assert "_queue_update_check(force=True)" not in GUI
+
+
+def test_startup_checks_only_once(monkeypatch):
+    """重复触发启动定时器、主线程泵、点击标签，都不得发起第二次网络检查。"""
+    pytest.importorskip("tkinter")
+    import weaknet_gui as G
+
+    calls = []
+
+    class FakeThread:
+        def __init__(self, target=None, daemon=False):
+            self.target = target
+
+        def start(self):
+            calls.append("thread")
+            self.target()
+
+    monkeypatch.setattr(G.threading, "Thread", FakeThread)
+    monkeypatch.setattr(G.UC, "check",
+                        lambda *a, **kw: (calls.append("check"), {"has_new": False})[1])
+    monkeypatch.setattr(G.webbrowser, "open", lambda u: True)
+
+    app = object.__new__(G.App)            # 绕开完整 __init__（要起引擎和端口）
+    app._closing = False
+    app._update_done = False
+    app.update_q = queue.Queue()
+    app._update_state = None
+
+    app._queue_update_check()
+    app._queue_update_check()              # 定时器被误触两次也只查一次
+    app._update_pump()                     # 主线程泵不再安排复查
+    app._on_version_click()                # 点标签不再联网
+    for _ in range(5):
+        app._update_pump()
+
+    assert calls.count("check") == 1
+    assert app._update_state == {"has_new": False}
