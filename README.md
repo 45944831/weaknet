@@ -2,7 +2,7 @@
 
 把设备流量接管到本地通道，按场景施加**带宽限速、延迟抖动、丢包卡顿、随机断连、黑洞超时、DNS 故障、周期断网**等网络损伤，用来验证 App 在真实弱网下的表现。
 
-**v1.1.13** · Windows（EXE） · Android 7.0+ · [下载最新版](https://github.com/45944831/weaknet/releases/latest)
+**v1.1.14** · Windows（EXE） · Android 7.0+ · [下载最新版](https://github.com/45944831/weaknet/releases/latest)
 
 ## 功能
 
@@ -15,6 +15,7 @@
 | **一键接管与还原** | Windows 自动改系统代理并在退出时还原；Android 一个开关接管整机，停止即刻恢复 |
 | **USB 手机弱网** | 手机不装 App，通过 `adb reverse` + 系统代理给 USB 连接的手机施加弱网 |
 | **环境共享** | 同一局域网互推场景与组合，对方不用手抄参数 |
+| **新版本提示** | 后台查 GitHub 最新 Release，有新版时顶栏版本号变红，点击直达下载页 |
 
 两端共用同一套场景、参数与接口契约（`spec/spec.json` 为唯一真源），Windows ↔ Android 结果可直接对照。
 
@@ -22,19 +23,21 @@
 
 | 文件 | 平台 | 大小 | SHA-256（前 16 位） |
 |---|---|---|---|
-| [`WeakNet.exe`](https://github.com/45944831/weaknet/releases/latest/download/WeakNet.exe) | Windows GUI，免装 Python，无 DOS 黑框 | 10.32 MB | `27b4a31fa1e4b21e` |
-| [`WeakNet.apk`](https://github.com/45944831/weaknet/releases/latest/download/WeakNet.apk) | Android 7.0+ | 197 KB | `91d13cd853f2577e` |
+| [`WeakNet.exe`](https://github.com/45944831/weaknet/releases/latest/download/WeakNet.exe) | Windows GUI，免装 Python，无 DOS 黑框 | 10.33 MB | `dd8b6803a01aa9d2` |
+| [`WeakNet.apk`](https://github.com/45944831/weaknet/releases/latest/download/WeakNet.apk) | Android 7.0+ | 197 KB | `d6b5a01e30bb932d` |
 
 发布页：<https://github.com/45944831/weaknet/releases/latest>
 
-> **v1.1.13 重点**：修复「点了关闭，进程还在」。关窗时不再弹模态框，退出还原改为后台限时 10 秒，关窗前先等在途 adb 操作落地，退出时强制落盘日志。真机实测关窗 0.93 秒、EXE 双进程 0.97 秒；Android 端无功能改动，仅版本号同步，覆盖安装不清数据。
+> **v1.1.14 重点**：新增版本号更新提示 —— 顶栏版本号平时灰色，GitHub 发布新版后自动变红并标出新版本号，点一下直达下载页；后台检查、直连优先、断网静默，不卡界面也不打扰。Android 端无功能改动，仅版本号同步，可覆盖安装不清数据。
+>
+> 上一版 **v1.1.13** 修的是「点了关闭，进程还在」：关窗不再弹模态框，退出还原后台限时 10 秒，关窗前先等在途 adb 操作落地，退出时强制落盘日志。
 
 <details>
 <summary>完整 SHA-256</summary>
 
 ```text
-27b4a31fa1e4b21e432d59ff54e38513bc29279e9e47b39ea0f302b2b7f0624a  WeakNet.exe
-91d13cd853f2577e579d3d8d995c1611d9b8a73e6aeb427a9a3bf8ef8718f2ca  WeakNet.apk
+dd8b6803a01aa9d2a16eed606c3c3f9b0348d89d882ab5a82f097eb9404d52da  WeakNet.exe
+d6b5a01e30bb932d220cf760e2d55b21eb5da8dcca9efaae45c95a3184db7327  WeakNet.apk
 ```
 
 </details>
@@ -127,7 +130,7 @@ weaknet/
 
 ## 验证与已知限制
 
-v1.1.13 共验证 **250/250**：真机 / EXE 场景 80 项 + 自动化 170 项。关窗耗时 0.93–2.63 秒，关闭后手机代理、反向映射与守护全部清除。历史版本的实测数据见[验证记录](docs/verification.md)。
+v1.1.13 共验证 **250/250**：真机 / EXE 场景 80 项 + 自动化 170 项。关窗耗时 0.93–2.63 秒，关闭后手机代理、反向映射与守护全部清除。v1.1.14 新增 22 项更新提示用例，pytest 全量与版本一致性 14/14 通过。历史版本的实测数据见[验证记录](docs/verification.md)。
 
 已知限制：
 
@@ -142,6 +145,6 @@ v1.1.13 共验证 **250/250**：真机 / EXE 场景 80 项 + 自动化 170 项�
 
 - [使用说明](docs/guide.md)：Windows / Android / USB 全功能操作、17 支场景与 13 项参数说明
 - [构建与测试](docs/build.md)：两端构建、版本号约束、pytest 回归
-- [验证记录](docs/verification.md)：v1.1.0 – v1.1.13 实测与已修缺陷
+- [验证记录](docs/verification.md)：v1.1.0 – v1.1.14 实测与已修缺陷
 
 问题与建议请提 [Issue](https://github.com/45944831/weaknet/issues)。

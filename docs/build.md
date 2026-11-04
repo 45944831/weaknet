@@ -24,7 +24,7 @@ bash build.sh
 > 覆盖 `--version-code` / `--version-name`**，不加 `--replace-version` 时脚本里的版本号等于白写
 > （现象：内容明明变了，`aapt2 dump badging` 出来的版本号一直是旧值）。脚本已带上该参数，
 > 并在构建末尾自动断言，验证方式：`aapt2 dump badging WeakNet.apk | head -1` 应显示
-> `versionCode='123' versionName='1.1.13'`。
+> `versionCode='124' versionName='1.1.14'`。
 
 构建脚本对 javac / d8 / aapt2 的失败一律「日志落盘 + 明确报错 + 退出」：不接 `tail` 管道，
 避免管道的退出码掩盖真实失败；d8 之后还会确认 `classes.dex` 真的存在。

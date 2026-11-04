@@ -23,6 +23,7 @@ import sys
 import threading
 import time
 import tkinter as tk
+import webbrowser
 from tkinter import filedialog, font as tkfont, messagebox, simpledialog, ttk
 
 # 以 --windowed 打包时没有控制台，sys.stdout / sys.stderr 为 None。
@@ -34,6 +35,7 @@ if sys.stderr is None:
 
 import weaknet as W
 import usb_phone as UP
+import update_check as UC
 
 # 由 main() 在解析完参数后置位：无窗口模式下出错不能弹 messagebox（没人点，宿主会一直等）
 _HEADLESS = False
@@ -446,6 +448,12 @@ class App:
         # USB 手机弱网：adb 命令最长 20 秒，一律丢后台线程，
         # 结果经这个队列回到主线程（tkinter 不是线程安全的，绝不能在子线程里直接碰控件）
         self.usb_q = queue.Queue()
+        # GitHub 新版本检查同理：查完只往队列里丢结果，控件由 refresh() 在主线程改
+        self.update_q = queue.Queue()
+        self._update_state = None          # 最近一次 check() 的结果，None = 还没查/查失败
+        self._update_busy = False
+        self._update_next = 0.0           # monotonic 时间戳：下次允许复查的时刻
+        self._update_period = 1800.0      # 启动查一次，之后每 30 分钟复查
 
         root.title("WeakNet %s —— App 弱网测试工具" % W.VERSION)
         _apply_window_icon(root)
@@ -509,6 +517,9 @@ class App:
         # 开着界面就先把设备列出来：插上手机进来看一眼就知道有没有被认到。
         # 用 quiet —— 没装 adb 是很常见的情况，启动时弹窗只会打扰人
         root.after(600, lambda: self.usb_refresh(quiet=True))
+        # 版本号更新提示：等窗口稳定后再查，别跟启动阶段的端口/USB 初始化抢时间。
+        # 查不到（断网、GitHub 限流）就安安静静保持灰色，不弹任何窗。
+        root.after(1500, lambda: self._queue_update_check(force=True))
 
     # ---------------- 界面搭建 ----------------
 
@@ -750,6 +761,11 @@ class App:
         head.pack(fill="x", padx=14, pady=(12, 6))
         tk.Label(head, text="WeakNet", font=FONT_T, bg=CARD, fg=ACCENT).pack(side="left")
         tk.Label(head, text="App 弱网测试工具", font=FONT, bg=CARD, fg=MUTED).pack(side="left", padx=(8, 0))
+        # 版本号：默认灰色；线上有更新时整串变红并附上新版本号，点一下打开下载页
+        self.lab_version = tk.Label(head, text="v%s" % W.VERSION, font=FONT,
+                                    bg=CARD, fg=MUTED, cursor="hand2")
+        self.lab_version.pack(side="left", padx=(8, 0))
+        self.lab_version.bind("<Button-1>", lambda _e: self._on_version_click())
         self.dot = tk.Label(head, text="● 服务运行中", font=FONT_B, bg=CARD, fg=OK)
         self.dot.pack(side="right")
 
@@ -792,6 +808,62 @@ class App:
             self.stat[k] = v
 
         self.refresh_header()
+
+    # ---------------- GitHub 新版本提示 ----------------
+
+    def _queue_update_check(self, force=False):
+        """启动一次后台检查；不阻塞界面，重复调用会被合并。"""
+        if self._closing or self._update_busy:
+            return
+        if not force and time.monotonic() < self._update_next:
+            return
+        self._update_busy = True
+        self._update_next = time.monotonic() + self._update_period
+
+        def worker():
+            state = UC.check(W.VERSION)
+            try:
+                self.update_q.put(state)
+            except Exception:
+                pass
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _update_pump(self):
+        """主线程：把后台结果落到版本号标签上，顺带做定时复查。"""
+        try:
+            while True:
+                state = self.update_q.get_nowait()
+                self._update_busy = False
+                if state is not None:      # None = 断网/异常，保持上一次状态，不打扰用户
+                    self._update_state = state
+                    self._apply_update_state()
+        except queue.Empty:
+            pass
+        if (not self._closing and not self._update_busy
+                and time.monotonic() >= self._update_next):
+            self._queue_update_check(force=True)
+
+    def _apply_update_state(self):
+        if not hasattr(self, "lab_version"):
+            return
+        text, fg, bold = UC.label_state(W.VERSION, self._update_state, MUTED, ERR)
+        try:
+            self.lab_version.configure(text=text, fg=fg, font=FONT_B if bold else FONT)
+        except Exception:
+            pass
+
+    def _on_version_click(self):
+        """有新版本 → 打开该 Release 的下载页；没有 → 打开最新版发布页。"""
+        state = self._update_state or {}
+        url = state.get("page") if state.get("has_new") else UC.PAGE_LATEST
+        try:
+            if not webbrowser.open(url):
+                raise RuntimeError("no browser")
+        except Exception:
+            # EXE 无控制台，浏览器起不来时至少让用户看到链接
+            messagebox.showinfo("WeakNet 新版本", "请用浏览器打开：\n%s" % url)
+        self._queue_update_check(force=True)
 
     def _build_stats(self):
         pass   # 实时状态已并入顶栏（见 _build_header），保留方法避免旧调用报错
@@ -3271,6 +3343,7 @@ class App:
         if self._closing:
             return
         self._usb_pump()      # 后台 adb 的结果在这里回到主线程
+        self._update_pump()   # GitHub 新版本检查结果也在主线程落到版本号标签
         g = W.G
         now = time.time()
         dt = now - self._last[0]
