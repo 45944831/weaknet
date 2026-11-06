@@ -15,6 +15,11 @@ export ANDROID_HOME=/path/to/android-sdk
 bash build.sh
 ```
 
+> 坑（v1.1.16）：本仓库自带 `android/sdk`（platforms/android-34 + build-tools/34.0.0），
+> 而系统 SDK 可能只有 build-tools、没有 `platforms/`。这种情况下脚本会在 `ANDROID_JAR`
+> 探测处的 `ls | sort | tail` 管道里因 `pipefail` **静默退出（exit 2，无任何错误输出）**。
+> 直接把 `ANDROID_HOME` 指向仓库自带 SDK 即可：`cd android && ANDROID_HOME="$PWD/sdk" bash build.sh`。
+
 输出 `android/WeakNet.apk`。版本号的真值在 `version.py`（`VERSION` / `BUILD`），
 `AndroidManifest.xml` 的 `versionCode` / `versionName` 与 `build.sh` 顶部默认值必须与之相同，
 由 `tests/_t_version.py` 断言。构建结束前脚本会用 `aapt2 dump badging` 回读成品版本号，
@@ -48,6 +53,19 @@ python -m PyInstaller --onefile --windowed --clean --noconfirm --name WeakNet \
 
 > 坑：PyInstaller 的 `--icon` 相对路径是相对 `--specpath` 解析的，建议直接用绝对路径。
 > 网页控制台已下线，打包时不再需要 `--add-data dashboard.html`。
+
+正式产物用本机维护的 `_build_gui/WeakNet.spec` 构建（该目录在 `.gitignore` 内，不随仓库分发）。
+这份 spec 是在上面参数生成的版本上手工补了两处：把 `spec/spec.json` 打进包、引用
+`tools/gen_exe_version.py` 生成的版本资源。图标路径务必写成**相对 spec 目录**，不要写死
+绝对路径，否则项目换盘符 / 换机器后打包会找不到图标：
+
+```bash
+py -3.10-64 tools/gen_exe_version.py          # 升版本后先刷新版本资源
+py -3.10-64 -m PyInstaller --clean --noconfirm --distpath . --workpath _build_gui \
+  _build_gui/WeakNet.spec
+```
+
+> 传 `.spec` 时不能再加 `--specpath`（PyInstaller 会报 `makespec options not valid`）。
 
 ## 自动化回归（pytest）
 

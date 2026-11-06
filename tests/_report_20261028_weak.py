@@ -9,6 +9,7 @@
 """
 import asyncio
 import json
+import os
 import platform
 import socket
 import statistics
@@ -38,7 +39,11 @@ import weaknet as W                     # noqa: E402
 from support import connect_via_proxy   # noqa: E402
 import conftest                         # noqa: E402
 
-OUT_JSON = REPO / "_弱网测试数据_2026-10-28.json"
+OUT_JSON = REPO / ("_弱网测试数据_%s.json" % (os.environ.get("WN_OUT_DATE") or "2026-10-28"))
+
+# 本轮实际用过的场景 key（按首次出现顺序）。快照在收尾时按此生成，
+# 避免「测了 10 档、快照只写 9 档」这类手工清单漏项。
+USED_PRESETS = []
 
 
 def log(msg):
@@ -190,8 +195,21 @@ class RawConn:
 
 
 def _rate(tl, t_a, t_b):
-    """时间窗内的速率（kbps，1 kbps = 1024 bit/s，与工具口径一致）。"""
-    if not tl or t_b - t_a < 0.05:
+    """时间窗内的速率（kbps，1 kbps = 1024 bit/s，与工具口径一致）。
+
+    窗口先夹到「timeline 实际覆盖」的区间再算：timeline 的 t 从发起连接前
+    起算，但首个采样点要等 CONNECT + TTFB 之后才写入。短连接（并发流里
+    连接占了 95% 时长）若不夹取，统计窗会整段落在握手阶段，两端都取到 0，
+    产出「假 0」。夹完窗宽不足 50ms 时返回 None —— 表示「这段算不出稳态」，
+    与「确实没有流量」的 0.0 严格区分。
+    """
+    if not tl:
+        return None
+    t_a = max(t_a, tl[0][0])
+    t_b = min(t_b, tl[-1][0])
+    # 5ms 是可可靠测量的下限：环回 4MB 只要 ~10ms，若卡到 50ms 会把正常
+    # 样本也判成「算不出」，反而掩盖真实数据。
+    if t_b - t_a < 0.005:
         return None
 
     def at(t):
@@ -243,8 +261,19 @@ def download(path, timeout=90.0, out=None):
         out["ok"] = True
         tl = out.get("timeline") or []
         out["avg_kbps"] = round(got * 8.0 / 1024.0 / (out["total_ms"] / 1000.0), 1)
-        out["steady_kbps"] = _rate(tl, out["total_ms"] / 1000.0 * 0.30,
-                                   out["total_ms"] / 1000.0 * 0.95)
+        # steady 窗口以「首字节时刻」为基准，而不是 t0：t0 在连接之前，
+        # 窗口前段会白送给 CONNECT + TTFB。窗口同时写进数据，便于复检时
+        # 核对它是否与握手阶段重叠。
+        t_first = tl[0][0] if tl else None
+        span = (out["total_ms"] / 1000.0 - t_first) if t_first is not None else 0.0
+        if t_first is None or span <= 0:
+            out["steady_kbps"] = None
+            out["steady_win_ms"] = None
+        else:
+            t_a = t_first + span * 0.30
+            t_b = t_first + span * 0.95
+            out["steady_win_ms"] = [round(t_a * 1000.0, 1), round(t_b * 1000.0, 1)]
+            out["steady_kbps"] = _rate(tl, t_a, t_b)
         c.close()
     except Exception as e:
         out["total_ms"] = round((now() - t0) * 1000.0, 1)
@@ -372,6 +401,8 @@ threading.Thread(target=ORIGIN.serve_forever, daemon=True, name="origin").start(
 
 
 def preset(key):
+    if key not in USED_PRESETS:
+        USED_PRESETS.append(key)
     return dict(W.PRESETS[key][2])
 
 
@@ -403,9 +434,15 @@ R = {"meta": {
     "ctrl": "127.0.0.1:%d" % TH.ctrl_port,
     "origin": "127.0.0.1:%d" % ORIGIN.server_address[1],
     "note": "客户端与源站同机环回；kbps 按 1 kbps = 1024 bit/s 折算",
-}, "presets": {k: W.PRESETS[k][2] for k in
-               ("4g", "4g_weak", "wifi_weak", "congestion", "satellite",
-                "high_loss", "high_latency", "flapping", "blackhole")}}
+    "metric_notes": {
+        "avg_kbps": "全程平均，分母含 CONNECT+TTFB 开销",
+        "steady_kbps": ("窗口取「首字节时刻」之后 30%~95%，并夹到 timeline "
+                        "实际覆盖区间：连接/握手不参与。窗口 <5ms 记 null"
+                        "（算不出），不是 0。短连接上它会明显高于 avg"),
+        "pc": "percentile，线性插值",
+    },
+}, "presets_note": "库存默认值；本轮实际下发值见各段 params（flapping 有覆盖）",
+    "presets": {}}
 
 
 def baseline():
@@ -536,7 +573,7 @@ def mid_stop(name, key, kb, wait_s, note=""):
 
 def blackhole():
     log("黑洞（timeout 100%）：客户端超时 vs 停止后放行")
-    apply(timeout_pct=100)
+    apply(**preset("blackhole"))
     # A. 客户端 2.5s 超时且无人点停止：应用侧只能靠自己的超时脱身
     client = {"timeout_s": 2.5, "ok": False, "elapsed_ms": None, "error": None}
     c = None
@@ -776,6 +813,9 @@ def main():
         concurrency()
         fairness()
         post_stop_small()
+        # 快照按「本轮真正用过的场景」生成，杜绝手工清单漏档（曾漏 elevator）
+        R["presets"] = {k: dict(W.PRESETS[k][2]) for k in USED_PRESETS}
+        R["meta"]["presets_used"] = list(USED_PRESETS)
         R["meta"]["finished"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         OUT_JSON.write_text(json.dumps(R, ensure_ascii=False, indent=1), encoding="utf-8")
         log("原始数据 -> %s" % OUT_JSON)

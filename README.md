@@ -2,7 +2,7 @@
 
 把设备流量接管到本地通道，按场景施加**带宽限速、延迟抖动、丢包卡顿、随机断连、黑洞超时、DNS 故障、周期断网**等网络损伤，用来验证 App 在真实弱网下的表现。
 
-**v1.1.15** · Windows（EXE） · Android 7.0+ · [下载最新版](https://github.com/45944831/weaknet/releases/latest)
+**v1.1.16** · Windows（EXE） · Android 7.0+ · [下载最新版](https://github.com/45944831/weaknet/releases/latest)
 
 ## 功能
 
@@ -23,14 +23,16 @@
 
 | 文件 | 平台 | 大小 | SHA-256（前 16 位） |
 |---|---|---|---|
-| [`WeakNet.exe`](https://github.com/45944831/weaknet/releases/latest/download/WeakNet.exe) | Windows GUI，免装 Python，无 DOS 黑框 | 10.34 MB | `ace4ad7f5bf0e633` |
-| [`WeakNet.apk`](https://github.com/45944831/weaknet/releases/latest/download/WeakNet.apk) | Android 7.0+ | 201 KB | `e2f706a8214a4a18` |
+| [`WeakNet.exe`](https://github.com/45944831/weaknet/releases/latest/download/WeakNet.exe) | Windows GUI，免装 Python，无 DOS 黑框 | 10.34 MB | `c9948caa016bbc53` |
+| [`WeakNet.apk`](https://github.com/45944831/weaknet/releases/latest/download/WeakNet.apk) | Android 7.0+ | 201 KB | `6c268eb879b2133f` |
 
 发布页：<https://github.com/45944831/weaknet/releases/latest>
 
-> **v1.1.15 重点**：自定义场景与弱网组合的名字统一限 10 个字（双端码点截断，中文输入法组字不被打断）；弱网组合列表改成和自定义场景一致的三列小方块，去掉 🔀、选中实心绿、下方带段数/循环/时长摘要；新增标签同步状态机，从飘窗或控制台选中项时才翻页，用户手动点开的页不再被 3 秒轮询拽回。首次启动自动注入 5 个内置场景 + 5 个组合。
+> **v1.1.16 重点**：采集数据修复版——产品功能与 v1.1.15 完全一致，修掉并发流 steady 假 0、dumpsys PSS 取错、EXE RSS 假 0 三个静默缺陷，补齐场景快照与报告口径，数据复检从 11 个错误降到 0。
 >
-> 上一版 **v1.1.14** 新增版本号更新提示：顶栏版本号平时灰色，GitHub 发布新版后自动变红并标出新版本号，点一下直达下载页。
+> 上一版 **v1.1.15 重点**：自定义场景与弱网组合的名字统一限 10 个字（双端码点截断，中文输入法组字不被打断）；弱网组合列表改成和自定义场景一致的三列小方块，去掉 🔀、选中实心绿、下方带段数/循环/时长摘要；新增标签同步状态机，从飘窗或控制台选中项时才翻页，用户手动点开的页不再被 3 秒轮询拽回。首次启动自动注入 5 个内置场景 + 5 个组合。
+>
+> **v1.1.14** 新增版本号更新提示：顶栏版本号平时灰色，GitHub 发布新版后自动变红并标出新版本号，点一下直达下载页。
 >
 > 再往前 **v1.1.13** 修的是「点了关闭，进程还在」：关窗不再弹模态框，退出还原后台限时 10 秒，关窗前先等在途 adb 操作落地，退出时强制落盘日志。
 
@@ -38,8 +40,8 @@
 <summary>完整 SHA-256</summary>
 
 ```text
-ace4ad7f5bf0e633677a542754eeaaeedbf4b2025fd78bb4f5daac7a502afd52  WeakNet.exe
-e2f706a8214a4a18e3724006a55e38aef65a0790b6b7e616101fd87fdb1931b9  WeakNet.apk
+c9948caa016bbc531d004190c95e93f49c9d18ff12c67bd23b0619d1fe5edd35  WeakNet.exe
+6c268eb879b2133fa0442b7a110b78f47374c61fdf1ee54a9c34d176768016a0  WeakNet.apk
 ```
 
 </details>
@@ -132,7 +134,7 @@ weaknet/
 
 ## 验证与已知限制
 
-v1.1.15 真机回归 **68/68**（深度 34 + 组合 11 + 默认项 12 + UI 11），EXE 冒烟 7/7，pytest 138 通过，版本一致性 14/14、规格 hash 一致。另做了关闭残留检测：Windows 正常关窗后进程 / 端口 / 系统代理全部清空，Android 强停后进程、服务与 tun 全清。v1.1.13 的 250/250 全量数据与更早版本见[验证记录](docs/verification.md)。
+v1.1.16 为采集数据修复版（产品功能无变化）：版本一致性 14/14、pytest 138 通过、EXE 冒烟与 APK 真机版本校验通过、数据复检 0 错误；产物 EXE 10,839,282 B / `c9948caa…`、APK 205,860 B / `6c268eb8…`。v1.1.15 真机回归 **68/68**（深度 34 + 组合 11 + 默认项 12 + UI 11），EXE 冒烟 7/7，pytest 138 通过，版本一致性 14/14、规格 hash 一致。另做了关闭残留检测：Windows 正常关窗后进程 / 端口 / 系统代理全部清空，Android 强停后进程、服务与 tun 全清。v1.1.13 的 250/250 全量数据与更早版本见[验证记录](docs/verification.md)。
 
 已知限制：
 
@@ -147,6 +149,6 @@ v1.1.15 真机回归 **68/68**（深度 34 + 组合 11 + 默认项 12 + UI 11）
 
 - [使用说明](docs/guide.md)：Windows / Android / USB 全功能操作、17 支场景与 13 项参数说明
 - [构建与测试](docs/build.md)：两端构建、版本号约束、pytest 回归
-- [验证记录](docs/verification.md)：v1.1.0 – v1.1.15 实测与已修缺陷
+- [验证记录](docs/verification.md)：v1.1.0 – v1.1.16 实测与已修缺陷
 
 问题与建议请提 [Issue](https://github.com/45944831/weaknet/issues)。
