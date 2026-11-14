@@ -40,6 +40,12 @@ import uuid
 from collections import deque
 from pathlib import Path
 
+# 单位口径的**单一真值**：1 kbps = 1024 bit/s（与 docs/precision.md、
+# 采集数据集 note、性能门禁的测量公式一致）。历史上令牌桶用 1024、
+# 超时估算和 test_perf.py 用 1000，同一档位在测量侧被系统性低估 2.4%，
+# 现在统一到这里，改口径只需改这一个常量。
+BITS_PER_KBPS = 1024.0
+
 try:
     from version import BUILD, VERSION
 except ImportError:                 # 被当成包导入时的兜底（脚本方式运行走上面）
@@ -53,6 +59,61 @@ except Exception:
     pass
 
 FROZEN = getattr(sys, "frozen", False)   # True = 以 EXE 方式运行
+
+# Windows 定时器分辨率（钉在 Python 3.10 的关键坑）：系统默认 15.625ms 一个 tick，
+# asyncio.sleep / wait_for 的实际粒度就是这个值 —— 本机实测 sleep(1ms) 睡 15.6ms、
+# sleep(16ms) 睡 31ms、sleep(64ms) 睡 78ms。令牌桶的节奏睡眠与延迟注入全部被量化，
+# 是带宽中位数偏高（8590 vs 8000，+7.4%）、RTT 偏高（422 vs 400ms，+5.5%）的
+# 重要成分。3.11 起 time.sleep 已换高精度定时器（GH-89592），本项目钉在 3.10，
+# 只能用 winmm 的 timeBeginPeriod(1) 补；Win10 2004+ 起该请求只影响本进程，
+# 代价可控。WN_TIMER_RES=0 可关（省电优先时）。
+_TIMER_RES_MS = 0
+if sys.platform == "win32" and os.environ.get("WN_TIMER_RES", "1") != "0":
+    try:
+        import ctypes
+        _winmm = ctypes.WinDLL("winmm")
+        if _winmm.timeBeginPeriod(1) == 0:          # TIMERR_NOERROR
+            _TIMER_RES_MS = 1
+            atexit.register(_winmm.timeEndPeriod, 1)
+    except Exception:
+        pass
+
+
+def _tcp_nodelay(writer):
+    """给被动 accept 侧的连接补 TCP_NODELAY。
+
+    asyncio 只在 `_set_nodelay()` 里设 NODELAY，而它的条件要求
+    `sock.proto == IPPROTO_TCP`：出站（open_connection）的套接字是显式创建的、
+    proto=6，满足；accept 进来的套接字 proto 被推断成 0，条件不成立 ——
+    本机实测 start_server 接受侧 NODELAY=0。Nagle + 延迟 ACK 的组合会让
+    「小请求-小响应」的交互路径多等 40~200ms，控制接口与代理入口正是这种
+    小包高频路径。放在 handler 入口统一补；对 64KB 的大块转发无副作用。
+    """
+    try:
+        s = writer.get_extra_info("socket")
+        if s is not None:
+            s.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+    except Exception:
+        pass
+
+
+def _tune_gc():
+    """延迟敏感长跑进程的 GC 参数：降低 gen0 回收频率，消除随机毫秒级停顿。
+
+    gen0 阈值默认 700，代理这类对象流转密集的负载下每秒触发多次全链回收
+    （Close.com 实测：阈值提到 2 万后 p95 少 80~100ms、GC CPU 3%→0.5%）。
+    freeze() 把启动期常驻对象（导入的模块、配置表）钉在老年代，不再陪跑。
+    不做「关 GC」那种激进方案：asyncio 流与异常链确实产生循环引用。
+    """
+    try:
+        import gc
+        gc.collect(2)
+        if hasattr(gc, "freeze"):
+            gc.freeze()
+        gc.set_threshold(20000, 50, 100)
+        return gc.get_threshold()
+    except Exception:
+        return None
 
 
 def log(*a):
@@ -71,11 +132,6 @@ def log(*a):
     except Exception:
         pass
 
-
-def resource_path(name):
-    """支持 PyInstaller 打包（_MEIPASS）与源码运行两种模式的资源定位"""
-    base = getattr(sys, "_MEIPASS", None)
-    return Path(base) / name if base else Path(__file__).with_name(name)
 
 
 def _app_dir():
@@ -406,6 +462,9 @@ def proc_name_of_peer(peer_port, local_port):
     查不到就会把该连接当「未识别」放行（名单内的程序反而没被接管）。
     只在「表里压根找不到这行」时重试（重试强制刷新快照），找到行就立即返回，
     正常路径不增加任何延迟。
+
+    注意：本函数是**阻塞**的（同步 sleep + GetExtendedTcpTable 全表扫描），
+    调用方必须走 `_proc_name_of_peer_async()`，不要在事件循环里直接调。
     """
     if not IS_WIN:
         return None
@@ -417,6 +476,24 @@ def proc_name_of_peer(peer_port, local_port):
         if attempt + 1 < _TCP_LOOKUP_RETRIES:
             time.sleep(_TCP_LOOKUP_GAP)
     return None
+
+
+async def _proc_name_of_peer_async(peer_port, local_port):
+    """把「反查连接属于哪个进程」挪出事件循环。
+
+    实测（tests/perf/test_slow_callbacks.py，阈值 50 ms）：每条新连接会触发
+    最多 4 次重试，每次 15 ms 同步 sleep + 一次 GetExtendedTcpTable 全表扫描，
+    合计约 94 ms —— 全部发生在事件循环里。也就是说**每来一条连接就把整个代理
+    卡住 94 ms**，8 条并发就是将近 0.75 s 的事件循环停顿（这与 P8 并发档
+    吞吐只有设定值 0.58 倍的现象高度相关）。
+
+    这里整体丢进执行器线程：函数、参数、返回语义完全不变（还是同一份缓存、
+    同一套重试逻辑），只是不再占住事件循环。ctypes 调用与 time.sleep 都会
+    释放 GIL，放到线程里跑得动，也不会影响其他连接的转发。
+    """
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, proc_name_of_peer,
+                                      peer_port, local_port)
 
 
 def list_procs():
@@ -828,15 +905,6 @@ def _note_group_units(atoms):
         units.append([hold_txt, hold_sep])
     return units
 
-
-def _note_units_width(units, measure):
-    """一行的宽度：行首单元不算它前面的空格。"""
-    total = 0
-    for idx, u in enumerate(units):
-        if idx > 0 and u[1]:
-            total += measure(" ")
-        total += measure(u[0])
-    return total
 
 
 def _note_units_text(units):
@@ -1749,7 +1817,7 @@ class Bucket:
         if kbps == self.kbps:
             return
         self.kbps = kbps
-        self.rate = kbps * 128.0 if kbps else 0.0   # kbps * 1024 / 8 = B/s
+        self.rate = kbps * BITS_PER_KBPS / 8.0 if kbps else 0.0   # kbps → B/s
         self.tokens = min(self.tokens, self.cap()) if self.rate else 0.0
 
     def cap(self):
@@ -1890,6 +1958,51 @@ class DelayLine:
         """没有「排在自己前面、但还没真正写出」的数据 —— 此时才配走零延迟快路径"""
         return self.pending == 0 and self.q.empty()
 
+    def _peer_alive(self):
+        """写目标是否已经不可写。
+
+        asyncio 的 transport 在连接丢失后并不禁止 `write()`：它把数据静默丢掉，
+        并在累计超过 LOG_THRESHOLD_FOR_CONNLOST_WRITES 后每调用一次就打一条
+        `socket.send() raised exception.` 警告。iperf3 / 下载客户端提前断开时，
+        投递协程若不管，会对着死连接把整个积压队列空转完 —— 实测一轮 20s 的
+        测量能刷出上百条警告，同时白占限速桶和 CPU。
+
+        `write_eof()`（半关闭）在 Windows proactor / selector 上都只做
+        `shutdown(SHUT_WR)`，不会置 `_closing`，所以这里不会误伤「一端发完
+        FIN、另一端还要继续回数据」的正常场景；只有 close()/abort()/连接被
+        RST 触发的 _force_close() 才会置 _closing 并累加 _conn_lost。
+
+        测试替身（tests/test_unit_delayline.py 的 _Writer）没有这两个属性，
+        此时按「可写」处理，保持原有单测语义。
+        """
+        w = self.writer
+        closing = getattr(w, "is_closing", None)
+        if closing is not None:
+            try:
+                if closing():
+                    return False
+            except Exception:
+                return False
+        t = getattr(w, "transport", None)
+        if t is not None and getattr(t, "_conn_lost", 0):
+            return False
+        return True
+
+    async def _flush(self, data):
+        """写出一块，然后等 drain。
+
+        这里曾经改成「写缓冲超过 DRAIN_HIGH 才 drain」，理由是每块 drain() 会多
+        一次协程调度。受控 A/B 实测没有收益（8000 / 50000 kbps 两档交替顺序：
+        −1.52% / +0.43%，64MB 环回 B/A=1.000×），而 drain() 在缓冲没堆积时本来就
+        立即返回 —— 省下的调度开销小到测不出来，反而多了一次
+        get_write_buffer_size() 与一个分支。证据不支持就退回无条件 drain：
+        语义更简单，背压行为也和 asyncio 文档一致。
+        """
+        if not self._peer_alive():
+            raise ConnectionError("writer already closed")
+        self.writer.write(data)
+        await self.writer.drain()
+
     def _drain(self):
         """丢弃排队中的数据并把 pending 归零计数。
 
@@ -1904,6 +2017,29 @@ class DelayLine:
             if item is not None:
                 self.pending = max(0, self.pending - len(item[0]))
 
+    @staticmethod
+    def _schedule_reap(t):
+        """同步上下文里取消任务后，排队一个独立协程把它「等完」。
+
+        `_mark_dead()` 是同步方法，没法 await；只 cancel 不 await 会留下
+        pending Task，事件循环一关就打 `Task was destroyed but it is pending!`。
+        这里用 create_task 补上收尸，且不吞掉调用方自己的取消语义。
+        """
+        if t is None or t.done():
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+
+        async def _swallow():
+            try:
+                await DelayLine._reap(t)
+            except BaseException:
+                pass
+
+        loop.create_task(_swallow())
+
     def _mark_dead(self):
         """所有退出路径的唯一出口：置位、清队列、唤醒生产者、取消投递协程"""
         if self.dead:
@@ -1913,6 +2049,7 @@ class DelayLine:
         t = self.task
         if t is not None and not t.done() and t is not asyncio.current_task():
             t.cancel()
+            self._schedule_reap(t)
 
     def abort(self):
         """连接已被掐断，积压数据不必再投递。
@@ -1923,12 +2060,20 @@ class DelayLine:
         self._mark_dead()
 
     async def submit(self, data, delay, gen):
+        # 生产端也要检查：消费者死掉后若只靠「submit 直接丢弃」，pipe 仍会
+        # 一直从上游读、一路丢到 EOF，限速桶被无意义占用。这里收敛成一次
+        # ConnectionError，让 run_tunnel 走 hard_stop 把整条连接拆掉。
+        # abort() 必须在 raise 之前，确保卡在满队列 q.put 上的生产者被唤醒。
+        # 检查放在 dead 之前：消费者因对端断开而退出时 dead 已置位，也必须
+        # 让生产者停下来，而不是继续静默丢弃。
+        if not self._peer_alive():
+            self.abort()
+            raise ConnectionError("writer already closed")
         if self.dead:
             return
         if delay <= 0 and self._idle():
             # 零延迟且无在途数据：直接写。直连档靠这条快路径保持满速，不被队列调度拖慢
-            self.writer.write(data)
-            await self.writer.drain()
+            await self._flush(data)
             return
         self.pending += len(data)
         await self.q.put((data, time.monotonic() + delay, gen))
@@ -1947,8 +2092,7 @@ class DelayLine:
                 if wait > 0:
                     await nap(wait, gen)         # 切场景 / 停止时立刻放行
                 try:
-                    self.writer.write(data)
-                    await self.writer.drain()
+                    await self._flush(data)
                 except (ConnectionError, OSError):
                     return
                 finally:
@@ -1961,6 +2105,26 @@ class DelayLine:
             # 包括 CancelledError 在内的所有退出路径都要收敛到这里，
             # 否则生产者会卡在满队列的 put 上、aclose 会卡在哨兵 put 上。
             self._mark_dead()
+
+    @staticmethod
+    async def _reap(t):
+        """取消消费者任务并**等它真正结束**。
+
+        只 `cancel()` 不 `await` 会留下一个 pending 的 Task；事件循环随后一关
+        （或 GC 一回收）就打 `Task was destroyed but it is pending!`。iperf3
+        `-P 8` 每轮收尾必现，这是连接级任务泄漏而不是无害的日志噪音。
+        限时 1s 兜底，避免卡在 drain() 上的消费者把连接拆除流程拖死。
+        """
+        if t.done():
+            return
+        t.cancel()
+        try:
+            await asyncio.wait_for(asyncio.gather(t, return_exceptions=True), 1.0)
+        except (asyncio.TimeoutError, TimeoutError):
+            return
+        except asyncio.CancelledError:
+            # 调用方自己正在被取消：不吞掉取消语义，直接向上传播
+            raise
 
     async def aclose(self, timeout=None):
         """排空队列后再返回。
@@ -1977,8 +2141,8 @@ class DelayLine:
         self.task = None
         if self.dead or t.done():
             # 消费者已经没了：没有排空的可能，立刻返回（旧实现在这里会永久阻塞）
-            t.cancel()
             self._drain()
+            await self._reap(t)
             return
         if timeout is None:
             # 64KB 一块、每块至少留 30s 余量；速率信息由 pipe 通过 rate_kbps 传入更准，
@@ -1990,10 +2154,12 @@ class DelayLine:
             await asyncio.wait_for(self.q.put(None), timeout=min(15.0, timeout))
             await asyncio.wait_for(t, timeout=max(0.01, deadline - time.monotonic()))
         except (asyncio.TimeoutError, TimeoutError):
-            t.cancel()
             self._mark_dead()
+            await self._reap(t)
         except BaseException:
-            t.cancel()
+            # 调用方（pipe）本身正被取消，这里 await 会立刻再抛 CancelledError
+            # 并掩盖原异常。_mark_dead() 会用 create_task 排队收尸，既保住取消
+            # 语义，也不会留下 pending Task。
             self._mark_dead()
             raise
 
@@ -2005,6 +2171,11 @@ class DelayLine:
 async def pipe(reader, writer, prof, direction, ctx):
     """注意：每块数据都重新读取 G.profile，保证「停止模拟 / 切换场景」对已在途的连接立即生效"""
     gen = G.gen
+    # 必须在循环外定义：finally 里要用它估算排空超时。旧实现放在循环体内，
+    # 连接若在首次 read() 就 EOF / 抛异常，finally 会触发 UnboundLocalError，
+    # 于是 aclose() 根本没机会执行，DelayLine 的投递协程被整体遗弃
+    # （iperf3 -P 8 收尾时成片 `Task was destroyed but it is pending!`）。
+    rate_key = "up_kbps" if direction == "up" else "down_kbps"
     dl = DelayLine(writer, ctx.label).start()
     try:
         while True:
@@ -2028,7 +2199,6 @@ async def pipe(reader, writer, prof, direction, ctx):
             if not ctx.fixed:
                 # 全局共享令牌桶：一条链路一份带宽，并发连接分摊而不是各拿一份。
                 # 直通连接不参与（否则它会把全局桶的速率刷成 0，等于给所有人解限速）。
-                rate_key = "up_kbps" if direction == "up" else "down_kbps"
                 bucket = G.bucket_up if direction == "up" else G.bucket_down
                 if bucket is None:                 # 服务未初始化时的兜底
                     bucket = Bucket(prof.get(rate_key, 0))
@@ -2057,7 +2227,7 @@ async def pipe(reader, writer, prof, direction, ctx):
         # 4MB 积压需 125s）会把尾部整段丢掉。直连/未限速时给 30s 兜底即可。
         rate_kbps = prof.get(rate_key, 0) if not ctx.fixed else 0
         if rate_kbps and dl.pending:
-            need = dl.pending * 8.0 / (rate_kbps * 1000.0) + 30.0
+            need = dl.pending * 8.0 / (rate_kbps * BITS_PER_KBPS) + 30.0
         else:
             need = 30.0
         await dl.aclose(timeout=max(30.0, min(need, 600.0)))
@@ -2396,7 +2566,7 @@ async def http_keepalive_relay(ctx, c_reader, c_writer, s_reader, s_writer,
         # 排空延迟队列再收尾，否则响应尾部的最后几块会被丢（与 pipe() 同规则）
         rate_kbps = 0 if ctx.fixed else G.profile.get("down_kbps", 0)
         if rate_kbps and dl.pending:
-            need = dl.pending * 8.0 / (rate_kbps * 1000.0) + 30.0
+            need = dl.pending * 8.0 / (rate_kbps * BITS_PER_KBPS) + 30.0
         else:
             need = 30.0
         await dl.aclose(timeout=max(30.0, min(need, 600.0)))
@@ -2434,6 +2604,7 @@ def _is_ip_literal(host):
 
 
 async def handle_proxy(reader, writer):
+    _tcp_nodelay(writer)               # accept 侧默认开着 Nagle，见 _tcp_nodelay 注释
     G.conns_total += 1
     G.conns_active += 1
     ctx = ConnCtx("?")
@@ -2448,7 +2619,9 @@ async def handle_proxy(reader, writer):
         try:
             peer = writer.get_extra_info("peername")
             if peer and len(peer) >= 2:
-                pname = proc_name_of_peer(peer[1], G.proxy_port)
+                # 必须走 async 版本：进程名反查是阻塞的（≈94 ms/连接），
+                # 放在事件循环里会卡住所有其他连接。
+                pname = await _proc_name_of_peer_async(peer[1], G.proxy_port)
         except Exception:
             pname = None
         if pname:
@@ -3454,6 +3627,7 @@ async def push_to_peer(peer, item_ids, combo_ids=None):
 async def handle_share(reader, writer):
     """共享端口上的小 HTTP 服务：只认 /api/hello 与 /api/share。
     刻意不复用控制台那一套 —— 这个端口是对局域网开放的，暴露面越小越好。"""
+    _tcp_nodelay(writer)
     try:
         try:
             method, path, headers, body = await read_http_request(
@@ -3913,10 +4087,16 @@ async def _h_profile(writer, method, body):
     if not isinstance(data, dict):
         send_response(writer, 400, JSON_CT, b'{"error":"bad request"}')
         return
-    prof = default_profile("自定义")
-    for k, v in data.items():
-        if k in prof and k != "name" and isinstance(v, (int, float)):
-            prof[k] = max(0, v)
+    # 与「保存/应用用户预设」走同一套收敛逻辑（_norm_user_profile）：
+    # 排除布尔、按 spec 的 params.max 夹上限、忽略未知键。
+    #
+    # 早期这里自己写了一份 `max(0, v)`，与 _norm_user_profile 不一致，后果：
+    #   {"down_kbps": true}  → True 落库（isinstance(True, int) 为真），
+    #                          /api/status 返回 "down_kbps": true，前端与令牌桶都读不懂；
+    #   {"down_kbps": 1e18}  → 原样落库，而 Android 侧同一请求会被夹到 spec 上限，
+    #                          两端对同一份配置给出不同状态 —— 违反「双端同构」。
+    # 自定义参数是**唯一直接接收外部任意 JSON 的入口**，恰恰最该用最强的校验。
+    prof = _norm_user_profile("自定义", data)
     await set_profile(prof, "custom")
     log_event("config", "应用自定义参数")
     send_response(writer, 200, JSON_CT, b'{"ok":true}')
@@ -4139,6 +4319,7 @@ async def _h_inbox_resolve(writer, method, body):
 
 
 async def handle_ctrl(reader, writer):
+    _tcp_nodelay(writer)               # 控制接口是小包高频路径，见 _tcp_nodelay 注释
     try:
         try:
             method, path, headers, body = await read_http_request(
@@ -4192,6 +4373,14 @@ async def serve(host, proxy_port, ctrl_port):
     G.bucket_up = Bucket(0)
     G.bucket_down = Bucket(0)
     init_identity()                   # 「我是谁」——局域网共享要用
+    # 慢回调探针放在这里而不是只在 CLI 入口：GUI、测试夹具、嵌入式调用
+    # 都走 serve()，探针才真正覆盖到运行中的那条事件循环。
+    _enable_slow_callback_probe()
+    # GC 参数与慢回调探针同理：谁启动服务谁生效。启动期一次性调用，
+    # 之后进程内的 gen0 阈值/freeze 状态固定。
+    _gc_thr = _tune_gc()
+    if _gc_thr:
+        log("GC 参数：gen0 阈值 %s（默认 700）" % (_gc_thr,))
     proxy = await asyncio.start_server(handle_proxy, host, proxy_port, limit=1 << 20)
     ctrl = await asyncio.start_server(handle_ctrl, "127.0.0.1", ctrl_port)
     G.proxy_host = host
@@ -4206,6 +4395,39 @@ async def serve(host, proxy_port, ctrl_port):
     return proxy, ctrl
 
 
+def _enable_slow_callback_probe():
+    """诊断用：把事件循环里「堵了超过 N 毫秒」的回调打印出来（默认关闭）。
+
+    用法：`WN_SLOW_CB_MS=50`（配合 PYTHONASYNCIODEBUG=1），_perf_profile.py
+    的 --slow-cb 会自动设置。这是「切场景不即时 / 界面卡顿」最直接的证据 ——
+    py-spy 只能看到 CPU 热点，看不到「谁把 200ms 的同步调用塞进了事件循环」。
+
+    为什么不常开：asyncio 的 debug 模式要记录每个协程的来源栈，吞吐会明显下降。
+    """
+    raw = (os.environ.get("WN_SLOW_CB_MS") or "").strip()
+    if not raw:
+        return
+    try:
+        sec = max(1, int(raw)) / 1000.0
+    except ValueError:
+        return
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return
+    # asyncio 只有在 debug 模式下才会把「慢回调」打印出来，光设阈值没有用。
+    # 这里一并打开 debug（仅在显式设置 WN_SLOW_CB_MS 时，默认为关闭）。
+    try:
+        loop.set_debug(True)
+    except Exception:
+        pass
+    loop.slow_callback_duration = sec
+    try:
+        log("[perf] 慢回调告警阈值 %.0f ms（仅诊断使用，勿用于正式运行）" % (sec * 1000))
+    except Exception:
+        pass
+
+
 async def main():
     ap = argparse.ArgumentParser(description="WeakNet —— App 弱网测试工具")
     ap.add_argument("--host", default="127.0.0.1",
@@ -4213,6 +4435,8 @@ async def main():
     ap.add_argument("--proxy-port", type=int, default=8888, help="代理端口（默认 8888）")
     ap.add_argument("--ctrl-port", type=int, default=8899, help="控制台端口（默认 8899）")
     args = ap.parse_args()
+
+    _enable_slow_callback_probe()
 
     G.proxy_host = args.host
     G.proxy_port = args.proxy_port

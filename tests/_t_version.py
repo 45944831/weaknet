@@ -12,6 +12,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -108,10 +109,51 @@ def check_exe():
         and "StringStruct('FileVersion', '%s')" % W.VERSION in vi)
 
 
+def _newest(paths):
+    ts = [os.path.getmtime(p) for p in paths if os.path.exists(p)]
+    return max(ts) if ts else 0.0
+
+
+def _fmt(ts):
+    return time.strftime("%m-%d %H:%M:%S", time.localtime(ts))
+
+
+def check_artifacts():
+    """C5/C6：产物不能比源码旧。
+
+    `spec.json` 与 Java 源码都是**打进包里**的：只改源码不重打，所有单测仍然
+    全绿，两端却跑着旧内容。v1.1.16 踩过两次 ——
+      * 文案改完没重打：EXE 里的 spec.json 还是旧的（跨端校验查不出来，它比的是源码）；
+      * `weaknet.py` 15:51 改过，`WeakNet.exe` 却是 15:43 的，靠人眼看 mtime 才发现。
+    这里只比 mtime，不比内容：内容对不对由跨端一致性与 spec_hash 校验负责。
+    """
+    spec = os.path.join(ROOT, "spec", "spec.json")
+    py_src = [os.path.join(ROOT, f) for f in os.listdir(ROOT) if f.endswith(".py")]
+
+    java_src = [os.path.join(ROOT, "android", "AndroidManifest.xml"), spec]
+    for dirpath, _dirs, files in os.walk(os.path.join(ROOT, "android", "src")):
+        java_src += [os.path.join(dirpath, f) for f in files if f.endswith(".java")]
+
+    for tag, art, srcs in (
+            ("C5 EXE 产物比源码新", os.path.join(ROOT, "WeakNet.exe"), py_src + [spec]),
+            ("C6 APK 产物比源码新", os.path.join(ROOT, "android", "WeakNet.apk"), java_src)):
+        if not os.path.exists(art):
+            rec(tag, True, "产物不存在，跳过（仓库可不带产物）")
+            continue
+        a, n = os.path.getmtime(art), _newest(srcs)
+        # 容差 2s：打包与保存源码可能落在同一秒
+        ok = a + 2 >= n
+        detail = "产物 %s / 最新源码 %s" % (_fmt(a), _fmt(n))
+        if not ok:
+            detail += "（产物旧了 %.0fs，必须重打）" % (n - a)
+        rec(tag, ok, detail)
+
+
 def main():
     check_python()
     check_android()
     check_exe()
+    check_artifacts()
     bad = [x for x in R if not x[1]]
     print("\n%d 通过 / %d 失败" % (len(R) - len(bad), len(bad)), flush=True)
     return 1 if bad else 0

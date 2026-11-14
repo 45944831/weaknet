@@ -1,0 +1,160 @@
+{
+ "conn0": {
+  "threads": 52,
+  "by_name": [
+   [
+    "mali-utility-wo",
+    8
+   ],
+   [
+    "pool-34-thread-",
+    5
+   ],
+   [
+    "ctrl-req",
+    4
+   ],
+   [
+    "FramePolicy",
+    2
+   ],
+   [
+    "binder:10322_5",
+    2
+   ],
+   [
+    "com.weaknet.app",
+    1
+   ],
+   [
+    "Signal Catcher",
+    1
+   ],
+   [
+    "perfetto_hprof_",
+    1
+   ],
+   [
+    "Jit thread pool",
+    1
+   ],
+   [
+    "HeapTaskDaemon",
+    1
+   ]
+  ]
+ },
+ "conn10": {
+  "threads": 82,
+  "conns_active": 10,
+  "total": 445,
+  "by_name": [
+   [
+    "conn",
+    10
+   ],
+   [
+    "pipe-up",
+    10
+   ],
+   [
+    "pipe-down",
+    10
+   ],
+   [
+    "mali-utility-wo",
+    8
+   ],
+   [
+    "pool-34-thread-",
+    5
+   ],
+   [
+    "ctrl-req",
+    4
+   ],
+   [
+    "FramePolicy",
+    2
+   ],
+   [
+    "binder:10322_5",
+    2
+   ],
+   [
+    "com.weaknet.app",
+    1
+   ],
+   [
+    "Signal Catcher",
+    1
+   ],
+   [
+    "perfetto_hprof_",
+    1
+   ],
+   [
+    "Jit thread pool",
+    1
+   ]
+  ]
+ },
+ "conn50": {
+  "threads": 202,
+  "conns_active": 50,
+  "total": 495,
+  "by_name": [
+   [
+    "conn",
+    50
+   ],
+   [
+    "pipe-up",
+    50
+   ],
+   [
+    "pipe-down",
+    50
+   ],
+   [
+    "mali-utility-wo",
+    8
+   ],
+   [
+    "pool-34-thread-",
+    5
+   ],
+   [
+    "ctrl-req",
+    4
+   ],
+   [
+    "FramePolicy",
+    2
+   ],
+   [
+    "binder:10322_5",
+    2
+   ],
+   [
+    "com.weaknet.app",
+    1
+   ],
+   [
+    "Signal Catcher",
+    1
+   ],
+   [
+    "perfetto_hprof_",
+    1
+   ],
+   [
+    "Jit thread pool",
+    1
+   ]
+  ]
+ },
+ "after": {
+  "threads": 56
+ }
+}

@@ -1,0 +1,46 @@
+{
+  "schema": 1,
+  "date": "2026-11-13 18:04:01",
+  "purpose": "P0-2 慢回调清单：事件循环里超过阈值的同步阻塞回调",
+  "threshold_ms": 50,
+  "workload": {
+    "kb": 512,
+    "rounds": 3,
+    "rate_kbps": 8000,
+    "bytes_moved": 1572864
+  },
+  "probe_armed": true,
+  "total_slow_callbacks": 3,
+  "max_ms": 94.0,
+  "by_kind": {
+    "<Task pending name='Task-N' coro=<handle_proxy() running at E:\\WorkBuddy1\\N-N-N-N-N-N\\weaknet\\weaknet.py:N> wait_for=<Fu": {
+      "count": 3,
+      "max_ms": 94.0
+    }
+  },
+  "entries": [
+    {
+      "seconds": 0.094,
+      "ms": 94.0,
+      "handle": "<Task pending name='Task-13' coro=<handle_proxy() running at E:\\WorkBuddy1\\2026-10-13-15-51-24\\weaknet\\weaknet.py:2584> wait_for=<Future pending cb=[Task.task_wakeup()] created at D:\\python\\lib\\asyncio\\base_events.py:429> created at D:\\python\\lib\\asyncio\\streams.py:242>",
+      "logger": "asyncio"
+    },
+    {
+      "seconds": 0.094,
+      "ms": 94.0,
+      "handle": "<Task pending name='Task-24' coro=<handle_proxy() running at E:\\WorkBuddy1\\2026-10-13-15-51-24\\weaknet\\weaknet.py:2584> wait_for=<Future pending cb=[Task.task_wakeup()] created at D:\\python\\lib\\asyncio\\base_events.py:429> created at D:\\python\\lib\\asyncio\\streams.py:242>",
+      "logger": "asyncio"
+    },
+    {
+      "seconds": 0.094,
+      "ms": 94.0,
+      "handle": "<Task pending name='Task-35' coro=<handle_proxy() running at E:\\WorkBuddy1\\2026-10-13-15-51-24\\weaknet\\weaknet.py:2584> wait_for=<Future pending cb=[Task.task_wakeup()] created at D:\\python\\lib\\asyncio\\base_events.py:429> created at D:\\python\\lib\\asyncio\\streams.py:242>",
+      "logger": "asyncio"
+    }
+  ],
+  "limitations": [
+    "进程内引擎 + 本机回环源站，与真机/EXE 的线程画像不同",
+    "asyncio debug 模式会拖慢事件循环，本清单只用于定位阻塞点，不用于性能结论",
+    "阈值 50 ms 是「用户能感知的卡顿」量级，不是通用标准"
+  ]
+}

@@ -1,0 +1,228 @@
+{
+  "schema": 1,
+  "date": "2026-11-13 17:14:58",
+  "purpose": "P2-2 冷启动归因：源码导入耗时 + 与历史 EXE 冷启动的差值分解",
+  "python": "3.10.11",
+  "repeats": 5,
+  "import_median_ms": 198.2,
+  "import_min_ms": 195.3,
+  "import_max_ms": 202.6,
+  "per_run": [
+    {
+      "run": 1,
+      "import_total_ms": 201.8,
+      "top_modules": [
+        {
+          "module": "weaknet_gui",
+          "cum_ms": 201.8,
+          "self_ms": 2.6
+        },
+        {
+          "module": "site",
+          "cum_ms": 113.3,
+          "self_ms": 3.5
+        },
+        {
+          "module": "encodings",
+          "cum_ms": 7.6,
+          "self_ms": 3.9
+        },
+        {
+          "module": "io",
+          "cum_ms": 2.6,
+          "self_ms": 1.4
+        },
+        {
+          "module": "zipimport",
+          "cum_ms": 2.2,
+          "self_ms": 0.2
+        },
+        {
+          "module": "encodings.utf_8",
+          "cum_ms": 1.1,
+          "self_ms": 1.1
+        }
+      ]
+    },
+    {
+      "run": 2,
+      "import_total_ms": 202.6,
+      "top_modules": [
+        {
+          "module": "weaknet_gui",
+          "cum_ms": 202.6,
+          "self_ms": 2.1
+        },
+        {
+          "module": "site",
+          "cum_ms": 115.8,
+          "self_ms": 3.6
+        },
+        {
+          "module": "encodings",
+          "cum_ms": 5.9,
+          "self_ms": 3.2
+        },
+        {
+          "module": "io",
+          "cum_ms": 2.9,
+          "self_ms": 1.4
+        },
+        {
+          "module": "zipimport",
+          "cum_ms": 2.0,
+          "self_ms": 0.2
+        },
+        {
+          "module": "_frozen_importlib_external",
+          "cum_ms": 1.1,
+          "self_ms": 0.6
+        }
+      ]
+    },
+    {
+      "run": 3,
+      "import_total_ms": 195.3,
+      "top_modules": [
+        {
+          "module": "weaknet_gui",
+          "cum_ms": 195.3,
+          "self_ms": 2.3
+        },
+        {
+          "module": "site",
+          "cum_ms": 106.5,
+          "self_ms": 3.5
+        },
+        {
+          "module": "encodings",
+          "cum_ms": 6.1,
+          "self_ms": 3.2
+        },
+        {
+          "module": "io",
+          "cum_ms": 3.0,
+          "self_ms": 1.6
+        },
+        {
+          "module": "zipimport",
+          "cum_ms": 1.8,
+          "self_ms": 0.2
+        },
+        {
+          "module": "_frozen_importlib_external",
+          "cum_ms": 1.1,
+          "self_ms": 0.6
+        }
+      ]
+    },
+    {
+      "run": 4,
+      "import_total_ms": 198.2,
+      "top_modules": [
+        {
+          "module": "weaknet_gui",
+          "cum_ms": 198.2,
+          "self_ms": 3.5
+        },
+        {
+          "module": "site",
+          "cum_ms": 115.6,
+          "self_ms": 3.8
+        },
+        {
+          "module": "encodings",
+          "cum_ms": 7.9,
+          "self_ms": 4.3
+        },
+        {
+          "module": "io",
+          "cum_ms": 3.5,
+          "self_ms": 1.6
+        },
+        {
+          "module": "zipimport",
+          "cum_ms": 1.8,
+          "self_ms": 0.2
+        },
+        {
+          "module": "_frozen_importlib_external",
+          "cum_ms": 1.2,
+          "self_ms": 0.6
+        }
+      ]
+    },
+    {
+      "run": 5,
+      "import_total_ms": 196.4,
+      "top_modules": [
+        {
+          "module": "weaknet_gui",
+          "cum_ms": 196.4,
+          "self_ms": 2.5
+        },
+        {
+          "module": "site",
+          "cum_ms": 105.3,
+          "self_ms": 3.8
+        },
+        {
+          "module": "encodings",
+          "cum_ms": 6.1,
+          "self_ms": 3.0
+        },
+        {
+          "module": "io",
+          "cum_ms": 2.3,
+          "self_ms": 1.1
+        },
+        {
+          "module": "zipimport",
+          "cum_ms": 1.7,
+          "self_ms": 0.2
+        },
+        {
+          "module": "_frozen_importlib_external",
+          "cum_ms": 0.9,
+          "self_ms": 0.5
+        }
+      ]
+    }
+  ],
+  "exe_history": {
+    "source": "E:\\WorkBuddy1\\2026-10-13-15-51-24\\_measure_20261029\\win_measure.json",
+    "cold_start_median_s": 2.66,
+    "exe_size_mb": 10.34,
+    "mei_mb": 21.4,
+    "rss_mb": 51.4,
+    "build": "v1.1.16 / 11-06 旧产物，未重打包"
+  },
+  "attribution": {
+    "import_ms": 198.2,
+    "residual_ms": 2461.8,
+    "residual_covers": [
+      "onefile 解包到 %TEMP%\\_MEI*",
+      "解释器引导",
+      "Tk 根窗口创建",
+      "weaknet 引擎启动至 /api/status 可用"
+    ],
+    "residual_share_pct": 92.5
+  },
+  "conclusion": "源码导入仅占冷启动约 7.6%，其中 site 初始化就占了一半以上；把全部模块导入优化到 0 也最多省 0.2s，无法达成 ≤2.0s。因此 P2-2 的「精简 hiddenimports / 延迟导入」不是有效路径，应优先评估 onefile → onedir（去掉每次 21.4MB 解包）与Tk 根窗口/引擎启动的延后初始化。真正的 I/O vs CPU 归因仍需提权后的 WPR/WPA。",
+  "wpr_full_attribution": {
+    "status": "未执行：WPR 系统级 ETW 录制需要管理员权限，当前会话非管理员",
+    "admin_check": "net session 失败",
+    "commands": [
+      "wpr -start GeneralProfile -start DiskIO -start FileIO -filemode",
+      "<启动一次 WeakNet.exe，等 /api/status 返回，再退出>",
+      "wpr -stop trace.etl",
+      "wpaexporter trace.etl -output out.csv"
+    ]
+  },
+  "limitations": [
+    "EXE 未重打包，冷启动数字来自 2026-10-29 历史测量，非当前源码构建",
+    "源码导入不含 PyInstaller bootloader / onefile 解包开销",
+    "residual 是差值，不是 WPR 归因，不能据此断言瓶颈在磁盘或 CPU",
+    "目标 ≤2.0s 尚未验证；要验证必须先产出新 EXE 并在同一台机器重测"
+  ]
+}

@@ -104,6 +104,8 @@ class Engine:
         self.ctrl_port = ctrl_port
         self.proxy = ("127.0.0.1", proxy_port)
         self.api = CtrlClient("127.0.0.1", ctrl_port)
+        # 引擎自己那条事件循环。诊断用（例如确认慢回调探针是否真的生效）需要它。
+        self.loop = None
 
     def apply(self, **params):
         """下发自定义参数（会顺带打开限速）"""
@@ -204,7 +206,9 @@ def engine(tmp_store, monkeypatch):
         th.stop()
         pytest.fail("进程内引擎启动失败：%r" % (th.error,))
     try:
-        yield Engine(th.proxy_port, th.ctrl_port)
+        eng = Engine(th.proxy_port, th.ctrl_port)
+        eng.loop = th.loop
+        yield eng
     finally:
         th.stop()
         reset_engine_state()

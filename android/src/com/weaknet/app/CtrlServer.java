@@ -607,9 +607,20 @@ public class CtrlServer implements Runnable {
             if (method.equals("POST") && "/api/profile".equals(path)) {
                 try {
                     JSONObject o = new JSONObject(body);
-                    WeakNet.I.setProfile(Profile.custom(o), "custom");
-                    WeakNet.I.log("config", "应用自定义参数");
-                    respond(200, JSON_CT, "{\"ok\":true}".getBytes("UTF-8"));
+                    Profile p = Profile.custom(o);
+                    WeakNet.I.setProfile(p, "custom");
+                    // 开启态下应用「不构成任何限制」的参数（全零/只动 stall 这类
+                    // 字段）＝用户要的效果已经是「不限速」：开关跟着回到关，
+                    // 避免 limit_on=true 的假开启（复测 P2；与 Windows 端
+                    // set_profile 的 has_limits 推断同语义）。
+                    if (WeakNet.I.limitOn && !p.hasLimits()) {
+                        WeakNet.I.setLimitOn(false, null);
+                        WeakNet.I.log("config", "自定义参数不含任何限制，限速开关已复位为关");
+                    } else {
+                        WeakNet.I.log("config", "应用自定义参数");
+                    }
+                    respond(200, JSON_CT, ("{\"ok\":true,\"limit_on\":" + WeakNet.I.limitOn + "}")
+                            .getBytes("UTF-8"));
                 } catch (Exception e) {
                     respond(400, JSON_CT, "{\"error\":\"bad request\"}".getBytes("UTF-8"));
                 }
@@ -626,16 +637,11 @@ public class CtrlServer implements Runnable {
                 }
                 Profile restore = null;
                 if (enable) {
-                    restore = buildKeyProfile(WeakNet.I.presetKey);   // 内置 / 自定义场景
-                    // presetKey 为 "custom" 时 buildKeyProfile 认不出来（它不是内置 key，
-                    // 也不是 u:<id>），此时当前 profile 就是用户刚设的那份参数，必须原样
-                    // 保留。若回落到 lastProfile，用户把参数全调成 0（或只调了 stall 这类
-                    // 不算 limits 的字段）再点开启，参数会被上一次的场景整个覆盖回去。
-                    if (restore == null && "custom".equals(WeakNet.I.presetKey)) {
-                        restore = WeakNet.I.profile;
-                    }
-                    if (restore == null) restore = WeakNet.I.lastProfile;
-                    if (restore == null) restore = new Profile();
+                    // 解析收敛到 WeakNet.resolveEnableRestore（复测 4.1 修复：
+                    // custom 在 关→开 后不再取被「关闭」清空的当前 profile，
+                    // 改回落 lastProfile —— 真机三步复现过假开启：4000 → 关 → 再开 down=0）
+                    restore = WeakNet.I.resolveEnableRestore(
+                            buildKeyProfile(WeakNet.I.presetKey));
                 }
                 WeakNet.I.setLimitOn(enable, restore);
                 // 选中的是弱网组合时，上面那支静态 restore 不算数：
@@ -679,23 +685,57 @@ public class CtrlServer implements Runnable {
             }
             if (method.equals("POST") && "/api/vpn".equals(path)) {
                 boolean enable = false;
+                int mtu = 0;
                 try {
-                    enable = new JSONObject(body).optBoolean("enable");
+                    JSONObject o = new JSONObject(body);
+                    enable = o.optBoolean("enable");
+                    mtu = o.optInt("mtu", 0);
                 } catch (Exception e) {
                     respond(400, JSON_CT, "{\"error\":\"bad request\"}".getBytes("UTF-8"));
                     return;
                 }
                 android.content.Intent i = new android.content.Intent(ctx, VpnNetService.class);
+                boolean rebuilt = false;
                 if (enable) {
-                    // ACTION_START：显式启动意图，服务会清除 userStopped，保证停止后能再次接管
-                    i.setAction(VpnNetService.ACTION_START);
-                    if (android.os.Build.VERSION.SDK_INT >= 26) ctx.startForegroundService(i);
-                    else ctx.startService(i);
+                    // 实验档（MTU/MSS 的 A/B 用）：必须在起服务之前落档 —— tun 一旦建立，
+                    // MTU 就定了，事后再改只对下次生效。
+                    //
+                    // 为什么走这里而不是 `am start-foreground-service -e mtu 16384`：
+                    // VpnNetService 在清单里声明了 android:permission="BIND_VPN_SERVICE"，
+                    // adb shell(uid 2000) 去 start 会被系统拒掉：
+                    //   Error: Requires permission android.permission.BIND_VPN_SERVICE
+                    // 所以真机 A/B 只能借控制接口这条「App 自己发起的」路径。
+                    if (mtu != 0 && !VpnNetService.applyMtuTier(mtu)) {
+                        respond(400, JSON_CT,
+                                ("{\"error\":\"bad mtu\",\"tiers\":[1280,1500,9000,16384]}")
+                                        .getBytes("UTF-8"));
+                        return;
+                    }
+                    // VPN 已在运行时只改静态档会「假生效」：tun0 实际还是旧 MTU，
+                    // 响应却报新档（真机复测 P1 实锤：16384 → tun0 仍 1500）。
+                    // 用既有的 rebuild 重建通道（stop + 700ms 后 ACTION_START），
+                    // 新 tun 按新档建立；现有会话会被拆掉——切实验档本来就是
+                    // A/B 动作，语义等同「先关再带档开」。
+                    if (mtu != 0 && VpnNetService.active) {
+                        VpnNetService.rebuild(ctx);
+                        rebuilt = true;
+                    } else {
+                        // ACTION_START：显式启动意图，服务会清除 userStopped，保证停止后能再次接管
+                        i.setAction(VpnNetService.ACTION_START);
+                        if (android.os.Build.VERSION.SDK_INT >= 26) ctx.startForegroundService(i);
+                        else ctx.startService(i);
+                    }
                 } else {
                     // 统一走服务内部的停止入口：stopService 停不掉被系统 bind 的 VpnService
                     VpnNetService.stop(ctx);
                 }
-                respond(200, JSON_CT, "{\"ok\":true}".getBytes("UTF-8"));
+                respond(200, JSON_CT,
+                        ("{\"ok\":true,\"mtu\":" + VpnNetService.tunMtu()
+                                + ",\"mss\":" + VpnNetService.defaultMss()
+                                + ",\"rebuilt\":" + rebuilt
+                                + ",\"effective_mtu\":" + VpnNetService.effectiveMtu()
+                                + ",\"ready\":" + VpnNetService.mtuReady() + "}")
+                                .getBytes("UTF-8"));
                 return;
             }
             if (method.equals("POST") && "/api/listen".equals(path)) {
@@ -887,6 +927,14 @@ public class CtrlServer implements Runnable {
             o.put("listen", listen);
             o.put("lan_ip", WeakNet.I.lanIp());
             o.put("vpn_active", VpnNetService.active);
+            // MTU 三件套（复测 §3.6 就绪语义）：requested=静态档；effective=tun 实际
+            // 生效档（establish 时落档，stop 清 0）；两者相等且 tun 存在才 ready——
+            // rebuild 是异步的，采集脚本必须轮询到 ready 才能开测，否则产出
+            // 「标签正确、前提错误」的脏样本。
+            o.put("mtu", VpnNetService.tunMtu());
+            o.put("mss", VpnNetService.defaultMss());
+            o.put("effective_mtu", VpnNetService.effectiveMtu());
+            o.put("mtu_ready", VpnNetService.mtuReady());
             // 接管范围（与 Windows 端同构，两端共用同一份控制台页面）
             JSONObject sc = new JSONObject();
             sc.put("mode", WeakNet.I.scopeMode);

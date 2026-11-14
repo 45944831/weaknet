@@ -1,0 +1,166 @@
+# 性能门禁：夜间跑一次，PR 跑快速子集，Release 归档基线。
+#
+# 为什么不做成 PR 必跑阻断项：共享 runner 的噪声可达 15%~30%，把性能做成
+# PR 阻断项只会训练大家「重跑一次就绿了」。这里改成夜间 + 手动 + PR 快速子集
+# （子集失败只标红不拦合并），失败标红但不拦合并。
+#
+# 2026-11-13 修复一：原来直接读仓库里的**本机基线**（Windows-10 26100 / 12 核），
+# 而 windows-latest runner 是 Windows Server / 2 核。same_machine() 因此永远返回
+# different-machine，compare() 只记录不判定 —— 实测注入 -42% 退化也不会失败，
+# 门禁形同虚设。现在改成「runner 专属基线」：首次运行生成、actions/cache 复用，
+# 配合 WN_PERF_CI=1 的同组判定规则，门禁才会真正比较。
+#
+# 2026-11-13 修复二：光有「runner 专属基线」还不够。基线文件结构
+# （ci 在顶层）与判定函数（只在 fingerprint 里找 ci）曾经对不上，
+# 结果是工作流全绿却永远返回 different-machine。这一步用**真实基线文件**
+# 注入 -50% 退化，断言判定为 fail；门禁形同虚设时会直接让本步骤失败。
+#
+# 2026-11-13 补齐（P2-4 剩余两项）：
+#   * PR 只跑快速子集（单个带宽指标、3 次重复），不拦合并；
+#   * 基线 JSON 随 Release 归档（挂到 Release 附件 + workflow artifact）。
+name: perf
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 18 * * *"        # UTC 18:00 = 北京时间 02:00
+  pull_request:
+    paths:
+      - "weaknet.py"
+      - "tests/**"
+      - "tests/perf/**"
+      - ".github/workflows/perf.yml"
+  release:
+    types: [published]
+
+jobs:
+  # ---- PR 快速子集：只跑一项、只跑 3 次，标红但不拦合并 ----
+  perf-quick:
+    if: github.event_name == 'pull_request'
+    runs-on: windows-latest
+    timeout-minutes: 20
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: 安装依赖
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pytest
+
+      - name: 功能回归（不含性能）
+        run: python -m pytest -q
+
+      - name: 性能快速子集（单项 × 3 次，仅提示）
+        env:
+          WN_PERF_CI: "1"
+          WN_PERF_BASELINE: ${{ runner.temp }}/weaknet-perf-baseline.json
+          WN_PERF_REPEATS: "3"
+        run: |
+          python -m pytest -m perf -q -o addopts="" -k "bandwidth"
+
+  # ---- 夜间 / 手动：完整门禁（4 项 × 7 次）----
+  perf-gate:
+    if: github.event_name != 'pull_request' && github.event_name != 'release'
+    runs-on: windows-latest
+    timeout-minutes: 45
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: 安装依赖
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pytest
+
+      - name: 功能回归（不含性能）
+        run: python -m pytest -q
+
+      - name: 恢复 runner 专属基线
+        id: baseline
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/weaknet-perf-baseline.json
+          key: weaknet-perf-${{ runner.os }}-py310-v2
+
+      # 缓存未命中时生成基线。此时 load() 返回空基线（no-baseline，不判定），
+      # 跑完后由 tests/test_perf.py 的 session fixture 用 WN_PERF_UPDATE_BASELINE=1 落盘。
+      - name: 首次生成 runner 基线
+        if: steps.baseline.outputs.cache-hit != 'true'
+        env:
+          WN_PERF_CI: "1"
+          WN_PERF_BASELINE: ${{ runner.temp }}/weaknet-perf-baseline.json
+          WN_PERF_UPDATE_BASELINE: "1"
+          WN_PERF_REPEATS: "7"
+        run: python -m pytest -m perf -q
+
+      - name: 门禁自检（注入退化必须判 fail）
+        env:
+          WN_PERF_CI: "1"
+          WN_PERF_BASELINE: ${{ runner.temp }}/weaknet-perf-baseline.json
+        run: |
+          python -c "import sys; sys.path.insert(0,'tests'); from perf import baseline as B; d=B.load(); m=d['metrics']['bw_8000_kbps']['median']; r=B.compare('bw_8000_kbps', m*0.5); print('注入 -50%:', r['level'], r['msg']); sys.exit(0 if r['level']=='fail' else 1)"
+          # 方案 §4 P0-4 的验收原文是「故意注入 10% 退化能被检出，正常波动不误报」：
+          # -10% 落在 warn(5%)~fail(15%) 区间，必须被判为「有变化」而不是 ok；
+          # -50% 必须升级成 fail。两档都过，门禁才算真的开着。
+          python -c "import sys; sys.path.insert(0,'tests'); from perf import baseline as B; d=B.load(); m=d['metrics']['bw_8000_kbps']['median']; r=B.compare('bw_8000_kbps', m*0.9); print('注入 -10%:', r['level'], r['msg']); sys.exit(0 if r['level'] in ('warn','fail') else 1)"
+
+      - name: 性能门禁（相对 runner 基线）
+        env:
+          WN_PERF_CI: "1"
+          WN_PERF_BASELINE: ${{ runner.temp }}/weaknet-perf-baseline.json
+          WN_PERF_REPEATS: "7"
+        run: python -m pytest -m perf -q
+
+  # ---- Release：生成并归档基线 JSON ----
+  perf-release-baseline:
+    if: github.event_name == 'release'
+    runs-on: windows-latest
+    timeout-minutes: 45
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: 安装依赖
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pytest
+
+      - name: 生成 Release 基线（7 次 × 4 项）
+        env:
+          WN_PERF_CI: "1"
+          WN_PERF_BASELINE: ${{ runner.temp }}/weaknet-perf-baseline.json
+          WN_PERF_UPDATE_BASELINE: "1"
+          WN_PERF_REPEATS: "7"
+        run: python -m pytest -m perf -q
+
+      - name: 上传基线作为 workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: perf-baseline-${{ github.event.release.tag_name }}
+          path: ${{ runner.temp }}/weaknet-perf-baseline.json
+          if-no-files-found: error
+
+      # 直接挂到 Release 附件上，发布页面里就能下载比对依据。
+      # 失败不阻断 Release（附件不是发布的必要条件）。
+      - name: 归档基线到 Release 附件
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          gh release upload "$TAG" \
+            "${{ runner.temp }}/weaknet-perf-baseline.json#perf-baseline.json" \
+            --clobber || echo "警告：基线附件上传失败（不影响 Release）"

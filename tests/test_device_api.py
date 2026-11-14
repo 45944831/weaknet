@@ -6,12 +6,14 @@
     pytest -m device
 
 夹具会自己 adb forward 一个随机本地端口到手机的 8899，用完撤掉；
-不会安装/卸载/清数据 —— 只读接口，不改手机上的任何状态。
+不会安装/卸载/清数据 —— 只读接口。唯一的写操作是：探活不通时把 App
+拉到前台（见 android 夹具），因为冻结状态下接口不响应。
 """
 import os
 import shutil
 import socket
 import subprocess
+import time
 
 import pytest
 
@@ -30,6 +32,34 @@ def free_port():
         s.close()
 
 
+def _adb(adb, serial, *args, timeout=20):
+    """adb 调用统一入口。
+
+    stdin 必须接 DEVNULL：`adb shell` 在 stdin 继承到父进程的管道/终端时
+    会一直等输入不返回，在 Windows 上表现为 subprocess.TimeoutExpired
+    （本地实测 `adb shell am start` 卡满 20s 才抛）。
+    """
+    return subprocess.run([adb, "-s", serial] + list(args),
+                          capture_output=True, text=True,
+                          stdin=subprocess.DEVNULL, timeout=timeout)
+
+
+def _probe(client, tries=4):
+    """探活：真发一次请求，回了才算通。
+
+    只看端口是否 LISTEN 会误判 —— App 被系统冻结时 socket 仍在
+    LISTEN，但一个字节都不回，连上去只会一直等到超时。
+    """
+    for i in range(tries):
+        try:
+            client.request("GET", "/api/status", timeout=3)
+            return True
+        except Exception:
+            if i + 1 < tries:
+                time.sleep(0.4)
+    return False
+
+
 @pytest.fixture(scope="module")
 def android():
     serial = os.environ.get("ANDROID_SERIAL")
@@ -39,17 +69,25 @@ def android():
     if not adb:
         pytest.skip("找不到 adb")
     port = free_port()
-    r = subprocess.run([adb, "-s", serial, "forward",
-                        "tcp:%d" % port, "tcp:8899"],
-                       capture_output=True, text=True, timeout=20)
+    r = _adb(adb, serial, "forward", "tcp:%d" % port, "tcp:8899")
     if r.returncode != 0:
         pytest.skip("adb forward 失败：%s" % ((r.stderr or r.stdout).strip(),))
+    client = CtrlClient("127.0.0.1", port, timeout=10)
     try:
-        yield CtrlClient("127.0.0.1", port, timeout=10)
+        # 手机把后台 App 冻结后，8899 还在 LISTEN 却完全不回包（实测 5s
+        # 超时）；`am start` 拉到前台后立刻恢复。不做这一步的话，手机放
+        # 一夜再跑 `pytest -m device` 会整片超时，看着像产品坏了。
+        if not _probe(client):
+            try:
+                _adb(adb, serial, "shell", "am", "start", "-n",
+                     "com.weaknet.app/.MainActivity")
+            except subprocess.SubprocessError as exc:
+                pytest.skip("拉起 App 失败（%s）" % (type(exc).__name__,))
+            if not _probe(client, tries=25):
+                pytest.skip("App 不响应 8899（后台被冻结，拉前台也没起来）")
+        yield client
     finally:
-        subprocess.run([adb, "-s", serial, "forward", "--remove",
-                        "tcp:%d" % port],
-                       capture_output=True, timeout=20)
+        _adb(adb, serial, "forward", "--remove", "tcp:%d" % port)
 
 
 CASES = [

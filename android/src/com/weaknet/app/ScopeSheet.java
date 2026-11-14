@@ -309,14 +309,14 @@ public class ScopeSheet {
         try {
             int maxH = (int) (a.getResources().getDisplayMetrics().heightPixels * 0.88f);
             if ("all".equals(mode)) {
-                int wide = a.getResources().getDisplayMetrics().widthPixels - dp(24);
+                int wide = Ui.sheetContentWidth(a, 24);
                 card.measure(
                         View.MeasureSpec.makeMeasureSpec(wide, View.MeasureSpec.EXACTLY),
                         View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED));
-                win.setLayout(WindowManager.LayoutParams.MATCH_PARENT,
+                win.setLayout(Ui.sheetWindowWidth(a, 24),
                         Math.min(card.getMeasuredHeight() + dp(24), maxH));
             } else {
-                win.setLayout(WindowManager.LayoutParams.MATCH_PARENT, maxH);
+                win.setLayout(Ui.sheetWindowWidth(a, 24), maxH);
             }
         } catch (Exception e) {
             // 测量失败就保持系统默认高度

@@ -12,6 +12,7 @@ pytest 里反复 tk.Tk() 会连带打挂别的 GUI 用例。
 """
 from types import SimpleNamespace
 from pathlib import Path
+import weakref
 
 import pytest
 
@@ -30,6 +31,9 @@ class _Btn:
 
     def configure(self, **kw):
         self.cfg.update(kw)
+
+    # tkinter 的 config 与 configure 是同一个函数；App._set 走的是 config
+    config = configure
 
 
 class _Page:
@@ -51,8 +55,10 @@ def app():
     obj = SimpleNamespace(
         tab_btns={"scene": _Btn(), "combo": _Btn()},
         tab_pages={"scene": _Page(), "combo": _Page()},
-        cur_tab="scene", _last_tab_key=None)
+        cur_tab="scene", _last_tab_key=None, _wcache=weakref.WeakKeyDictionary())
     obj._paint_tabs = lambda k: G.App._paint_tabs(obj, k)
+    # 直接复用 App 的真实实现：脏标记是这次改动的一部分，用替身就测不到「同值不下发」
+    obj._set = lambda w, **kw: G.App._set(obj, w, **kw)
     return obj
 
 

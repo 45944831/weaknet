@@ -1,0 +1,256 @@
+{
+  "schema": 1,
+  "tool": "iperf3 3.22 (Cygwin win64)",
+  "date": "2026-11-13 19:19:43",
+  "context": {
+    "schema": 2,
+    "spec_hash": "6a95fc73",
+    "fingerprint": {
+      "platform": "Windows-10-10.0.26100-SP0",
+      "python": "3.10.11",
+      "cpu_count": 12,
+      "machine": "AMD64",
+      "host": "renan"
+    },
+    "version": "1.1.16",
+    "build": 126,
+    "dependencies": {
+      "python": "3.10.11",
+      "pytest": "9.2.0",
+      "psutil": "unavailable",
+      "certifi": "2022.12.7"
+    },
+    "inputs": {
+      "bw_8000_kbps": {
+        "path": "/big",
+        "kb": 2048,
+        "profile": {
+          "down_kbps": 8000
+        }
+      },
+      "rtt_400ms_s": {
+        "path": "/small",
+        "profile": {
+          "latency_up_ms": 200,
+          "latency_down_ms": 200
+        }
+      },
+      "bw_concurrent8_kbps": {
+        "path": "/big",
+        "kb": 128,
+        "concurrency": 8,
+        "profile": {
+          "down_kbps": 8000
+        }
+      },
+      "stop_release_s": {
+        "path": "/big",
+        "kb": 1024,
+        "profile": {
+          "down_kbps": 300
+        },
+        "stop_after_s": 0.6
+      }
+    },
+    "warmup": 0,
+    "repeats": 7,
+    "unit_convention": {
+      "kbps": "1 kbps = 1024 bit/s",
+      "MiB": "1 MiB = 1048576 B",
+      "steady_window": "整段响应从首字节到末字节，不剔除慢启动；计时从 sendall 开始"
+    },
+    "ci": false
+  },
+  "unit_convention": {
+    "iperf3_bps": "SI，1 kbit = 1000 bit",
+    "weaknet_kbps": "1 kbps = 1024 bit/s",
+    "kbps_1024": "由 bps/1024 换算，与产品口径一致",
+    "primary_metric": "sum_received（接收端累计字节）：真正抵达链路终点的量",
+    "secondary_metric": "sum_sent（iperf3 客户端本地发送计数）：多流共享瓶颈时会系统性少计，仅作口径对照，不用于限速精度结论"
+  },
+  "setup": {
+    "iperf_server_port": 3128,
+    "tunnel_port": 3134,
+    "engine_proxy_port": 3132,
+    "repeats": 7,
+    "time_s": 20,
+    "omit_s": 3
+  },
+  "limitations": {
+    "udp_via_proxy": "不支持：Windows 侧为 TCP 应用层代理，UDP 数据报不经 CONNECT 隧道",
+    "android_vpn": "Android 侧 VPN on/off 需设备端 iperf3 客户端，本次设备未安装，改由真机 HTTP 吞吐脚本覆盖"
+  },
+  "scenarios": {},
+  "curve": {
+    "500": {
+      "via_weaknet": true,
+      "parallel": 1,
+      "udp": false,
+      "reverse": false,
+      "set_kbps": 500,
+      "profile_extra": {},
+      "median_kbps_1024": 460.719166822181,
+      "p95_kbps_1024": 511.8523306026212,
+      "min_kbps_1024": 460.6230976993285,
+      "max_kbps_1024": 511.8523306026212,
+      "n": 7,
+      "median_sender_kbps_1024": null,
+      "median_sender_receiver_gap_pct": -100.0,
+      "median_jitter_ms": null,
+      "median_lost_percent": null,
+      "streams_per_round": [
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1
+      ],
+      "errors": [],
+      "deviation_pct": -7.856166635563795
+    },
+    "1000": {
+      "via_weaknet": true,
+      "parallel": 1,
+      "udp": false,
+      "reverse": false,
+      "set_kbps": 1000,
+      "profile_extra": {},
+      "median_kbps_1024": 972.7624027331344,
+      "p95_kbps_1024": 1024.3921373101623,
+      "min_kbps_1024": 921.5567789870654,
+      "max_kbps_1024": 1024.3921373101623,
+      "n": 7,
+      "median_sender_kbps_1024": 870.4777985195826,
+      "median_sender_receiver_gap_pct": -15.789473684210526,
+      "median_jitter_ms": null,
+      "median_lost_percent": null,
+      "streams_per_round": [
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1
+      ],
+      "errors": [],
+      "deviation_pct": -2.723759726686558
+    },
+    "4000": {
+      "via_weaknet": true,
+      "parallel": 1,
+      "udp": false,
+      "reverse": false,
+      "set_kbps": 4000,
+      "profile_extra": {},
+      "median_kbps_1024": 3993.370980174287,
+      "p95_kbps_1024": 4036.1587858474395,
+      "min_kbps_1024": 3992.1253089108886,
+      "max_kbps_1024": 4036.1587858474395,
+      "n": 7,
+      "median_sender_kbps_1024": 3890.9881356960113,
+      "median_sender_receiver_gap_pct": -2.564102564102564,
+      "median_jitter_ms": null,
+      "median_lost_percent": null,
+      "streams_per_round": [
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1
+      ],
+      "errors": [],
+      "deviation_pct": -0.16572549564282327
+    },
+    "8000": {
+      "via_weaknet": true,
+      "parallel": 1,
+      "udp": false,
+      "reverse": false,
+      "set_kbps": 8000,
+      "profile_extra": {},
+      "median_kbps_1024": 7988.673510829072,
+      "p95_kbps_1024": 8035.865086358506,
+      "min_kbps_1024": 7982.402576051793,
+      "max_kbps_1024": 8035.865086358506,
+      "n": 7,
+      "median_sender_kbps_1024": 8244.456867449444,
+      "median_sender_receiver_gap_pct": 3.205128205128205,
+      "median_jitter_ms": null,
+      "median_lost_percent": null,
+      "streams_per_round": [
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1
+      ],
+      "errors": [],
+      "deviation_pct": -0.14158111463659678
+    },
+    "20000": {
+      "via_weaknet": true,
+      "parallel": 1,
+      "udp": false,
+      "reverse": false,
+      "set_kbps": 20000,
+      "profile_extra": {},
+      "median_kbps_1024": 20002.6697936825,
+      "p95_kbps_1024": 20020.675523786103,
+      "min_kbps_1024": 19992.719642833068,
+      "max_kbps_1024": 20020.675523786103,
+      "n": 7,
+      "median_sender_kbps_1024": 20120.71770652857,
+      "median_sender_receiver_gap_pct": 0.5115089514066496,
+      "median_jitter_ms": null,
+      "median_lost_percent": null,
+      "streams_per_round": [
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1
+      ],
+      "errors": [],
+      "deviation_pct": 0.013348968412501563
+    },
+    "50000": {
+      "via_weaknet": true,
+      "parallel": 1,
+      "udp": false,
+      "reverse": false,
+      "set_kbps": 50000,
+      "profile_extra": {},
+      "median_kbps_1024": 49989.92904159104,
+      "p95_kbps_1024": 50018.44715923986,
+      "min_kbps_1024": 49943.63860303692,
+      "max_kbps_1024": 50018.44715923986,
+      "n": 7,
+      "median_sender_kbps_1024": 49908.32394761246,
+      "median_sender_receiver_gap_pct": -0.2047082906857728,
+      "median_jitter_ms": null,
+      "median_lost_percent": null,
+      "streams_per_round": [
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1
+      ],
+      "errors": [],
+      "deviation_pct": -0.020141916817927267
+    }
+  },
+  "curve_latency": {},
+  "curve_loss": {}
+}

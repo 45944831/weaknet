@@ -122,7 +122,8 @@ public class NotesSheet {
             // 内容有 17 支档位、必然超屏，直接给固定高度让 ScrollView 自己滚，
             // 不用像参数表单那样先 measure 再算高度
             int h = (int) (a.getResources().getDisplayMetrics().heightPixels * 0.86);
-            w.setLayout(WindowManager.LayoutParams.MATCH_PARENT, h);
+            // 宽度封顶：紧凑屏保持全宽（旧行为），≥600dp 居中 560dp
+            w.setLayout(Ui.sheetWindowWidth(a, 24), h);
             w.setGravity(Gravity.CENTER);
         }
     }

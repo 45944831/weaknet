@@ -301,27 +301,30 @@ public class ProxyServer implements Runnable {
                     });
                 }
             }, "pipe-up");
-            Thread t2 = new Thread(new Runnable() {
-                public void run() {
-                    Pipe.run(uin, cout, downBucket, false, ctx, new Runnable() {
-                        public void run() {
-                            try { fClient.shutdownOutput(); }
-                            catch (Exception e) { try { fClient.close(); } catch (Exception e2) {} }
-                        }
-                    });
-                }
-            }, "pipe-down");
             t1.setDaemon(true);
-            t2.setDaemon(true);
             t1.start();
-            t2.start();
-            t1.join();
-            // 必须等下行彻底跑完再收尾。原来这里是 t2.join(2000)：客户端一发完请求
-            // 就半关闭（curl / nc / 带 body 的 POST 都这样），慢档位下大响应要几十秒，
-            // 2s 后 cleanup() 直接掐断连接，响应尾部整段丢掉（下载总是差最后一段）。
-            // 下行会在上游 EOF 或 socket 出错时自然结束，300s 只是兜底。
-            t2.join(300000);
-            ctx.cleanup();
+            // 下行直接在 conn 线程里跑：每连接从 3 个线程降到 2 个（conn 兼作 pipe-down）。
+            // conn 线程的工作本来就是「起上行、等下行、收尾」，内联后只是少了一次
+            // 线程创建与 join，语义完全一致。
+            try {
+                Pipe.run(uin, cout, downBucket, false, ctx, new Runnable() {
+                    public void run() {
+                        try { fClient.shutdownOutput(); }
+                        catch (Exception e) { try { fClient.close(); } catch (Exception e2) {} }
+                    }
+                });
+            } finally {
+                // 必须等上行也彻底结束再收尾。原来这里是 t2.join(2000)：客户端一发完请求
+                // 就半关闭（curl / nc / 带 body 的 POST 都这样），慢档位下大响应要几十秒，
+                // 2s 后 cleanup() 直接掐断连接，响应尾部整段丢掉（下载总是差最后一段）。
+                // 300s 只是兜底，正常路径靠 EOF 自然结束。
+                try {
+                    t1.join(300000);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+                ctx.cleanup();
+            }
         }
     }
 

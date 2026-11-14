@@ -24,7 +24,7 @@ dns_fail_pct	tip1	3	App）不受影响 —— 所以
 dns_fail_pct	tip1	4	填 100% 也可能看到部
 dns_fail_pct	tip1	5	分请求正常。
 down_kbps	body	0	下行总带宽上限，单位
-down_kbps	body	1	kbps（1 Mbps = 1000
+down_kbps	body	1	kbps（1 Mbps = 1024
 down_kbps	body	2	kbps，1000 kbps ≈ 125
 down_kbps	body	3	KB/s）。0 = 不限。
 down_kbps	tip1	0	注意是全局共享的一份

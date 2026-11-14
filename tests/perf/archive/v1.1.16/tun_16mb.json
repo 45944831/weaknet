@@ -1,0 +1,26 @@
+[
+ {
+  "round": 1,
+  "bytes": 16777581,
+  "ms": 4370,
+  "kbps": 29994.2,
+  "cpu_ms": 90.0,
+  "cpu_ms_per_MB": 5.62
+ },
+ {
+  "round": 2,
+  "bytes": 16777581,
+  "ms": 3440,
+  "kbps": 38103.2,
+  "cpu_ms": 150.0,
+  "cpu_ms_per_MB": 9.37
+ },
+ {
+  "round": 3,
+  "bytes": 16777581,
+  "ms": 3440,
+  "kbps": 38103.2,
+  "cpu_ms": 50.0,
+  "cpu_ms_per_MB": 3.12
+ }
+]

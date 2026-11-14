@@ -4,8 +4,9 @@ android/_cm/
 android/_cm_check/
 # _jw/ 只有 out/ 是编译产物；com/ 下是手写回归单测（拦过 PortIdx 越界、
 # FlowMatch 漏核端口两个上线级缺陷），必须入库，不能当中间产物忽略掉
-android/_jw/out/
-android/_jw/out2/
+# WN_JW_OUT 可指定隔离输出目录，统一按 out* 忽略（目录不存在时可跳过清理，
+# 避开沙箱对批量删除已有产物的拦截）
+android/_jw/out*/
 android/_tmpcls/
 android/_tmpdex/
 _build*/
@@ -62,3 +63,14 @@ _shots/
 # ===== PyInstaller 产物（EXE 本身入库，构建中间产物不入库）=====
 build/
 dist/
+
+# ===== 清理归档与本地调试抓取 =====
+# 清理过期产物时归档的历史证据（日志 / 旧测试 json / 旧截图），只留本地
+_archive*/
+# 真机调试时从设备抓下来的临时文本与屏幕截图
+android/_tmp_*.txt
+android/_shots_*/
+# 本地一次性自测脚本（报告里引用的 dev_perf2.py / dev_conc2.py 只在本机）
+_tmp/
+# 根目录的分析报告不入库；正式文档是 README.md 与 docs/*.md
+_*.md

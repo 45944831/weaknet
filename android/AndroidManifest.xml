@@ -1,8 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     package="com.weaknet.app"
-    android:versionCode="126"
-    android:versionName="1.1.16">
+    android:versionCode="127"
+    android:versionName="1.1.17">
 
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
@@ -34,7 +34,8 @@
         android:usesCleartextTraffic="true"
         android:label="WeakNet"
         android:icon="@mipmap/ic_launcher"
-        android:roundIcon="@mipmap/ic_launcher">
+        android:roundIcon="@mipmap/ic_launcher"
+        android:resizeableActivity="true">
 
         <service
             android:name=".NetService"
@@ -49,9 +50,10 @@
             </intent-filter>
         </service>
 
-        <!-- 固定竖版：界面不随手机方向旋转（screenOrientation 声明 + 代码兜底双保险）。
-             另外声明 configChanges，万一系统仍投递旋转配置变化，也不会重建 Activity
-             导致设置/共享浮层被销毁。 -->
+        <!-- 手机竖版（screenOrientation 声明 + 代码兜底双保险）。sw≥600dp 的
+             平板/折叠屏内屏在 MainActivity.applyOrientationPolicy 运行时放开：
+             Android 12L+ 对大屏的方向锁定会 letterbox（大屏质量红线），16+/17
+             直接忽略锁定参数。configChanges 保证折叠/旋转/分屏不重建 Activity。 -->
         <activity
             android:name=".MainActivity"
             android:exported="true"

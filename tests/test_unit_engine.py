@@ -73,6 +73,26 @@ def test_bucket_stop_releases_waiting_consumer():
     assert el < 0.5, "停止限速后排队者 %.2fs 才放行" % el
 
 
+def test_burst_credit_is_time_based_not_byte_based():
+    """突发额度是「一段时间的配额」，不是「一批固定字节」。
+
+    这条用例为什么存在：2026-11-14 的复核报告把 1MB 短样本超发 +25~29% 归因为
+    「固定 0.42 MB 免费额度」，并据此提出按 `ratio = 1 + B/mb` 修正 —— 该模型只在
+    单一速率下成立，换个速率就错。实测（固定 1MB、只变速率）：
+
+        2000 / 4000 / 8000 / 16000 kbps → B = 0.034 / 0.092 / 0.184 / 0.372 MB
+
+    B 随速率线性增长、B/rate 恒定 —— 因为 cap() = rate × BURST_SEC，空闲攒满后放行的
+    是「0.25 秒的流量」。写成固定字节额度（cap 与 rate 脱钩）会让下面第二条断言失败。
+    """
+    b8, b16 = W.Bucket(8000), W.Bucket(16000)
+    assert b8.cap() == pytest.approx(8000 * W.BITS_PER_KBPS / 8.0 * W.Bucket.BURST_SEC)
+    assert b16.cap() == pytest.approx(b8.cap() * 2), "容量没随速率翻倍，说明不是时间额度"
+    # 折算成秒必须与速率无关，且等于 BURST_SEC
+    for b in (b8, b16):
+        assert b.cap() / b.rate == pytest.approx(W.Bucket.BURST_SEC)
+
+
 def test_nap_wakes_immediately_on_gen_change():
     async def go():
         W.G.gen = 3

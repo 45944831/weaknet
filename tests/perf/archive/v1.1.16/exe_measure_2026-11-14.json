@@ -1,0 +1,52 @@
+{
+ "schema": 1,
+ "date": "2026-11-14 12:11:27",
+ "exe": "E:\\WorkBuddy1\\2026-10-13-15-51-24\\weaknet\\_build_gui\\dist_onedir\\WeakNet\\WeakNet.exe",
+ "exe_size_mb": 1.92,
+ "runs": [
+  {
+   "run": 1,
+   "ready_s": 0.54,
+   "rss_mb": 37.5,
+   "rss_src": "ctypes",
+   "mei_mb": 0.0
+  },
+  {
+   "run": 2,
+   "ready_s": 0.5,
+   "rss_mb": 39.4,
+   "rss_src": "ctypes",
+   "mei_mb": 0.0
+  },
+  {
+   "run": 3,
+   "ready_s": 0.51,
+   "rss_mb": 38.7,
+   "rss_src": "ctypes",
+   "mei_mb": 0.0
+  },
+  {
+   "run": 4,
+   "ready_s": 0.5,
+   "rss_mb": 38.8,
+   "rss_src": "ctypes",
+   "mei_mb": 0.0
+  },
+  {
+   "run": 5,
+   "ready_s": 0.51,
+   "rss_mb": 39.0,
+   "rss_src": "ctypes",
+   "mei_mb": 0.0
+  }
+ ],
+ "summary": {
+  "ready_med": 0.51,
+  "ready_min": 0.5,
+  "ready_max": 0.54,
+  "rss_med_mb": 38.8,
+  "rss_n": 5,
+  "mei_mb": 0.0
+ },
+ "note": "rss_mb 为 /api/status 就绪后立即采样的进程树工作集总和；None 表示本次没测到（不计入统计），不是 0"
+}

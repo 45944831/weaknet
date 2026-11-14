@@ -1,0 +1,105 @@
+{
+  "build": 126,
+  "ci": false,
+  "dependencies": {
+    "certifi": "2022.12.7",
+    "psutil": "unavailable",
+    "pytest": "9.2.0",
+    "python": "3.10.11"
+  },
+  "fingerprint": {
+    "cpu_count": 12,
+    "host": "renan",
+    "machine": "AMD64",
+    "platform": "Windows-10-10.0.26100-SP0",
+    "python": "3.10.11"
+  },
+  "inputs": {
+    "bw_8000_kbps": {
+      "kb": 2048,
+      "path": "/big",
+      "profile": {
+        "down_kbps": 8000
+      }
+    },
+    "bw_concurrent8_kbps": {
+      "concurrency": 8,
+      "kb": 128,
+      "path": "/big",
+      "profile": {
+        "down_kbps": 8000
+      }
+    },
+    "rtt_400ms_s": {
+      "path": "/small",
+      "profile": {
+        "latency_down_ms": 200,
+        "latency_up_ms": 200
+      }
+    },
+    "stop_release_s": {
+      "kb": 1024,
+      "path": "/big",
+      "profile": {
+        "down_kbps": 300
+      },
+      "stop_after_s": 0.6
+    }
+  },
+  "metrics": {
+    "bw_8000_kbps": {
+      "direction": "higher_better",
+      "fail": 0.15,
+      "max": 8591.504981617194,
+      "median": 8258.0645161426,
+      "min": 8253.904282173957,
+      "n": 7,
+      "p95": 8591.504981617194,
+      "unit": "kbps",
+      "warn": 0.05
+    },
+    "bw_concurrent8_kbps": {
+      "direction": "higher_better",
+      "fail": 0.15,
+      "max": 8070.935960711473,
+      "median": 7945.683802225363,
+      "min": 7937.984496073886,
+      "n": 7,
+      "p95": 8070.935960711473,
+      "unit": "kbps",
+      "warn": 0.05
+    },
+    "rtt_400ms_s": {
+      "direction": "lower_better",
+      "fail": 0.2,
+      "max": 0.4220000000204891,
+      "median": 0.40599999998812564,
+      "min": 0.40599999998812564,
+      "n": 7,
+      "p95": 0.4220000000204891,
+      "unit": "s",
+      "warn": 0.1
+    },
+    "stop_release_s": {
+      "direction": "lower_better",
+      "fail": 0.2,
+      "max": 0.23499999998603016,
+      "median": 0.21900000001187436,
+      "min": 0.2029999999795109,
+      "n": 7,
+      "p95": 0.23499999998603016,
+      "unit": "s",
+      "warn": 0.1
+    }
+  },
+  "repeats": 7,
+  "schema": 2,
+  "spec_hash": "6a95fc73",
+  "unit_convention": {
+    "MiB": "1 MiB = 1048576 B",
+    "kbps": "1 kbps = 1024 bit/s",
+    "steady_window": "整段响应从首字节到末字节，不剔除慢启动；计时从 sendall 开始"
+  },
+  "version": "1.1.16",
+  "warmup": 0
+}

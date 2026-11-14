@@ -55,6 +55,34 @@ public class TcpSession {
      */
     private final ThreadPoolExecutor serial;
 
+    /**
+     * 下行读缓冲池（P1-2 缓冲复用）。
+     *
+     * 旧实现每块 `new byte[n]` + `arraycopy`：按 MSS 1460 算，1.4KB 就要一次分配、
+     * 一次复制、一次跨线程投递。方案 §4.4(e) 指出池化的前提是「归还协议」——
+     * 这里能安全做，是因为 `IpUtil.buildTcp()` 把 payload 复制进全新的报文数组
+     * （由 _MtuAbTest 的「buildTcp 不持有 payload 引用」断言守住），投递 job
+     * 一结束缓冲就不再被任何人引用，可以立即归还。池上限 4，避免高延迟档
+     * 积压时把内存放大成第二条队列。
+     */
+    private final java.util.ArrayDeque<byte[]> bufPool =
+            new java.util.ArrayDeque<byte[]>(4);
+
+    private byte[] borrowBuf() {
+        synchronized (bufPool) {
+            byte[] b = bufPool.pollFirst();
+            if (b != null) return b;
+        }
+        return new byte[clientMss];     // 随协商 MSS（进而随 TUN_MTU）派生
+    }
+
+    private void releaseBuf(byte[] b) {
+        if (b == null) return;
+        synchronized (bufPool) {
+            if (bufPool.size() < 4) bufPool.addFirst(b);
+        }
+    }
+
     /** 链路延迟队列：数据包按延迟到期后再投递，延迟与带宽解耦 */
     private final DelayLine delay;
     /** 同一方向的到期时间单调不减，保证抖动不会把包打乱 */
@@ -70,7 +98,9 @@ public class TcpSession {
         this.remotePort = remotePort;
         this.key = key;
         this.clientSeq = (clientIsn + 1) & 0xFFFFFFFFL;
-        this.clientMss = Math.max(536, Math.min(mss, 1400));
+        // 上限必须跟着 tun 的 MTU 走：原来硬编码 1400，即使把 setMtu 调到 16KB
+        // 也永远只发 1400 的段，MTU 提升等于白做（见 VpnNetService.TUN_MTU 注释）
+        this.clientMss = VpnNetService.clampMss(mss);
         this.clientIpB = IpUtil.ipToBytes(clientIp);
         this.remoteIpB = IpUtil.ipToBytes(remoteIp);
         this.fastIdx = PortIdx.of(clientPort, remotePort);
@@ -142,6 +172,12 @@ public class TcpSession {
         }
         try {
             Socket s = new Socket();
+            // 上游 TCP 关 Nagle（NetGuard tcp.c / Go 标准库 / gVisor 的共同默认）：
+            // 不改峰值吞吐（写入都是包级 ≥ MSS），但消除小写入（尾段、握手、
+            // 协议交接）撞上 Nagle+延迟 ACK 的 40~200ms 停顿，成本为零。
+            // 缓冲区刻意不设：手动 setReceiveBufferSize/SendBufferSize 会关掉
+            // Linux 的接收自调优（tcp_moderate_rcvbuf=1，Pixel 默认上限已 2~8MB）。
+            s.setTcpNoDelay(true);
             vpn.protect(s);
             s.connect(new InetSocketAddress(remoteIp, remotePort), 15000);
             socket = s;
@@ -261,43 +297,52 @@ public class TcpSession {
     }
 
     private void downstreamLoop() {
-        byte[] buf = new byte[1400];
+        // 读缓冲从会话池里借，大小随协商 MSS（进而随 TUN_MTU）走：MTU 1500 时
+        // 为 1460（原为固定 1400），提到 16384 时自动变成 16344 —— 这是
+        // 「MTU 提升能真正生效」的前提之一。每块不再 new + arraycopy。
         try {
             while (!closed) {
-                int n = sin.read(buf);
-                if (n < 0) break;
+                final byte[] slot = borrowBuf();
+                int n = sin.read(slot);
+                if (n < 0) { releaseBuf(slot); break; }
                 lastActive = System.currentTimeMillis();
                 Profile p = WeakNet.I.profile;
                 if (p.lossPct > 0 && Math.random() * 100 < p.lossPct) {
                     sleep((long) (p.stallMs * (0.5 + Math.random())));
                 }
                 if (p.disconnectPct > 0 && Math.random() * 100 < p.disconnectPct) {
+                    releaseBuf(slot);
                     WeakNet.I.log("disconnect", "模拟断连：" + remoteIp + ":" + remotePort);
                     sendRst();
                     close();
                     return;
                 }
-                final byte[] data = new byte[n];
-                System.arraycopy(buf, 0, data, 0, n);
+                final int len = n;
                 final long d = dueDelay(false);
                 final long seqAt;
                 synchronized (TcpSession.this) {
-                    if (closed) break;
+                    if (closed) { releaseBuf(slot); break; }
                     seqAt = mySeq;
                     mySeq = (mySeq + n) & 0xFFFFFFFFL;
                 }
                 // 延迟到期后再写回 tun；队列积压时 post 会阻塞，
-                // 于是这里停止读上游，背压自然传导到服务器，不会把内存撑爆
+                // 于是这里停止读上游，背压自然传导到服务器，不会把内存撑爆。
+                // buildTcp 会把 slot 的前 len 字节复制进新报文，job 结束即可归还。
                 delay.post(d, new Runnable() {
                     public void run() {
-                        synchronized (TcpSession.this) {
-                            if (closed) return;
-                            vpn.write(IpUtil.buildTcp(remoteIpB, remotePort, clientIpB, clientPort,
-                                    seqAt, clientSeq, IpUtil.PSH | IpUtil.ACK,
-                                    data, data.length, 65535, null));
+                        try {
+                            synchronized (TcpSession.this) {
+                                if (closed) return;
+                                vpn.write(IpUtil.buildTcp(remoteIpB, remotePort,
+                                        clientIpB, clientPort, seqAt, clientSeq,
+                                        IpUtil.PSH | IpUtil.ACK,
+                                        slot, len, 65535, null));
+                            }
+                        } finally {
+                            releaseBuf(slot);
                         }
                     }
-                }, n);
+                }, len);
             }
         } catch (Exception e) {
             // ignore

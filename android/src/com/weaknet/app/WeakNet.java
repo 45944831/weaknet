@@ -275,6 +275,39 @@ public class WeakNet {
         fireUiChange();    // setProfile 那次 fire 时开关还是旧值，这里按最终状态再推一次
     }
 
+    /**
+     * 「开启限速」时按 presetKey 解析要落地的参数（复测报告 4.1 修复）。
+     *
+     * 旧逻辑对 custom 恒取当前 profile：而「关闭」会把当前 profile 清成直连，
+     * 于是 关→开 后 limitOn=true 但参数全零 —— 界面显示已开启、实际不限速
+     * （真机 /api/run 三步复现：4000 → 关 → 再开 down=0）。现在的语义：
+     *
+     *   - presetKey 是内置 / u: 场景：由调用方解析传入（custom 恒传 null）；
+     *   - custom 且当前 profile 还带参数（用户刚设的）→ 原样保留；
+     *   - custom 但当前 profile 已被「关闭」清空（或本来就是全零）→ 回落
+     *     lastProfile：它是「关闭前最后一份**生效过**的参数」——setProfile
+     *     只在 hasLimits 时更新它，所以不会被关闭时的直连覆盖；
+     *   - 都没有 → 直连。
+     *
+     * 与 Windows 端 set_limit 对 custom 的「last_profile 回落」同构。
+     * 代价（有意为之）：custom 全零 + 存在 lastProfile 时会被上次场景覆盖 ——
+     * 「全零自定义」想要的效果用「直连」场景就能达成，而假开启是更危险的错。
+     */
+    public synchronized Profile resolveEnableRestore(Profile presetResolved) {
+        return resolveEnable(presetResolved, presetKey, profile, lastProfile);
+    }
+
+    /** 纯解析逻辑：{@link #resolveEnableRestore} 的本体，_jw 纯 JVM 单测直接构造四元组 */
+    static Profile resolveEnable(Profile presetResolved, String presetKey,
+                                 Profile live, Profile lastProfile) {
+        Profile restore = presetResolved;
+        if (restore == null && "custom".equals(presetKey) && live != null && live.hasLimits()) {
+            restore = live;            // 用户刚设/仍在生效的自定义参数
+        }
+        if (restore == null && lastProfile != null) restore = lastProfile;
+        return restore != null ? restore : new Profile();
+    }
+
     // ------------------------------------------------------------------ 暂停 / 恢复
     //
     // 暂停与「关闭限速」的区别：关闭是结束这次测试、场景只留着备查；

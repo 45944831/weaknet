@@ -67,19 +67,54 @@ py -3.10-64 -m PyInstaller --clean --noconfirm --distpath . --workpath _build_gu
 
 > 传 `.spec` 时不能再加 `--specpath`（PyInstaller 会报 `makespec options not valid`）。
 
+### onedir 形态（冷启动专项，P2-2）
+
+`--onefile` 每次启动都要把约 21.4 MB 的 `_MEIxxxx` 解包到 `%TEMP%`，这是冷启动
+中位 2.15 s、够不到 `≤2.0 s` 目标的主因（`tools/perf_coldstart.py` 的归因：
+源码导入只占 198 ms，其余 2,461 ms 全是解包与进程初始化）。onedir 把文件常驻在
+目录里，启动时不再解包。
+
+spec 由生成器产出（`_build_gui/` 在 `.gitignore` 内，仓库存不下 spec 本身，
+所以把生成逻辑放进版本管理）：
+
+```bash
+py -3.10-64 tools/gen_exe_version.py                      # 升版本后先刷新版本资源
+py -3.10-64 tools/gen_spec_onedir.py                      # 写 _build_gui/WeakNet_onedir.spec
+py -3.10-64 -m PyInstaller --clean --noconfirm \
+  --distpath _build_gui/dist_onedir --workpath _build_gui/_work_onedir \
+  _build_gui/WeakNet_onedir.spec
+py -3.10-64 tools/perf_exe_measure.py \
+  --exe _build_gui/dist_onedir/WeakNet/WeakNet.exe --runs 5
+```
+
+- 产物：`dist_onedir/WeakNet/WeakNet.exe` + `_internal/`（含 `spec/spec.json`）。
+  运行时 `_MEIPASS` 指向 `_internal`，`weaknet.SPEC_PATH` 照旧解析，**代码无需改动**。
+- 代价：不再是单文件，分发要整目录（可压成一个 zip）；对采集端宿主无影响 ——
+  宿主只按路径拉起 EXE。
+- **未验证**：本仓库默认不打包，因此「onedir 能省多少」目前只是假设（同类应用经验
+  值 0.3–0.8 s）。发版前按上面的命令实测一次，把数字写进 `docs/verification.md` 再决定
+  是否切换发行形态；`≤2.0 s` 未达标这一条在切换前始终成立。
+
 ## 自动化回归（pytest）
 
 ```bash
 python -m pytest              # 默认跑 unit + integration（约 15 秒）
-python -m pytest -m perf      # 性能门槛：带宽 ±15% / RTT ±20% / 8 并发 ≤1.15x / 停止放行 <0.5s
+python -m pytest -m perf      # 性能门禁：产品语义（±15% / ±20% / ≤1.15x / <0.5s）+ 相对基线
 python -m pytest -m device    # 真机契约：先 set ANDROID_SERIAL=<adb devices 里的序列号>
 ```
 
 - 标记：`unit`（纯逻辑）/ `integration`（进程内真实 socket）/ `perf`（机器相关）/ `device`（真机）。
+- 性能门禁每项跑 7 次（`WN_PERF_REPEATS`），判定规则在 `tests/perf/baseline.py`：
+  **同机指纹**才比较基线，默认 warn 5% / fail 15%；换机器只提示不判定。
+  确认要换基线时才用 `WN_PERF_UPDATE_BASELINE=1 python -m pytest -m perf`，
+  平时只读不写 —— 自动更新基线等于把回归一起承认成新标准。
+- 采样用 `python tools/perf_profile.py {record|top|dump}`（py-spy，可直接 attach EXE）。
 - 夹具在 `tests/conftest.py`：`engine` 在独立线程起完整服务（端口随机、设置与自定义场景写临时目录），
   `http_origin` 提供大文件与慢速吐出的源站，用例只通过 HTTP / 代理端口访问 —— 测的是真实管道。
 - 存量 `_t_*.py` 里逻辑更细的部分（源码逐字比对等）由 `tests/test_golden_scripts.py` 统一登记，
   新用例请写在 `test_*.py`。
 - `spec/spec.json` 是参数 / 场景 / 文案 / 组合规则的唯一真源：Python 运行时直接读，
   Android 侧由 `tools/gen_spec.py` 生成 `SpecGen.java`（`--check` 用于漂移检查）。
-- 仓库不含 CI workflow；以上命令需在本地或自建流水线运行。
+- CI：`.github/workflows/perf.yml` 每晚（UTC 18:00）与手动触发跑一次性能门禁；
+  共享 runner 上设 `WN_PERF_SAME_MACHINE=1` 忽略主机名，但仍校验平台 / Python / 核数 / 架构。
+  性能不做 PR 阻断 —— 噪声可达 15%~30%，阻断只会训练大家「重跑一次就绿了」。

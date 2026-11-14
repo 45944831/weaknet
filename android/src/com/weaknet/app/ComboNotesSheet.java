@@ -163,13 +163,13 @@ public class ComboNotesSheet {
         Window w = dlg == null ? null : dlg.getWindow();
         if (w == null || body == null) return;
         try {
-            int wide = a.getResources().getDisplayMetrics().widthPixels - dp(32);
+            int wide = Ui.sheetContentWidth(a, 32);
             body.measure(
                     View.MeasureSpec.makeMeasureSpec(wide, View.MeasureSpec.EXACTLY),
                     View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED));
             int h = body.getMeasuredHeight() + dp(32);
             int maxH = (int) (a.getResources().getDisplayMetrics().heightPixels * 0.85);
-            w.setLayout(WindowManager.LayoutParams.MATCH_PARENT, Math.min(h, maxH));
+            w.setLayout(Ui.sheetWindowWidth(a, 32), Math.min(h, maxH));
         } catch (Exception e) {
             // 测量失败就保持系统默认，不影响功能
         }

@@ -23,6 +23,7 @@ import sys
 import threading
 import time
 import tkinter as tk
+import weakref
 import webbrowser
 from tkinter import filedialog, font as tkfont, messagebox, simpledialog, ttk
 
@@ -39,6 +40,9 @@ import update_check as UC
 
 # 由 main() 在解析完参数后置位：无窗口模式下出错不能弹 messagebox（没人点，宿主会一直等）
 _HEADLESS = False
+
+# _set() 的「缓存里没有这个选项」哨兵：不能用 None，None 是合法的选项值
+_UNSET = object()
 
 # 窗口/任务栏图标：与 assets/weaknet.ico、APK 的 launcher 图标是同一套图形
 # （图形与配色由 assets/make_icon.py 生成，改那边再重跑即可）。
@@ -128,316 +132,32 @@ def _apply_window_icon(root):
 # 否则二级窗口一眼就不像同一个产品；独立运行（发布包/源码直跑）保持原浅色。
 # 判定优先级：环境变量 WEAKNET_THEME > --theme dark / --dark > 目录位置
 # （<...>/resources/weaknet/ 是宿主打包后的固定布局，独立发布包不会长这样）。
-def _detect_dark():
-    v = (os.environ.get("WEAKNET_THEME") or "").strip().lower()
-    if v in ("dark", "1", "true", "yes"):
-        return True
-    if v in ("light", "0", "false", "no"):
-        return False
-    argv = [a.lower() for a in sys.argv[1:]]
-    for i, a in enumerate(argv):
-        if a == "--theme" and i + 1 < len(argv):
-            return argv[i + 1] == "dark"
-        if a.startswith("--theme="):
-            return a.split("=", 1)[1] == "dark"
-    if "--dark" in argv:
-        return True
-    if "--light" in argv:
-        return False
-    try:
-        # 打包后 sys.argv[0] 是 exe 自己的路径，onefile 解包目录不参与判定
-        base = sys.executable if getattr(sys, "frozen", False) else (sys.argv[0] or __file__)
-        here = os.path.dirname(os.path.abspath(base))
-        return (os.path.basename(here).lower() == "weaknet"
-                and os.path.basename(os.path.dirname(here)).lower() == "resources")
-    except Exception:
-        return False
+# ---------------------------------------------------------------- 主题层
+# 配色 / 字体 / 标题栏 / ttk 主题移到 gui_theme.py：面板模块要独立成文件，
+# 不能被主模块反向 import（会循环）。这里显式导入，名字保持不变。
+from gui_theme import (DARK, BG, CARD, LINE, TEXT, MUTED, ACCENT, ACCENT_D,
+                       OK, WARN, ERR, BTN2, BTN2_HOVER, FIELD, CHIP, SELECT,
+                       FONT, FONT_B, FONT_T, _detect_dark, _darken_titlebar,
+                       _scrollbar, _apply_theme)
+from gui_notes import NotesMixin
+from gui_scope import ScopeMixin
+from gui_share import ShareMixin
+from gui_usb import UsbMixin
+# ---------------------------------------------------------------- 纯文本层已拆出
+# 说明小窗排版常量 / 参数摘要 / 格式化函数移到 gui_text.py：它们不依赖 App 状态，
+# 单独成模块后可以直接跑单测（tests/test_gui_text.py），也把主文件从 3,616 行
+# 降下来。这里用显式导入而不是 import *，避免把 tk / weaknet 悄悄带进命名空间。
+from gui_text import (NOTE_PAD, NOTE_TEXT_W, NOTE_TIP_INDENT, NOTE_WIN_W,
+                      SHORT, FIELDS, fmt_rate, fmt_bytes, summarize, detail,
+                      _cap_name_var, _note_measure)
+# 视图模型层（P1-6）：refresh 里「该显示什么」是纯函数，这里只负责「怎么改控件」。
+# 纯逻辑单独成模块后可以脱离 Tk 单测（tests/test_gui_state.py）。
+import gui_state as S
+# 刷新帧统计（P2-3）：口径与 Android FrameStats 一致，纯逻辑可单测。
+import gui_perf as P
 
 
-DARK = _detect_dark()
-
-if DARK:
-    # 与采集端 style.css 同一套色：背景/卡片/描边/文字/强调色
-    BG = "#0f1117"
-    CARD = "#161922"
-    LINE = "#2a2f3d"
-    TEXT = "#e0e4ef"
-    MUTED = "#8a90a0"
-    ACCENT = "#4f8ef7"
-    ACCENT_D = "#3f7ae0"
-    OK = "#3ecf8e"
-    WARN = "#f5a623"
-    ERR = "#f85151"
-    BTN2 = "#1e2230"        # 次要按钮底
-    BTN2_HOVER = "#2a2f3d"
-    FIELD = "#0f1117"       # 输入框底：比卡片更暗一档，才有「凹进去」的层次
-    CHIP = "#1e2230"        # 信息小标签底
-    SELECT = "#22304d"      # 勾选/单选底
-else:
-    BG = "#f4f6f9"
-    CARD = "#ffffff"
-    LINE = "#e3e7ee"
-    TEXT = "#1f2430"
-    MUTED = "#6b7280"
-    ACCENT = "#2d7ff9"
-    ACCENT_D = "#1a63d8"
-    OK = "#16a34a"
-    WARN = "#d97706"
-    ERR = "#c0392b"
-    BTN2 = "#eef2f7"
-    BTN2_HOVER = "#e2e9f6"
-    FIELD = "#fbfcfe"
-    CHIP = "#f1f4fa"
-    SELECT = "#eef3ff"
-
-
-def _darken_titlebar(win):
-    """让系统标题栏也变深：不处理的话，深色窗口顶着一圈亮白边框很跳。"""
-    if not DARK:
-        return
-    try:
-        import ctypes
-        hwnd = win.winfo_id()
-        parent = ctypes.windll.user32.GetParent(hwnd)
-        if parent:
-            hwnd = parent
-        for attr in (20, 19):           # 20: Win10 1903+ / 19: 更老的 Win10
-            flag = ctypes.c_int(1)
-            if ctypes.windll.dwmapi.DwmSetWindowAttribute(
-                    hwnd, attr, ctypes.byref(flag), ctypes.sizeof(flag)) == 0:
-                break
-    except Exception:
-        pass
-
-
-def _scrollbar(parent, **kw):
-    """深色下换 ttk 滚动条。
-
-    Windows 的 tk.Scrollbar 走原生绘制，显式设了 -background/-troughcolor
-    也不生效（实测），深色窗口边上会留一条白条；clam 主题的 ttk 滚动条
-    认配色。浅色保持原来的 tk.Scrollbar，观感不动。
-    """
-    if DARK:
-        kw.pop("width", None)
-        return ttk.Scrollbar(parent, **kw)
-    return tk.Scrollbar(parent, **kw)
-
-
-def _apply_theme(root):
-    """深色主题的全局兜底。
-
-    tk 的默认色是系统浅色，几十个按钮/输入框里只要有一个没写底色，
-    深色窗口上就会闪出一块白（按下时的 activebackground 尤其明显）。
-    统一走 option 数据库给未显式指定的控件补默认值，比逐个控件改更稳。
-    """
-    if not DARK:
-        return
-    defaults = {
-        "*Button.activeBackground": BTN2_HOVER,
-        "*Button.activeForeground": TEXT,
-        "*Button.disabledForeground": MUTED,
-        "*Button.highlightBackground": BG,
-        "*Button.highlightColor": BG,
-        "*Checkbutton.background": CARD,
-        "*Checkbutton.activeBackground": CARD,
-        "*Checkbutton.activeForeground": TEXT,
-        "*Checkbutton.selectColor": SELECT,
-        "*Radiobutton.background": BG,
-        "*Radiobutton.activeBackground": BG,
-        "*Radiobutton.activeForeground": TEXT,
-        "*Radiobutton.selectColor": SELECT,
-        "*Entry.background": FIELD,
-        "*Entry.foreground": TEXT,
-        "*Entry.insertBackground": TEXT,
-        "*Entry.highlightBackground": LINE,
-        "*Entry.highlightColor": ACCENT,
-        "*Text.background": FIELD,
-        "*Text.foreground": TEXT,
-        "*Text.insertBackground": TEXT,
-        "*Text.selectBackground": ACCENT,
-        "*Text.selectForeground": "#ffffff",
-        "*Listbox.background": CARD,
-        "*Listbox.foreground": TEXT,
-        "*Listbox.selectBackground": ACCENT,
-        "*Listbox.selectForeground": "#ffffff",
-        "*Scrollbar.background": BTN2,
-        "*Scrollbar.troughColor": BG,
-        "*Scrollbar.activeBackground": LINE,
-        "*Scrollbar.highlightBackground": BG,
-        "*TCombobox*Listbox.background": CARD,
-        "*TCombobox*Listbox.foreground": TEXT,
-        "*TCombobox*Listbox.selectBackground": ACCENT,
-        "*TCombobox*Listbox.selectForeground": "#ffffff",
-    }
-    for key, val in defaults.items():
-        try:
-            root.option_add(key, val)
-        except tk.TclError:
-            pass
-    st = ttk.Style(root)
-    try:
-        # vista 主题不认 fieldbackground/arrowcolor，深色下必须是 clam
-        st.theme_use("clam")
-    except tk.TclError:
-        pass
-    st.configure("TCombobox", fieldbackground=FIELD, background=BTN2, foreground=TEXT,
-                 arrowcolor=TEXT, bordercolor=LINE, lightcolor=LINE, darkcolor=LINE,
-                 selectbackground=FIELD, selectforeground=TEXT, padding=2)
-    st.map("TCombobox",
-           fieldbackground=[("readonly", FIELD)],
-           foreground=[("readonly", TEXT), ("disabled", MUTED)],
-           background=[("active", BTN2_HOVER), ("pressed", BTN2_HOVER)],
-           arrowcolor=[("active", TEXT), ("disabled", MUTED)],
-           bordercolor=[("focus", ACCENT)],
-           lightcolor=[("focus", ACCENT)])
-    st.configure("TSpinbox", fieldbackground=FIELD, background=BTN2, foreground=TEXT,
-                 arrowcolor=TEXT, bordercolor=LINE, lightcolor=LINE, darkcolor=LINE,
-                 insertcolor=TEXT)
-    st.map("TSpinbox",
-           foreground=[("disabled", MUTED)],
-           background=[("active", BTN2_HOVER)],
-           arrowcolor=[("active", TEXT), ("disabled", MUTED)],
-           bordercolor=[("focus", ACCENT)])
-    for orient in ("Vertical", "Horizontal"):
-        st.configure("%s.TScrollbar" % orient, background=BTN2, troughcolor=BG,
-                     bordercolor=BG, arrowcolor=MUTED, lightcolor=BTN2,
-                     darkcolor=BTN2, gripcount=0)
-        st.map("%s.TScrollbar" % orient,
-               background=[("active", LINE), ("pressed", LINE)],
-               arrowcolor=[("active", TEXT)])
-
-FONT = ("Microsoft YaHei UI", 9)
-FONT_B = ("Microsoft YaHei UI", 9, "bold")
-FONT_T = ("Microsoft YaHei UI", 13, "bold")
-
-# ---------------------------------------------------------------- 参数说明小窗排版
-#
-# 说明窗的文字折行不在 Tk 里做，交给引擎层 weaknet.wrap_note_lines：
-# Tk 的 Label 只按「空格」断行，中文正文里为排版留的空格（→、≈、+ 两侧）
-# 全成了断点 —— 于是「·」条目符被甩到单独一行，「「本机 → 服务器」」
-# 这种引号短语被从中间劈开。折行下沉到引擎层后，两端（桌面 / 安卓）
-# 用同一套规则，同一个参数在电脑上和手机上不会长得不一样。
-#
-# 宽度（像素）：
-NOTE_PAD = 14            # 卡片内左右留白
-NOTE_TEXT_W = 330        # 正文一行最多多宽
-NOTE_TIP_INDENT = 12     # 「·」条目符占的宽度：符号停在左边，正文悬挂缩进
-NOTE_WIN_W = 380         # 说明窗固定宽度（正文区 330 + 左右留白 28 + 边框 + 窗口留白）
-
-# 引擎层折行需要知道「一段文字有多宽」，这里用 Tk 字体实测。
-# 不自己按字数估：中文一个字 13px、英文一个字母 7px、箭头 13px，
-# 估出来的宽度跟真实差几十像素，断行位置就全错了。
-_NOTE_FONT = None
-
-
-def _note_measure(text):
-    """量一段文字的像素宽（供 weaknet.wrap_note_lines 折行用）。"""
-    global _NOTE_FONT
-    if _NOTE_FONT is None:
-        _NOTE_FONT = tkfont.Font(family="Microsoft YaHei UI", size=10)
-    return _NOTE_FONT.measure(text)
-
-# GUI 里的短名称（Web 控制台仍用全名）：与 Android / 规格同源
-SHORT = W.PRESET_SHORT
-
-
-def _cap_name_var(var):
-    """自定义场景 / 弱网组合的名字输入框统一限 10 个字符。
-
-    用 StringVar 的 write trace 而不是 Entry 的 validate：中文输入法组字过程中
-    validate 容易把候选串误判成超限、导致打不出字；trace 里就地截断对键盘、
-    粘贴、输入法上屏、代码 set() 一视同仁。真正的兜底在引擎的
-    limit_item_name（API / 共享 / 老存档也走那条路），这里只是少打几个字。
-    """
-    def _on_write(*_args):
-        s = var.get() or ""
-        if len(s) > W.NAME_MAX:
-            var.set(s[:W.NAME_MAX])
-    var.trace_add("write", _on_write)
-    return var
-
-# key, 标签, 单位, 上限 —— 顺序与标签都来自 spec/spec.json
-FIELDS = [(p["key"], p["label"], p["unit"], p["max"]) for p in W.PARAM_SPECS]
-
-
-def fmt_rate(bps):
-    """字节/秒 → 人类可读"""
-    if bps >= 1024 * 1024:
-        return f"{bps / 1024 / 1024:.2f} MB/s"
-    if bps >= 1024:
-        return f"{bps / 1024:.1f} KB/s"
-    return f"{bps:.0f} B/s"
-
-
-def fmt_bytes(n):
-    if n >= 1024 * 1024 * 1024:
-        return f"{n / 1024 ** 3:.2f} GB"
-    if n >= 1024 * 1024:
-        return f"{n / 1024 ** 2:.1f} MB"
-    if n >= 1024:
-        return f"{n / 1024:.0f} KB"
-    return f"{n} B"
-
-
-def summarize(prof):
-    """一行简述参数要点 —— 列表里只看名字分不清两条场景的差别"""
-    bits = []
-    if prof.get("down_kbps") or prof.get("up_kbps"):
-        bits.append("↓%s/↑%s kbps" % (prof.get("down_kbps") or "∞",
-                                      prof.get("up_kbps") or "∞"))
-    if prof.get("latency_down_ms") or prof.get("latency_up_ms"):
-        bits.append("延迟 %s/%s ms" % (prof.get("latency_down_ms", 0),
-                                       prof.get("latency_up_ms", 0)))
-    if prof.get("loss_pct"):
-        bits.append("丢包 %g%%" % prof["loss_pct"])
-    if prof.get("disconnect_pct"):
-        bits.append("断连 %g%%" % prof["disconnect_pct"])
-    if prof.get("timeout_pct"):
-        bits.append("黑洞 %g%%" % prof["timeout_pct"])
-    if prof.get("dns_fail_pct"):
-        bits.append("DNS %g%%" % prof["dns_fail_pct"])
-    if prof.get("reject_pct"):
-        bits.append("拒连 %g%%" % prof["reject_pct"])
-    if prof.get("flap_sec"):
-        bits.append("周期断网 %gs" % prof["flap_sec"])
-    return " · ".join(bits) or "（不限制）"
-
-
-def detail(prof):
-    """参数全量摘要（含抖动 / 卡顿 / 周期断网），给「场景说明」窗口用。
-
-    与 summarize 分开：那个是列表里的一行简述，越长越挤；这里是详情页，
-    用户点进来就是想搞清「这支档位到底设了什么」，宁可全一点。
-    """
-    bits = []
-    if prof.get("down_kbps") or prof.get("up_kbps"):
-        bits.append("下行 %s / 上行 %s kbps" % (prof.get("down_kbps") or "∞",
-                                               prof.get("up_kbps") or "∞"))
-    if prof.get("latency_down_ms") or prof.get("latency_up_ms"):
-        bits.append("延迟 %s/%s ms（下/上）" % (prof.get("latency_down_ms", 0),
-                                              prof.get("latency_up_ms", 0)))
-    if prof.get("jitter_ms"):
-        bits.append("抖动 ±%g ms" % prof["jitter_ms"])
-    if prof.get("loss_pct"):
-        bits.append("丢包 %g%%" % prof["loss_pct"])
-        # 卡顿时长只在丢包后生效（模拟 TCP 重传等待），单独列出来没意义
-        if prof.get("stall_ms"):
-            bits.append("丢包后停顿 %g ms" % prof["stall_ms"])
-    if prof.get("disconnect_pct"):
-        bits.append("随机断连 %g%%" % prof["disconnect_pct"])
-    if prof.get("timeout_pct"):
-        bits.append("黑洞 %g%%" % prof["timeout_pct"])
-    if prof.get("dns_fail_pct"):
-        bits.append("DNS 故障 %g%%" % prof["dns_fail_pct"])
-    if prof.get("reject_pct"):
-        bits.append("拒连 %g%%" % prof["reject_pct"])
-    if prof.get("flap_sec"):
-        bits.append("每 %gs 断网 %gs" % (prof["flap_sec"],
-                                        prof.get("flap_blackout_sec", 2)))
-    return " · ".join(bits) or "（不限制：所有流量原样直通）"
-
-
-class App:
+class App(NotesMixin, ScopeMixin, ShareMixin, UsbMixin):
     def __init__(self, root, loop, ctrl_port):
         self.root = root
         self.loop = loop
@@ -446,6 +166,9 @@ class App:
         self.vars = {}
         self._last = (time.time(), W.G.bytes_down, W.G.bytes_up)
         self._rate = (0.0, 0.0)
+        # 控件上次下发的选项缓存（weakref：按钮重建后旧条目自动消失）
+        self._wcache = weakref.WeakKeyDictionary()
+        self._frames = None                   # 刷新耗时统计，首次 refresh 时创建
         self._ev_seq = -1
         self._closing = False
         self.share_win = None                 # 环境共享二级窗口，None = 当前未打开
@@ -1053,7 +776,9 @@ class App:
             on = (k == key)
             bg = ACCENT if on else BTN2
             fg = "white" if on else MUTED
-            b.configure(bg=bg, fg=fg, activebackground=bg, activeforeground=fg)
+            # 走 _set 而不是直写：标签页没变时这一轮就不必再动控件。
+            # activebackground 一起下发，鼠标悬停色才跟当前选中态一致。
+            self._set(b, bg=bg, fg=fg, activebackground=bg, activeforeground=fg)
 
     def switch_tab(self, key, manual=False):
         """切换「场景 / 组合」标签页。
@@ -1138,301 +863,15 @@ class App:
 
     # ---------------- 场景说明（二级窗口） ----------------
 
-    def open_preset_notes(self):
-        """场景说明：按分类列出每支内置档位的参数与适用症状。
 
-        入口是「场景预设」标题右侧的「！」。17 支档位里有一半光看名字分不清
-        ——「4G 弱网」和「弱 Wi-Fi」都是低速+丢包，「黑洞」和「完全断网」都是连不上
-        但机制完全不同（挂住 vs 立刻失败）。这里把「模拟的什么现场 + 典型症状」
-        和实际参数一起摊开，省得每次都去翻源码。
-        """
-        if self.notes_win is not None:
-            try:                              # 已经开着就提到前台，不重复建
-                self.notes_win.deiconify()
-                self.notes_win.lift()
-                return
-            except Exception:
-                self.notes_win = None
 
-        win = tk.Toplevel(self.root)
-        win.title("场景说明")
-        # 高度按屏幕夹一下：小屏上 660 加上标题栏会顶出屏幕底部
-        sh = win.winfo_screenheight()
-        nh = min(660, max(360, sh - 120))
-        win.geometry("580x%d" % nh)
-        win.configure(bg=BG)
-        try:
-            win.transient(self.root)
-        except Exception:
-            pass
-        # 居中到主窗口上（不指定位置时系统会随便放，经常跑到屏幕角落）
-        try:
-            self.root.update_idletasks()
-            rx, ry = self.root.winfo_rootx(), self.root.winfo_rooty()
-            rw, rh = self.root.winfo_width(), self.root.winfo_height()
-            win.geometry("+%d+%d" % (max(0, rx + (rw - 580) // 2),
-                                     max(0, ry + (rh - nh) // 2)))
-        except Exception:
-            pass
-        self.notes_win = win
-
-        head = tk.Frame(win, bg=CARD, highlightbackground=LINE, highlightthickness=1)
-        head.pack(fill="x", padx=12, pady=12)
-        # 不放「返回」按钮：标题栏右上角的 ✕ 就能关这扇窗，
-        # 两个入口干的是同一件事，看的人只会犯迷糊
-        tk.Label(head, text="场景说明", font=FONT_T, bg=CARD, fg=TEXT).pack(
-            side="left")
-        tk.Label(head, text="共 %d 支" % len(W.PRESETS), font=FONT, bg=CARD,
-                 fg=MUTED).pack(side="right")
-
-        wrap = tk.Frame(win, bg=BG)
-        wrap.pack(fill="both", expand=True, padx=12, pady=(0, 12))
-        txt = tk.Text(wrap, font=FONT, bg=CARD, fg=TEXT, relief="flat",
-                      highlightthickness=1, highlightbackground=LINE, bd=0,
-                      wrap="char",          # 中文没有空格，按字符换行才不会溢出
-                      padx=14, pady=12, spacing1=1, spacing3=3,
-                      takefocus=0, cursor="arrow")
-        sb = _scrollbar(wrap, command=txt.yview)
-        txt.configure(yscrollcommand=sb.set)
-        txt.pack(side="left", fill="both", expand=True)
-        sb.pack(side="right", fill="y")
-
-        txt.tag_configure("cat", font=FONT_B, foreground=ACCENT,
-                          spacing1=12, spacing3=3)
-        txt.tag_configure("name", font=FONT_B, foreground=TEXT, spacing1=7)
-        txt.tag_configure("param", font=FONT, foreground=MUTED,
-                          lmargin1=14, lmargin2=14, spacing3=2)
-        txt.tag_configure("note", font=FONT, foreground=TEXT,
-                          lmargin1=14, lmargin2=14, spacing3=6)
-
-        self.notes_txt = txt
-        self._fill_preset_notes()
-        win.bind("<Escape>", lambda _e: self.close_preset_notes())
-        win.protocol("WM_DELETE_WINDOW", lambda: self.close_preset_notes())
-
-    def _fill_preset_notes(self):
-        """按当前选中的场景重画说明正文（切换场景时刷新「当前选中」标记）"""
-        txt = getattr(self, "notes_txt", None)
-        if txt is None:
-            return
-        cur = W.G.preset_key
-        cats = {}
-        for key, (name, cat, _extra) in W.PRESETS.items():
-            cats.setdefault(cat, []).append((key, name))
-        txt.configure(state="normal")
-        txt.delete("1.0", "end")
-        for cat in ("常规网络", "弱网环境", "极端环境"):
-            items = cats.get(cat) or []
-            if not items:
-                continue
-            txt.insert("end", cat + "\n", "cat")
-            for key, name in items:
-                try:
-                    prof = W.build_preset_profile(key)
-                except Exception:
-                    prof = {}
-                mark = "　　← 当前选中" if key == cur else ""
-                txt.insert("end", name + mark + "\n", "name")
-                txt.insert("end", detail(prof) + "\n", "param")
-                note = W.PRESET_NOTES.get(key, "")
-                if note:
-                    txt.insert("end", note + "\n", "note")
-        txt.configure(state="disabled")
-        self._notes_key = cur
-
-    def close_preset_notes(self):
-        if self.notes_win is None:
-            return
-        try:
-            self.notes_win.destroy()
-        except Exception:
-            pass
-        self.notes_win = None
-        self.notes_txt = None
 
     # ---------------- 参数说明（每个参数自己的「！」） ----------------
 
-    def _param_help_btn(self, parent, key, gap=2):
-        """参数名后面的「！」小入口。
 
-        刻意做得不显眼：无边框、无底色（和卡片同色）、灰色字，只有鼠标移上去
-        才变蓝。参数区本来就密，13 个带边框的按钮会把参数名淹掉；但也不能
-        做成「只有悬停才出现」—— 那样用键盘或第一次用的人根本不知道有这东西。
 
-        gap：按钮右侧补的空白，由调用方按名字实际宽度算，用来把各行的数字框
-        顶到同一列（见 _build_custom）。
 
-        用 Button 而不是可点的 Label：Button 自带按下反馈。takefocus=0 是为了
-        不让 Tab 顺序被 13 个「！」打断（调参数时按 Tab 应该直接跳下一个数字框）。
-        """
-        b = tk.Button(parent, text="！", font=FONT,
-                      bg=CARD, fg=MUTED, relief="flat", bd=0,
-                      highlightthickness=0, padx=1, pady=0, cursor="hand2",
-                      takefocus=0, activebackground=CARD, activeforeground=ACCENT,
-                      command=lambda k=key: self.open_param_note(k))
-        b.pack(side="left", padx=(1, gap))
-        # 悬停才变蓝：既是反馈，也让人确认这东西能点
-        b.bind("<Enter>", lambda _e, w=b: w.configure(fg=ACCENT))
-        b.bind("<Leave>", lambda _e, w=b: w.configure(fg=MUTED))
-        return b
 
-    def open_param_note(self, key):
-        """点参数右侧的「！」→ 弹出这个参数的说明。
-
-        再点同一个「！」就收起：小窗口飘在参数旁边，没有明显的关闭路径时
-        用户会以为点不掉。换一个参数则直接换成那一个，不会叠出第二个窗口。
-        """
-        if self.param_win is not None and self._param_key == key:
-            self.close_param_note()
-            return
-        meta = next((f for f in FIELDS if f[0] == key), None)
-        if meta is None:
-            return
-        _k, label, unit, top = meta
-        note = W.PARAM_NOTES.get(key, "")
-        self.close_param_note()
-
-        win = tk.Toplevel(self.root)
-        win.withdraw()                        # 先藏起来，摆好位置再显示，免得闪一下
-        win.title("参数说明 · " + label)
-        win.configure(bg=BG)
-        win.resizable(False, False)
-        try:
-            win.transient(self.root)          # 跟着主窗口走，不占任务栏
-        except Exception:
-            pass
-
-        card = tk.Frame(win, bg=CARD, highlightbackground=LINE, highlightthickness=1)
-        card.pack(fill="both", expand=True, padx=10, pady=10)
-
-        head = tk.Frame(card, bg=CARD)
-        head.pack(fill="x", padx=NOTE_PAD, pady=(12, 0))
-        # 标题标记用半角「!」，不用全角「！」。
-        # 全角感叹号在 Microsoft YaHei UI 里占 15px 宽，墨迹却只有 2px，
-        # 还挤在格子左缘 —— 跟参数名之间凭空多出 20 多像素空隙，看起来像浮在半空。
-        # 半角只有 5px 宽、墨迹居中，和参数名挨得紧。
-        tk.Label(head, text="!", font=("Microsoft YaHei UI", 11, "bold"),
-                 bg=CARD, fg=ACCENT, padx=0, bd=0).pack(side="left")
-        tk.Label(head, text=label, font=("Microsoft YaHei UI", 11, "bold"),
-                 bg=CARD, fg=TEXT, padx=0, bd=0).pack(side="left", padx=(6, 0))
-        tk.Button(head, text="✕", font=("Microsoft YaHei UI", 10), bg=CARD, fg=MUTED,
-                  relief="flat", bd=0, padx=4, pady=0, cursor="hand2", takefocus=0,
-                  activebackground=CARD, activeforeground=TEXT,
-                  command=self.close_param_note).pack(side="right")
-
-        # 单位与取值范围做成两枚小标签：一眼分得清「这是单位」和「这是上限」，
-        # 挤在一行文字里读起来像半句话
-        chips = tk.Frame(card, bg=CARD)
-        chips.pack(fill="x", padx=NOTE_PAD, pady=(8, 0))
-        if unit:
-            self._note_chip(chips, "单位", unit)
-        self._note_chip(chips, "取值范围", "0 ~ %s" % top)
-
-        tk.Frame(card, bg=LINE, height=1).pack(fill="x", padx=NOTE_PAD, pady=(11, 0))
-
-        # 正文分两层：第一段讲「这项干什么」，后面的讲「坑在哪」。
-        # 之前整段糊在一起，读者分不清哪句是提醒，最容易踩的那句反倒被略过
-        body, tips = W.split_param_note(note)
-        tk.Label(card, text="作用", font=("Microsoft YaHei UI", 9, "bold"),
-                 bg=CARD, fg=MUTED, padx=0, bd=0).pack(
-            anchor="w", padx=NOTE_PAD, pady=(11, 0))
-        # 折行由引擎层做（见文件头 NOTE_* 常量的说明）：先把文字切成不可再分的
-        # 原子，再按像素宽贪心拼行。Tk 自己的 wraplength 只按空格断行，
-        # 中文里为排版留的空格全成了断点，会把「·」甩到单独一行、
-        # 把「「本机 → 服务器」」从中间劈开。
-        body_lines = W.wrap_note_lines(body or "（暂无说明）",
-                                       _note_measure, NOTE_TEXT_W)
-        tk.Label(card, text="\n".join(body_lines),
-                 font=("Microsoft YaHei UI", 10), bg=CARD, fg=TEXT,
-                 anchor="w", justify="left", padx=0, bd=0).pack(
-            fill="x", padx=NOTE_PAD, pady=(4, 0))
-
-        if tips:
-            tk.Label(card, text="注意", font=("Microsoft YaHei UI", 9, "bold"),
-                     bg=CARD, fg=WARN, padx=0, bd=0).pack(
-                anchor="w", padx=NOTE_PAD, pady=(13, 0))
-            for i, tip in enumerate(tips):
-                # 「·」单独做一个控件，不再跟正文拼在同一个字符串里。
-                # 拼在一起时 Tk 会把它当一个词，单独甩到一行（截图里的那行光秃秃的「·」）。
-                # 拆开后它固定待在左边，右侧正文整体缩进 —— 悬挂缩进，
-                # 换行后的第二行仍然和第一行正文对齐。
-                row = tk.Frame(card, bg=CARD)
-                row.pack(fill="x", padx=NOTE_PAD, pady=(5 if i == 0 else 4, 0))
-                row.grid_columnconfigure(0, minsize=NOTE_TIP_INDENT)
-                row.grid_columnconfigure(1, weight=1)
-                tk.Label(row, text="·", font=("Microsoft YaHei UI", 10),
-                         bg=CARD, fg=TEXT, padx=0, bd=0,
-                         anchor="w").grid(row=0, column=0, sticky="w")
-                tip_lines = W.wrap_note_lines(tip, _note_measure,
-                                              NOTE_TEXT_W - NOTE_TIP_INDENT)
-                tk.Label(row, text="\n".join(tip_lines),
-                         font=("Microsoft YaHei UI", 10), bg=CARD, fg=TEXT,
-                         anchor="w", justify="left", padx=0, bd=0).grid(
-                    row=0, column=1, sticky="w")
-
-        tk.Button(card, text="知道了", font=("Microsoft YaHei UI", 9), bg=BTN2,
-                  fg=TEXT, relief="flat", padx=16, pady=5, cursor="hand2",
-                  takefocus=0, bd=0, highlightthickness=1, highlightbackground=LINE,
-                  command=self.close_param_note).pack(anchor="e", padx=NOTE_PAD,
-                                                      pady=(16, 13))
-
-        self.param_win = win
-        self._param_key = key
-        win.protocol("WM_DELETE_WINDOW", self.close_param_note)
-        win.bind("<Escape>", lambda _e: self.close_param_note())
-        self._place_param_note(win, key)
-        win.deiconify()
-
-    def _note_chip(self, parent, name, value):
-        """说明窗里的一枚小标签：标题（浅底）+ 取值（等宽感）。"""
-        chip = tk.Frame(parent, bg=CHIP, highlightbackground=LINE,
-                        highlightthickness=1)
-        chip.pack(side="left", padx=(0, 6))
-        tk.Label(chip, text=name, font=("Microsoft YaHei UI", 9), bg=CHIP,
-                 fg=MUTED, padx=6, pady=2).pack(side="left")
-        tk.Label(chip, text=value, font=("Microsoft YaHei UI", 9, "bold"),
-                 bg=CHIP, fg=TEXT, padx=6, pady=2).pack(side="left")
-
-    def _place_param_note(self, win, key):
-        """贴在被点的「！」旁边：右边放不下就翻到左边，最后夹在屏幕内。
-
-        不挂在鼠标坐标上：键盘 / 脚本触发时没有鼠标位置，取按钮自己的位置更稳。
-
-        宽度写死：正文已经按固定宽度折好行了，若让 Tk 按最长的一行自适应，
-        换个参数窗口就忽宽忽窄 —— 看着像没做完。
-        """
-        try:
-            win.update_idletasks()
-            w, h = NOTE_WIN_W, win.winfo_reqheight()
-            btn = self.param_btns.get(key)
-            if btn is not None and btn.winfo_ismapped():
-                bx, by = btn.winfo_rootx(), btn.winfo_rooty()
-                bw, bh = btn.winfo_width(), btn.winfo_height()
-            else:
-                bx = self.root.winfo_rootx() + 60
-                by = self.root.winfo_rooty() + 60
-                bw = bh = 0
-            sw, sh = win.winfo_screenwidth(), win.winfo_screenheight()
-            x = bx + bw + 6
-            if x + w > sw - 8:                # 右边装不下 → 翻到按钮左侧
-                x = bx - w - 6
-            y = by - 6
-            if y + h > sh - 48:               # 48 给任务栏留位置
-                y = sh - 48 - h
-            win.geometry("%dx%d+%d+%d" % (w, h, max(8, x), max(8, y)))
-        except Exception:
-            pass
-
-    def close_param_note(self):
-        if self.param_win is None:
-            self._param_key = None
-            return
-        try:
-            self.param_win.destroy()
-        except Exception:
-            pass
-        self.param_win = None
-        self._param_key = None
 
     # ---------------- 自定义栏 ----------------
 
@@ -1463,18 +902,17 @@ class App:
             pid = key[2:]
             it = next((x for x in getattr(self, "mine_items", [])
                        if x["id"] == pid), None)
-        if it is None:
-            self.btn_mine_del.pack_forget()
-            self.lab_mine.config(
-                text="保存后即可在这里点一下切换；选中某条自定义，"
-                     "上方才会出现它的删除按钮。" if self.mine_items
-                else "还没有保存的场景：展开「自定义参数」调好参数，"
-                     "填个名字点「保存当前参数」。")
-            return
-        if not self.btn_mine_del.winfo_manager():
-            self.btn_mine_del.pack(side="left")
-        self.btn_mine_del.config(text="🗑 删除当前场景「%s」" % it["name"])
-        self.lab_mine.config(text="只删除这一条保存的场景，不影响内置预设。")
+        v = S.mine_hint(len(getattr(self, "mine_items", [])),
+                        it["name"] if it else None)
+        if v["del_text"] is None:
+            # 已经收起时不必再 pack_forget：那也是几何管理器的一次调用
+            if self.btn_mine_del.winfo_manager():
+                self.btn_mine_del.pack_forget()
+        else:
+            if not self.btn_mine_del.winfo_manager():
+                self.btn_mine_del.pack(side="left")
+            self._set(self.btn_mine_del, text=v["del_text"])
+        self._set(self.lab_mine, text=v["lab_text"])
 
     def save_mine(self):
         name = W.limit_item_name(self.mine_name.get())
@@ -1518,123 +956,7 @@ class App:
 
     # ---------------- 弱网组合 ----------------
 
-    def open_combo_notes(self, parent=None):
-        """组合说明：组合怎么播 + 每支的段序 + 几个能照抄的例子。
 
-        入口在「新建 / 编辑组合」界面里（标题右侧的「！」）。组合是把几支场景
-        按时间排队播，按钮上只写着「通勤」「抢购」这类名字，猜不出它到底模拟了
-        什么 —— 真正要动手排组合的时候才需要知道这些，所以入口跟着编辑器走。
-
-        parent 给了就把说明窗挂在它下面（transient）：从编辑器里点开的说明窗
-        应当压在编辑器上面，编辑器一关它也跟着消失，不会剩个孤儿窗口飘在主
-        界面上。
-        """
-        if self.combo_notes_win is not None:
-            try:                              # 已经开着就提到前台，不重复建
-                self.combo_notes_win.deiconify()
-                self.combo_notes_win.lift()
-                return
-            except Exception:
-                self.combo_notes_win = None
-
-        win = tk.Toplevel(self.root)
-        win.title("弱网组合说明")
-        sh = win.winfo_screenheight()
-        nh = min(700, max(400, sh - 120))
-        win.geometry("600x%d" % nh)
-        win.configure(bg=BG)
-        try:
-            win.transient(parent if parent is not None else self.root)
-        except Exception:
-            pass
-        # 居中：跟着 parent 走（从编辑器里打开就该压在编辑器中间），
-        # 没有 parent 就居中到主窗口
-        try:
-            anchor = parent if parent is not None else self.root
-            anchor.update_idletasks()
-            rx, ry = anchor.winfo_rootx(), anchor.winfo_rooty()
-            rw, rh = anchor.winfo_width(), anchor.winfo_height()
-            win.geometry("+%d+%d" % (max(0, rx + (rw - 600) // 2),
-                                     max(0, ry + (rh - nh) // 2)))
-        except Exception:
-            pass
-        self.combo_notes_win = win
-
-        head = tk.Frame(win, bg=CARD, highlightbackground=LINE, highlightthickness=1)
-        head.pack(fill="x", padx=12, pady=12)
-        # 不放「返回」按钮：标题栏右上角的 ✕ 就能关这扇窗，
-        # 两个入口干的是同一件事，看的人只会犯迷糊
-        tk.Label(head, text="弱网组合说明", font=FONT_T, bg=CARD, fg=TEXT).pack(
-            side="left")
-        tk.Label(head, text="共 %d 支" % len(W.get_combos()), font=FONT, bg=CARD,
-                 fg=MUTED).pack(side="right")
-
-        wrap = tk.Frame(win, bg=BG)
-        wrap.pack(fill="both", expand=True, padx=12, pady=(0, 12))
-        txt = tk.Text(wrap, font=FONT, bg=CARD, fg=TEXT, relief="flat",
-                      highlightthickness=1, highlightbackground=LINE, bd=0,
-                      wrap="char", padx=14, pady=12, spacing1=1, spacing3=3,
-                      takefocus=0, cursor="arrow")
-        sb = _scrollbar(wrap, command=txt.yview)
-        txt.configure(yscrollcommand=sb.set)
-        txt.pack(side="left", fill="both", expand=True)
-        sb.pack(side="right", fill="y")
-
-        txt.tag_configure("cat", font=FONT_B, foreground=ACCENT,
-                          spacing1=12, spacing3=3)
-        txt.tag_configure("name", font=FONT_B, foreground=TEXT, spacing1=7)
-        txt.tag_configure("param", font=FONT, foreground=MUTED,
-                          lmargin1=14, lmargin2=14, spacing3=2)
-        txt.tag_configure("note", font=FONT, foreground=TEXT,
-                          lmargin1=14, lmargin2=14, spacing3=6)
-        txt.tag_configure("tip", font=FONT, foreground=WARN,
-                          lmargin1=14, lmargin2=14, spacing3=4)
-
-        # ---- 1. 机制 ----
-        txt.insert("end", "组合怎么播\n", "cat")
-        intro, examples, tips = W.combo_doc_parts()
-        for line in intro.split("\n"):
-            txt.insert("end", line + "\n", "note")
-
-        # ---- 2. 我自己的组合 ----
-        combos = W.get_combos()
-        txt.insert("end", "我保存的组合\n", "cat")
-        if not combos:
-            txt.insert("end", "还没有组合。点「＋ 新建组合」把几支场景排成一条链。\n",
-                       "note")
-        else:
-            cur = W.G.preset_key
-            for c in combos:
-                mark = "　　← 当前选中" if W.COMBO_KEY_PREFIX + c["id"] == cur else ""
-                txt.insert("end", c["name"] + mark + "\n", "name")
-                txt.insert("end", W.combo_summary(c) + "\n", "param")
-
-        # ---- 3. 推荐例子 ----
-        txt.insert("end", "推荐例子（照抄就能用）\n", "cat")
-        for ex in examples:
-            txt.insert("end", ex["name"] + "　" + ex["desc"] + "\n", "name")
-            txt.insert("end", "怎么排：" + ex["steps"] + "\n", "param")
-            txt.insert("end", ex["effect"] + "\n", "note")
-
-        # ---- 4. 提醒 ----
-        txt.insert("end", "注意\n", "cat")
-        for tip in tips:
-            txt.insert("end", "· " + tip + "\n", "tip")
-
-        txt.configure(state="disabled")
-        self.combo_notes_txt = txt
-        win.bind("<Escape>", lambda _e: self.close_combo_notes())
-        win.protocol("WM_DELETE_WINDOW", self.close_combo_notes)
-
-    def close_combo_notes(self):
-        if self.combo_notes_win is None:
-            return
-        try:
-            self.combo_notes_win.destroy()
-        except Exception:
-            pass
-        self.combo_notes_win = None
-        self.combo_notes_txt = None
 
     def _scene_options(self):
         """编辑器下拉的候选：内置预设 + 自定义场景。返回 (显示名列表, key 列表)
@@ -1713,31 +1035,24 @@ class App:
             cid = key[len(W.COMBO_KEY_PREFIX):]
             combo = next((c for c in getattr(self, "combo_items", [])
                           if c["id"] == cid), None)
+        st = W.combo_state() if combo is not None else None
+        text = S.combo_bar(combo["name"] if combo else None,
+                           W.combo_summary(combo) if combo else None,
+                           st, W.G.limit_on, W.MAX_COMBO_STEPS,
+                           bool(getattr(self, "combo_items", [])))
         if combo is None:
             for b in (self.btn_combo_edit, self.btn_combo_del):
                 try:
-                    b.pack_forget()
+                    if b.winfo_manager():
+                        b.pack_forget()
                 except Exception:
                     pass
-            self.lab_combo.config(text=(
-                "点一支组合先选中它，「开启限速」后按顺序播放；双击可查看/编辑并删除。"
-                if self.combo_items else
-                "还没有组合：点「＋ 新建组合」，把最多 %d 支场景排成一条链路。"
-                % W.MAX_COMBO_STEPS))
-            return
-        for b in (self.btn_combo_edit, self.btn_combo_del):
-            if not b.winfo_manager():
-                b.pack(side="left", padx=(0 if b is self.btn_combo_edit else 8, 0))
-        self.btn_combo_del.config(text="🗑 删除「%s」" % combo["name"])
-        st = W.combo_state()
-        if st:
-            text = "▶ 正在播放第 %d/%d 段，还剩 %d 秒%s" % (
-                st["step"], st["total"], st["left"], "（循环）" if st["loop"] else "")
-        elif not W.G.limit_on:
-            text = "已选中，点「开启限速」后按序播放：%s" % W.combo_summary(combo)
         else:
-            text = W.combo_summary(combo)
-        self.lab_combo.config(text=text)
+            for b in (self.btn_combo_edit, self.btn_combo_del):
+                if not b.winfo_manager():
+                    b.pack(side="left", padx=(0 if b is self.btn_combo_edit else 8, 0))
+            self._set(self.btn_combo_del, text="🗑 删除「%s」" % combo["name"])
+        self._set(self.lab_combo, text=text)
 
     def edit_combo(self):
         key = W.G.preset_key or ""
@@ -2112,646 +1427,34 @@ class App:
     def _build_stats(self):
         pass   # 实时状态已并入顶栏（见 _build_header）
 
-    def _build_scope(self):
-        """接管范围：指定哪些程序进入弱网模拟（可多选）。
-
-        Windows 的系统代理是进程无关的，无法只对某个 exe 生效，因此这里改在
-        代理层按来源进程过滤 —— 范围外的程序照样经过代理，但会被原样转发、
-        不受任何弱网影响，效果等同没被接管。
-
-        候选程序动辄几十上百个，直接摊在主窗口会把下面的面板挤没，
-        所以主界面只放两个并排入口（接管一切 / 接管范围…），勾选放进二级窗口（open_scope）。
-        """
-        box = self._card(self.root, "接管范围")
-        self.scope_card = box
-        self.scope_win = None                 # 二级窗口，None = 当前未打开
-        self.scope_items = []                 # 全部候选程序名
-        self.scope_view = []                  # 当前筛选后显示的那部分
-        self.scope_sel = set()                # 二级窗口里的勾选（未保存前不进引擎）
-        self.scope_mode = tk.StringVar(value=W.G.scope_mode)
-
-        row = tk.Frame(box, bg=CARD)
-        row.pack(fill="x")
-        tk.Label(row, text="当前：", font=FONT, bg=CARD, fg=MUTED).pack(side="left")
-        self.lab_scope = tk.Label(row, text="全部程序", font=FONT_B, bg=CARD,
-                                  fg=TEXT, anchor="w")
-        self.lab_scope.pack(side="left")
-        # 两个入口并排：[接管一切] [接管范围…]，当前生效的那个高亮成实心主按钮
-        self.scope_open_btn = tk.Button(
-            row, font=FONT_B, relief="flat", padx=14, pady=5,
-            cursor="hand2", command=self.open_scope)
-        self.scope_open_btn.pack(side="right")
-        self.scope_all_btn = tk.Button(
-            row, font=FONT_B, relief="flat", padx=14, pady=5,
-            cursor="hand2", command=self.scope_all)
-        self.scope_all_btn.pack(side="right", padx=(8, 0))
-        tk.Label(box, text="范围外的程序仍会经过代理，但会被原样转发、不受弱网影响；"
-                           "程序需先发起过网络连接才会出现在列表里。",
-                 font=FONT, bg=CARD, fg=MUTED, anchor="w", justify="left",
-                 wraplength=800).pack(fill="x", pady=(6, 0))
-        self._scope_tip()
 
     # ---------------- 接管范围：二级窗口 ----------------
 
-    def _scope_sync_btns(self):
-        """主界面两个并排入口的当前态：生效中的那个是实心主按钮，另一个是浅底。"""
-        if not hasattr(self, "scope_all_btn"):
-            return
-        allmode = (W.G.scope_mode == "all")
-        self.scope_all_btn.config(
-            text=("✔ " if allmode else "") + "接管一切",
-            bg=ACCENT if allmode else BTN2, fg="white" if allmode else TEXT)
-        self.scope_open_btn.config(
-            text=("✔ " if not allmode else "") + "接管范围…",
-            bg=ACCENT if not allmode else BTN2, fg="white" if not allmode else TEXT)
 
-    def scope_all(self):
-        """「接管一切」：一键回到全部接管（已是全部就不重复写，免得多一条无用日志）"""
-        if W.G.scope_mode == "all":
-            return
-        W.set_scope("all", [])
-        W.log_event("config", "接管范围：全部程序")
-        self.scope_mode.set("all")
-        self.scope_sel = set()
-        if self.scope_win is not None:
-            self._scope_fill()
-        self._scope_tip()
-        self.refresh()
 
-    def open_scope(self):
-        """打开二级窗口：罗列所有候选程序，勾选后保存 / 返回"""
-        if self.scope_win is not None:
-            try:                              # 已经开着就提到前台，不重复建
-                self.scope_win.deiconify()
-                self.scope_win.lift()
-                return
-            except Exception:
-                self.scope_win = None
 
-        win = tk.Toplevel(self.root)
-        win.title("接管范围")
-        win.geometry("520x560")
-        win.configure(bg=BG)
-        try:
-            win.transient(self.root)
-        except Exception:
-            pass
-        self.scope_win = win
-        self.scope_mode.set(W.G.scope_mode)
-        self.scope_sel = set(W.G.scope_list)      # 以引擎当前值为起点
 
-        head = tk.Frame(win, bg=CARD, highlightbackground=LINE, highlightthickness=1)
-        head.pack(fill="x", padx=12, pady=12)
-        # 不放「返回」按钮：标题栏右上角的 ✕ 就能关这扇窗，
-        # 两个入口干的是同一件事，看的人只会犯迷糊
-        tk.Label(head, text="接管范围", font=FONT_T, bg=CARD, fg=TEXT).pack(
-            side="left")
-        self.lab_scope_count = tk.Label(head, text="", font=FONT, bg=CARD, fg=MUTED)
-        self.lab_scope_count.pack(side="right")
 
-        modes = tk.Frame(win, bg=BG)
-        modes.pack(fill="x", padx=12)
-        for val, text in [("all", "全部接管"),
-                          ("only", "仅接管选定程序"),
-                          ("exclude", "排除选定程序")]:
-            tk.Radiobutton(modes, text=text, variable=self.scope_mode, value=val,
-                           bg=BG, fg=TEXT, font=FONT, selectcolor=SELECT,
-                           activebackground=BG, highlightthickness=0,
-                           command=self._scope_sync_count).pack(side="left", padx=(0, 14))
 
-        self.scope_search = tk.StringVar()
-        ent = tk.Entry(win, textvariable=self.scope_search, font=FONT,
-                       relief="flat", highlightthickness=1, highlightbackground=LINE,
-                       highlightcolor=ACCENT, bg=CARD, fg=TEXT)
-        ent.pack(fill="x", padx=12, pady=(8, 0))
-        ent.bind("<KeyRelease>", lambda _e: self._scope_fill())
 
-        bar = tk.Frame(win, bg=BG)
-        bar.pack(fill="x", padx=12, pady=(8, 0))
-        tk.Button(bar, text="全选", font=FONT, bg=BTN2, fg=TEXT, relief="flat",
-                  padx=12, pady=4, cursor="hand2",
-                  command=lambda: self._scope_all(True)).pack(side="left")
-        tk.Button(bar, text="清空", font=FONT, bg=BTN2, fg=TEXT, relief="flat",
-                  padx=12, pady=4, cursor="hand2",
-                  command=lambda: self._scope_all(False)).pack(side="left", padx=(8, 0))
-        tk.Button(bar, text="刷新列表", font=FONT, bg=BTN2, fg=TEXT, relief="flat",
-                  padx=12, pady=4, cursor="hand2",
-                  command=self.reload_scope).pack(side="left", padx=(8, 0))
-        self.lab_scope_list = tk.Label(bar, text="", font=FONT, bg=BG, fg=MUTED)
-        self.lab_scope_list.pack(side="right")
 
-        wrap = tk.Frame(win, bg=BG)
-        wrap.pack(fill="both", expand=True, padx=12, pady=(8, 0))
-        # EXTENDED 支持 Ctrl/Shift 多选；exportselection=False 避免焦点切换时丢选择
-        self.scope_box = tk.Listbox(wrap, selectmode=tk.EXTENDED, font=("Consolas", 9),
-                                    bg=CARD, fg=TEXT, relief="flat",
-                                    highlightthickness=1, highlightbackground=LINE,
-                                    bd=0, exportselection=False)
-        sb = _scrollbar(wrap, command=self.scope_box.yview)
-        self.scope_box.configure(yscrollcommand=sb.set)
-        self.scope_box.pack(side="left", fill="both", expand=True)
-        sb.pack(side="right", fill="y")
-        self.scope_box.bind("<<ListboxSelect>>", self._scope_on_select)
 
-        foot = tk.Frame(win, bg=BG)
-        foot.pack(fill="x", padx=12, pady=10)
-        # 底部只留「保存」。取消用标题栏的 ✕ —— 它走的是同一条关闭逻辑
-        # （未保存还会先问一句「放弃改动？」），摆两个入口纯属重复
-        tk.Button(foot, text="保存", font=FONT_B, bg=ACCENT, fg="white", relief="flat",
-                  padx=20, pady=7, cursor="hand2",
-                  command=self.apply_scope).pack(side="left", expand=True, fill="x")
-        win.protocol("WM_DELETE_WINDOW", lambda: self.close_scope())
-        win.bind("<Escape>", lambda _e: self.close_scope())
 
-        self.reload_scope()
-        try:
-            ent.focus_set()
-        except Exception:
-            pass
 
-    def reload_scope(self):
-        """刷新候选程序列表（二级窗口开着时同步重画）"""
-        names = set(W.list_procs()) | set(W.G.scope_seen.keys()) | set(W.G.scope_list)
-        names = sorted(n for n in names if n and n != "<未识别>" and n.lower() != "system")
-        self.scope_items = names
-        if self.scope_win is not None:
-            self._scope_fill()
-        self._scope_tip()
 
-    def _scope_fill(self):
-        """按搜索词重画列表，并把 self.scope_sel 回填成选中态"""
-        q = (self.scope_search.get() if self.scope_win is not None else "").strip().lower()
-        self.scope_view = [n for n in self.scope_items if not q or q in n.lower()]
-        self.scope_box.delete(0, "end")
-        for n in self.scope_view:
-            self.scope_box.insert("end", n)
-        for i, n in enumerate(self.scope_view):
-            if n in self.scope_sel:
-                self.scope_box.selection_set(i)
-        self.lab_scope_list.config(
-            text="共 %d 项" % len(self.scope_items) if len(self.scope_view) == len(self.scope_items)
-            else "筛出 %d / 共 %d 项" % (len(self.scope_view), len(self.scope_items)))
-        self._scope_sync_count()
-
-    def _scope_on_select(self, _e=None):
-        """把列表里的选择同步回 self.scope_sel。
-
-        搜索会把列表筛短，直接以 curselection() 为准会丢掉被筛掉的那部分，
-        所以只对「当前可见项」做增删，不可见项保留原样。
-        """
-        picked = set(self.scope_view[i] for i in self.scope_box.curselection())
-        for n in self.scope_view:
-            self.scope_sel.discard(n)
-        self.scope_sel |= picked
-        self._scope_sync_count()
-
-    def _scope_all(self, on):
-        """全选 / 清空，只作用于当前筛选出来的项"""
-        for n in self.scope_view:
-            if on:
-                self.scope_sel.add(n)
-            else:
-                self.scope_sel.discard(n)
-        self._scope_fill()
-
-    def _scope_sync_count(self):
-        if self.scope_win is None or not hasattr(self, "lab_scope_count"):
-            return
-        dirty = self._scope_dirty()
-        self.lab_scope_count.config(
-            text="已选 %d 项%s" % (len(self.scope_sel), " · 未保存" if dirty else ""))
-
-    def _scope_dirty(self):
-        return (self.scope_mode.get() != W.G.scope_mode
-                or sorted(self.scope_sel) != sorted(W.G.scope_list))
-
-    def clear_scope(self):
-        self.scope_sel.clear()
-        if self.scope_win is not None:
-            self._scope_fill()
-
-    def apply_scope(self):
-        """保存：把二级窗口里的勾选写进引擎，然后关掉窗口回到主界面"""
-        mode, lst = W.set_scope(self.scope_mode.get(), sorted(self.scope_sel))
-        self.scope_sel = set(lst)
-        if mode == "only":
-            W.log_event("config", "接管范围：仅 " + (", ".join(lst) or "（空名单=不接管任何程序）"))
-        elif mode == "exclude":
-            W.log_event("config", "接管范围：排除 " + (", ".join(lst) or "（空名单=全部接管）"))
-        else:
-            W.log_event("config", "接管范围：全部程序")
-        self.close_scope(force=True)
-        self._scope_tip()
-        self.refresh()
-
-    def close_scope(self, force=False):
-        """关闭二级窗口。有未保存改动先问一句 —— 勾了半天点错返回很恼人"""
-        if self.scope_win is None:
-            return False
-        if not force and self._scope_dirty():
-            try:
-                if not messagebox.askyesno("放弃改动？",
-                                           "勾选还没保存，返回将丢弃这些改动。确定返回吗？",
-                                           parent=self.scope_win):
-                    return False
-            except Exception:
-                pass
-        try:
-            self.scope_win.destroy()
-        except Exception:
-            pass
-        self.scope_win = None
-        # 丢弃改动，回到引擎当前值：mode 也要一起回滚，否则下次打开窗口
-        # 会显示成上次没保存的模式，和引擎里真正生效的对不上
-        self.scope_mode.set(W.G.scope_mode)
-        self.scope_sel = set(W.G.scope_list)
-        self._scope_tip()
-        return True
-
-    def _scope_tip(self):
-        """主界面那一行摘要：只显示引擎里已生效的范围"""
-        g = W.G
-        if g.scope_mode == "all":
-            eff = "全部程序"
-        elif g.scope_mode == "only":
-            eff = "仅接管 %d 个程序" % len(g.scope_list) + (
-                "（" + ", ".join(g.scope_list[:4]) + ("…" if len(g.scope_list) > 4 else "") + "）"
-                if g.scope_list else "（空名单 = 不接管任何程序）")
-        else:
-            eff = "排除 %d 个程序" % len(g.scope_list) + (
-                "（" + ", ".join(g.scope_list[:4]) + ("…" if len(g.scope_list) > 4 else "") + "）"
-                if g.scope_list else "（空名单 = 全部接管）")
-        self.lab_scope.config(text=eff)
-        self._scope_sync_btns()
 
     # ---------------- 环境共享：二级窗口 ----------------
 
-    def open_share(self):
-        """打开二级窗口：局域网互推自定义环境与弱网组合。
 
-        网页控制台下线后，这里是 Windows 端唯一的环境共享入口：
-        改名字 → 设备列表里能看到同局域网的其它 WeakNet → 选设备 + 勾选内容推送 →
-        对方那边同名会进他的收件箱，我方这边的收件箱同样在里面处理。
 
-        弱网组合与自定义环境共用这一个窗口：组合里引用的自定义场景在对方机器上
-        通常不存在，连同参数快照一起推过去，落到对方那边才有意义。
-        """
-        if getattr(self, "share_win", None) is not None:
-            try:                              # 已经开着就提到前台，不重复建
-                self.share_win.deiconify()
-                self.share_win.lift()
-                return
-            except Exception:
-                self.share_win = None
 
-        W.ensure_identity()          # 首次进来先把「我是谁」补齐
-        win = tk.Toplevel(self.root)
-        win.title("环境共享")
-        # 弱网组合那一栏加上后控件变多，高度不够会把推送按钮顶出窗口底部
-        try:
-            sh = win.winfo_screenheight()
-        except Exception:
-            sh = 800
-        win.geometry("640x%d" % min(760, max(420, sh - 100)))
-        win.configure(bg=BG)
-        try:
-            win.transient(self.root)
-        except Exception:
-            pass
-        self.share_win = win
 
-        head = tk.Frame(win, bg=CARD, highlightbackground=LINE, highlightthickness=1)
-        head.pack(fill="x", padx=12, pady=12)
-        # 不放「返回」按钮：标题栏右上角的 ✕ 就能关这扇窗，
-        # 两个入口干的是同一件事，看的人只会犯迷糊
-        tk.Label(head, text="环境共享", font=FONT_T, bg=CARD, fg=TEXT).pack(
-            side="left")
-        self.lab_share_me = tk.Label(head, text="", font=FONT, bg=CARD, fg=MUTED)
-        self.lab_share_me.pack(side="right")
 
-        row = tk.Frame(win, bg=BG)
-        row.pack(fill="x", padx=12, pady=(10, 0))
-        tk.Label(row, text="我的名字", font=FONT, bg=BG, fg=MUTED, width=8,
-                 anchor="w").pack(side="left")
-        self.share_name = tk.StringVar(value=W.G.user_name or "")
-        ent = tk.Entry(row, textvariable=self.share_name, font=FONT, relief="flat",
-                       highlightthickness=1, highlightbackground=LINE,
-                       highlightcolor=ACCENT, bg=CARD, fg=TEXT)
-        ent.pack(side="left", fill="x", expand=True, padx=(6, 8))
-        ent.bind("<Return>", lambda _e: self.save_share_name())
-        tk.Button(row, text="保存名字", font=FONT, bg=BTN2, fg=TEXT,
-                  relief="flat", padx=12, pady=4, cursor="hand2",
-                  command=self.save_share_name).pack(side="left")
 
-        # PIN：推送方必须带对才能入库。发现广播里会带上它，方便同网段的设备直接推；
-        # 换 PIN 后对方需要重新发现（最多 3 秒一次广播）才能继续推。
-        prow = tk.Frame(win, bg=BG)
-        prow.pack(fill="x", padx=12, pady=(6, 0))
-        tk.Label(prow, text="共享 PIN", font=FONT, bg=BG, fg=MUTED, width=8,
-                 anchor="w").pack(side="left")
-        self.share_pin = tk.StringVar(value=W.G.share_pin or "")
-        pent = tk.Entry(prow, textvariable=self.share_pin, font=FONT, width=6,
-                        relief="flat", highlightthickness=1, highlightbackground=LINE,
-                        highlightcolor=ACCENT, bg=CARD, fg=TEXT, justify="center")
-        pent.pack(side="left", padx=(6, 6))
-        pent.bind("<Return>", lambda _e: self.save_share_pin())
-        tk.Button(prow, text="保存 PIN", font=FONT, bg=BTN2, fg=TEXT,
-                  relief="flat", padx=10, pady=4, cursor="hand2",
-                  command=self.save_share_pin).pack(side="left")
-        tk.Button(prow, text="随机换一个", font=FONT, bg=BTN2, fg=TEXT,
-                  relief="flat", padx=10, pady=4, cursor="hand2",
-                  command=self.refresh_share_pin).pack(side="left", padx=(8, 0))
 
-        lrow = tk.Frame(win, bg=BG)
-        lrow.pack(fill="x", padx=12, pady=(4, 0))
-        self.share_legacy = tk.BooleanVar(value=bool(W.G.allow_legacy))
-        tk.Checkbutton(lrow, text="允许旧版设备推送（无 PIN，内容只进收件箱）",
-                       variable=self.share_legacy, font=FONT, bg=BG, fg=MUTED,
-                       activebackground=BG, selectcolor=SELECT, anchor="w",
-                       command=self.toggle_share_legacy).pack(side="left")
 
-        self.share_peers = self._share_group(win, "局域网里的设备", 5)
-        bar = tk.Frame(win, bg=BG)
-        bar.pack(fill="x", padx=12, pady=(6, 0))
-        tk.Button(bar, text="刷新", font=FONT, bg=BTN2, fg=TEXT, relief="flat",
-                  padx=12, pady=4, cursor="hand2",
-                  command=self.reload_share).pack(side="left")
-        self.share_peers.bind("<<ListboxSelect>>", lambda _e: self._share_sync_btns())
 
-        self.share_mine = self._share_group(win, "我的自定义环境（可多选）", 5)
-        self.share_mine.configure(selectmode=tk.EXTENDED)
-        self.share_mine.bind("<<ListboxSelect>>", lambda _e: self._share_sync_btns())
 
-        # 弱网组合单独一栏：里面的段可能引用本机才有的自定义场景，连同参数一起推过去
-        self.share_combo = self._share_group(win, "我的弱网组合（可多选）", 4)
-        self.share_combo.configure(selectmode=tk.EXTENDED)
-        self.share_combo.bind("<<ListboxSelect>>", lambda _e: self._share_sync_btns())
-
-        bar2 = tk.Frame(win, bg=BG)
-        bar2.pack(fill="x", padx=12, pady=(6, 0))
-        self.btn_push = tk.Button(bar2, text="→ 推送所选内容", font=FONT, bg=ACCENT,
-                                  fg="white", relief="flat", padx=14, pady=5,
-                                  cursor="hand2", command=self.push_share)
-        self.btn_push.pack(side="left")
-
-        self.share_inbox = self._share_group(win, "收到的内容（同名待处理）", 4)
-        bar3 = tk.Frame(win, bg=BG)
-        bar3.pack(fill="x", padx=12, pady=(6, 0))
-        self.btn_in_over = tk.Button(bar3, text="覆盖本地", font=FONT, bg=BTN2,
-                                     fg=TEXT, relief="flat", padx=12, pady=4,
-                                     cursor="hand2",
-                                     command=lambda: self.resolve_share("overwrite"))
-        self.btn_in_over.pack(side="left")
-        self.btn_in_keep = tk.Button(bar3, text="保留本地", font=FONT, bg=BTN2,
-                                     fg=TEXT, relief="flat", padx=12, pady=4,
-                                     cursor="hand2",
-                                     command=lambda: self.resolve_share("keep"))
-        self.btn_in_keep.pack(side="left", padx=(8, 0))
-        self.btn_in_save = tk.Button(bar3, text="另存为…", font=FONT, bg=BTN2,
-                                     fg=TEXT, relief="flat", padx=12, pady=4,
-                                     cursor="hand2",
-                                     command=lambda: self.resolve_share("rename"))
-        self.btn_in_save.pack(side="left", padx=(8, 0))
-        self.share_inbox.bind("<<ListboxSelect>>", lambda _e: self._share_sync_btns())
-
-        self.lab_share_tip = tk.Label(win, text="", font=FONT, bg=BG, fg=MUTED,
-                                      anchor="w", justify="left", wraplength=560)
-        self.lab_share_tip.pack(fill="x", padx=14, pady=(8, 0))
-
-        # 底部原本只有一个「返回」，跟标题栏的 ✕ 是同一个功能。
-        # 去掉以后这排按钮就没内容了，整个 foot 框一起删掉，
-        # 免得在窗底留一条空白横杠
-        win.protocol("WM_DELETE_WINDOW", lambda: self.close_share())
-        win.bind("<Escape>", lambda _e: self.close_share())
-
-        self.reload_share()
-        try:
-            ent.focus_set()
-        except Exception:
-            pass
-
-    def _share_group(self, parent, title, height):
-        """二级窗口里的「分组标题 + 列表」小组件"""
-        tk.Label(parent, text=title, font=FONT_B, bg=BG, fg=TEXT).pack(
-            anchor="w", padx=14, pady=(10, 2))
-        wrap = tk.Frame(parent, bg=BG)
-        wrap.pack(fill="x", padx=12)
-        box = tk.Listbox(wrap, height=height, font=("Consolas", 9), bg=CARD, fg=TEXT,
-                         relief="flat", highlightthickness=1,
-                         highlightbackground=LINE, bd=0, exportselection=False)
-        sb = _scrollbar(wrap, command=box.yview)
-        box.configure(yscrollcommand=sb.set)
-        box.pack(side="left", fill="x", expand=True)
-        sb.pack(side="right", fill="y")
-        return box
-
-    def reload_share(self):
-        """重画三个列表（设备 / 我的环境 / 收件箱）"""
-        if getattr(self, "share_win", None) is None:
-            return
-        now = time.time()
-        # 三个列表都会重建，而窗口里每 3 秒自动刷新一次 —— 不把「选了谁」按 id 存下来
-        # 再回填，用户刚勾好的设备/环境就会被下一次刷新冲掉（表现为点了推送没反应）
-        def _picked(box, items, key):
-            out = set()
-            for i in box.curselection():
-                if i < len(items):
-                    out.add(items[i][key])
-            return out
-        pick_peer = _picked(self.share_peers, getattr(self, "share_peer_list", []), "id")
-        pick_inbox = _picked(self.share_inbox, getattr(self, "share_inbox_list", []), "id")
-        pick_mine = _picked(self.share_mine, getattr(self, "share_mine_list", []), "id")
-        pick_combo = _picked(self.share_combo, getattr(self, "share_combo_list", []), "id")
-
-        self.share_peer_list = sorted(W.G.peers.values(), key=lambda x: x["name"].lower())
-        self.share_peer_list = [p for p in self.share_peer_list
-                                if now - p["at"] <= W.PEER_TTL]
-        self.share_peers.delete(0, "end")
-        for p in self.share_peer_list:
-            self.share_peers.insert(
-                "end", "%-16s %-15s %s · %ds前"
-                % (p["name"][:16], p["ip"], p.get("platform") or "-", int(now - p["at"])))
-        if not self.share_peer_list:
-            self.share_peers.insert("end", "（暂未发现其它设备：对方也要开着 WeakNet）")
-        for i, p in enumerate(self.share_peer_list):
-            if p["id"] in pick_peer:
-                self.share_peers.selection_set(i)
-
-        self.share_mine_list = W.get_user_presets()
-        self.share_mine.delete(0, "end")
-        for it in self.share_mine_list:
-            self.share_mine.insert("end", "%-20s %s"
-                                   % (it["name"][:20], summarize(it["profile"])))
-        for i, it in enumerate(self.share_mine_list):
-            if it["id"] in pick_mine:
-                self.share_mine.selection_set(i)
-
-        self.share_combo_list = W.get_combos()
-        self.share_combo.delete(0, "end")
-        for c in self.share_combo_list:
-            self.share_combo.insert("end", "%-20s %s"
-                                    % (c["name"][:20], W.combo_summary(c)))
-        if not self.share_combo_list:
-            self.share_combo.insert("end", "（还没有弱网组合：先在「🔀 弱网组合」里排一支）")
-        for i, c in enumerate(self.share_combo_list):
-            if c["id"] in pick_combo:
-                self.share_combo.selection_set(i)
-
-        self.share_inbox_list = sorted(W.G.inbox.values(), key=lambda x: x["at"])
-        self.share_inbox.delete(0, "end")
-        for it in self.share_inbox_list:
-            kind = "组合" if (it.get("kind") or "preset") == "combo" else "环境"
-            self.share_inbox.insert(
-                "end", "[%s] %-12s 推送「%s」 · %ds前"
-                % (kind, it["from"][:12], it["name"], int(now - it["at"])))
-        if not self.share_inbox_list:
-            self.share_inbox.insert("end", "（收件箱为空：别人推来同名内容时会出现在这里）")
-        for i, it in enumerate(self.share_inbox_list):
-            if it["id"] in pick_inbox:
-                self.share_inbox.selection_set(i)
-
-        self.lab_share_me.config(text="本机：%s · PIN %s · 端口 %d"
-                                 % (W.G.user_name or "-", W.G.share_pin or "-",
-                                    W.G.share_port or W.SHARE_PORT))
-        self._share_sync_btns()
-        # 设备会上下线、别人随时可能推环境过来，窗口开着就持续刷新
-        self.share_after = self.share_win.after(3000, self.reload_share)
-
-    def _share_sync_btns(self):
-        """没有选中项时把对应按钮置灰，免得点了没反应还得猜为什么"""
-        if getattr(self, "share_win", None) is None:
-            return
-        peers = [i for i in self.share_peers.curselection() if i < len(self.share_peer_list)]
-        mine = [i for i in self.share_mine.curselection() if i < len(self.share_mine_list)]
-        combos = [i for i in self.share_combo.curselection()
-                  if i < len(getattr(self, "share_combo_list", []))]
-        inbox = [i for i in self.share_inbox.curselection() if i < len(self.share_inbox_list)]
-        self.btn_push.config(state="normal" if (peers and (mine or combos)) else "disabled")
-        for b in (getattr(self, "btn_in_over", None), getattr(self, "btn_in_keep", None),
-                  getattr(self, "btn_in_save", None)):
-            if b is not None:
-                b.config(state="normal" if inbox else "disabled")
-
-    def save_share_name(self):
-        nm = W.set_user_name(self.share_name.get() or "")
-        self.share_name.set(nm)
-        W.log_event("share", "局域网显示名改为：" + nm)
-        self.reload_share()
-
-    def save_share_pin(self):
-        res = W.set_share_pin(self.share_pin.get())
-        if res.get("ok"):
-            self.share_pin.set(res["pin"])
-            self.lab_share_tip.config(text="PIN 已保存：%s（对方推送时需要它）" % res["pin"])
-        else:
-            self.lab_share_tip.config(text="PIN 需为 4 位数字")
-
-    def refresh_share_pin(self):
-        res = W.set_share_pin(refresh=True)
-        if res.get("ok"):
-            self.share_pin.set(res["pin"])
-            self.lab_share_tip.config(text="已换新 PIN：%s（发现广播最多 3 秒后同步给对方）"
-                                      % res["pin"])
-        self.reload_share()
-
-    def toggle_share_legacy(self):
-        on = bool(self.share_legacy.get())
-        W.set_allow_legacy(on)
-        self.lab_share_tip.config(
-            text="已允许旧版设备推送：内容只会进收件箱" if on else "已拒绝旧版设备推送")
-
-    def push_share(self):
-        selp = [i for i in self.share_peers.curselection() if i < len(self.share_peer_list)]
-        selm = [i for i in self.share_mine.curselection() if i < len(self.share_mine_list)]
-        selc = [i for i in self.share_combo.curselection()
-                if i < len(getattr(self, "share_combo_list", []))]
-        if not selp or (not selm and not selc):
-            return
-        peer = self.share_peer_list[selp[0]]
-        ids = [self.share_mine_list[i]["id"] for i in selm]
-        cids = [self.share_combo_list[i]["id"] for i in selc]
-        # 结果文案里把两类分开报：组合和环境同名判定各自一套，混在一起看不出推了啥
-        what = [self.share_mine_list[i]["name"] for i in selm] + \
-               ["🔀 " + self.share_combo_list[i]["name"] for i in selc]
-        self.btn_push.config(state="disabled", text="推送中…")
-        try:
-            res = self._run(W.push_to_peer(peer, ids, cids))
-        except Exception as e:
-            res = {"ok": False, "error": str(e)[:120]}
-        self.btn_push.config(text="→ 推送所选内容")
-        # 结果文案：引擎已经写过事件日志，这里只补一句人能看懂的反馈
-        if res and res.get("ok"):
-            tip = "已推送给「%s」：%s" % (res.get("to") or peer.get("name") or "对方",
-                                       "、".join(what))
-            if res.get("pending"):
-                tip += "（对方有同名内容，等他确认）"
-            if res.get("dropped"):
-                names = "、".join(str(d.get("name") or "") for d in res["dropped"])
-                tip += "（对方那边收不下：%s）" % names
-        else:
-            tip = "推送失败：" + str((res or {}).get("error") or "未知错误")
-        try:
-            self.lab_share_tip.config(text=tip)
-        except Exception:
-            pass
-        self.reload_share()
-        self.refresh()
-
-    def resolve_share(self, action):
-        sel = [i for i in self.share_inbox.curselection() if i < len(self.share_inbox_list)]
-        if not sel:
-            return
-        it = self.share_inbox_list[sel[0]]
-        kind = (it.get("kind") or "preset") == "combo"
-        new_name = None
-        if action == "rename":
-            try:
-                new_name = simpledialog.askstring(
-                    "另存为", "把「%s」存成什么名字？（最多 %d 字）"
-                    % (it["name"], W.NAME_MAX),
-                    initialvalue=W.limit_item_name(
-                        "%s（来自 %s）" % (it["name"], it["from"]),
-                        W.limit_item_name(it["name"], "自定义")),
-                    parent=self.share_win)
-            except Exception:
-                new_name = None
-            if not new_name:
-                return
-            new_name = W.limit_item_name(new_name)
-            if not new_name:
-                return
-        res = W.resolve_inbox(it["id"], action, new_name)
-        if res.get("ok"):
-            acts = {"keep": "保留本地版本",
-                    "rename": "另存为新组合" if kind else "另存为新环境",
-                    "overwrite": "覆盖本地版本"}
-            self.lab_share_tip.config(text="已处理「%s%s」→ %s"
-                                      % ("🔀 " if kind else "",
-                                         res.get("name") or it["name"],
-                                         acts.get(action, action)))
-        else:
-            self.lab_share_tip.config(text="处理失败：" + str(res.get("error")))
-        self.reload_share()
-        self.reload_mine()        # 覆盖 / 另存都会改变自定义场景列表
-        self.reload_combo()       # 组合覆盖了 / 另存了，顺便也会新建一个自定义场景
-        self.refresh()
-
-    def close_share(self):
-        win = getattr(self, "share_win", None)
-        if win is None:
-            return False
-        try:
-            if getattr(self, "share_after", None):
-                win.after_cancel(self.share_after)
-        except Exception:
-            pass
-        try:
-            win.destroy()
-        except Exception:
-            pass
-        self.share_win = None
-        self.share_after = None
-        return True
 
     def _build_log(self):
         box = self._card(self.col_right, "事件日志", expand=True)
@@ -2781,358 +1484,28 @@ class App:
     # 两条命令任何一条不成功，手机都不能上网 —— 所以失败必须弹窗说清楚，
     # 而且退出 / 停止限速时一定要把手机还原（见 usb_disconnect 的调用点）。
 
-    def _build_usb(self):
-        box = self._card(self.col_right, "📱 USB 手机弱网（免装 APK）")
-        self.usb_adb = None          # adb.exe 路径
-        self.usb_devices = []        # 最近一次刷新拿到的可用设备
-        self.usb_serial = None       # 下拉框当前选中的设备
-        self.usb_on = False          # 手机代理是否已生效
-        # 已接管的那台 + 用的端口。下拉框随时能改选中项，断开必须按这本账走，
-        # 否则连上 A 之后选一下 B 再点「断开」，清的是 B，A 一直挂着代理。
-        self.usb_conn_serial = None
-        self.usb_conn_port = None
-        self.usb_busy = False        # 有 adb 命令在跑，按钮先锁住
-
-        row1 = tk.Frame(box, bg=CARD)
-        row1.pack(fill="x")
-        self.usb_dev = tk.StringVar()
-        self.usb_combo = ttk.Combobox(row1, textvariable=self.usb_dev, font=FONT,
-                                      width=20, state="readonly")
-        self.usb_combo.pack(side="left", fill="x", expand=True)
-        self.usb_combo.bind("<<ComboboxSelected>>", self._usb_pick)
-        self.btn_usb_scan = tk.Button(row1, text="🔄 刷新设备", font=FONT, bg=BTN2,
-                                      fg=TEXT, relief="flat", padx=8, pady=3,
-                                      cursor="hand2", command=lambda: self.usb_refresh())
-        self.btn_usb_scan.pack(side="left", padx=(6, 0))
-
-        row2 = tk.Frame(box, bg=CARD)
-        row2.pack(fill="x", pady=(8, 0))
-        self.btn_usb_conn = tk.Button(row2, text="连接手机", font=FONT_B, bg=ACCENT,
-                                      fg="white", relief="flat", padx=12, pady=4,
-                                      cursor="hand2", command=self.usb_connect)
-        self.btn_usb_conn.pack(side="left")
-        self.btn_usb_cut = tk.Button(row2, text="断开", font=FONT, bg=BTN2, fg=TEXT,
-                                     relief="flat", padx=12, pady=4, cursor="hand2",
-                                     command=lambda: self.usb_disconnect("手动断开"))
-        self.btn_usb_cut.pack(side="left", padx=(6, 0))
-        self.btn_usb_adb = tk.Button(row2, text="选择 adb", font=FONT, bg=BTN2,
-                                     fg=TEXT, relief="flat", padx=8, pady=4,
-                                     cursor="hand2", command=self.usb_pick_adb)
-        self.btn_usb_adb.pack(side="right")
-
-        self.usb_state = tk.Label(box, text="未连接", font=FONT, bg=CARD, fg=MUTED,
-                                  anchor="w", justify="left", wraplength=276)
-        self.usb_state.pack(fill="x", pady=(8, 0))
-        self.usb_adb_lab = tk.Label(box, text="", font=FONT, bg=CARD, fg=MUTED,
-                                    anchor="w", justify="left", wraplength=276)
-        self.usb_adb_lab.pack(fill="x", pady=(3, 0))
-        self._usb_load_adb()
 
     # ---- adb 位置 ----
 
-    def _usb_load_adb(self):
-        """按「用户选过的 → 环境变量 → PATH → 常见安装目录」找 adb.exe"""
-        try:
-            saved = (W.load_settings() or {}).get("adb_path") or ""
-        except Exception:
-            saved = ""
-        adb = UP.find_adb(saved)
-        self.usb_adb = adb
-        if hasattr(self, "usb_adb_lab"):
-            if adb:
-                self.usb_adb_lab.config(text="adb：" + adb, fg=MUTED)
-            else:
-                self.usb_adb_lab.config(text="未找到 adb.exe —— 点「选择 adb」手动指定", fg=WARN)
-        return adb
 
-    def usb_pick_adb(self):
-        p = filedialog.askopenfilename(
-            title="选择 adb.exe（Android SDK 的 platform-tools 目录里）",
-            filetypes=[("adb", "adb.exe"), ("可执行文件", "*.exe"), ("所有文件", "*.*")])
-        if not p:
-            return
-        if not os.path.isfile(p):
-            messagebox.showerror("选择 adb", "文件不存在：\n" + p)
-            return
-        try:
-            d = W.load_settings() or {}
-            d["adb_path"] = p
-            saved = W.save_settings(d)
-        except Exception as e:
-            messagebox.showerror("选择 adb", "保存失败：%r" % e)
-            return
-        if not saved:
-            messagebox.showerror("选择 adb", "保存失败：写不了 weaknet_settings.json")
-            return
-        self.usb_adb = p
-        self.usb_adb_lab.config(text="adb：" + p, fg=MUTED)
-        W.log_event("usb", "已指定 adb：" + p)
-        self.usb_refresh(quiet=True)
 
     # ---- 设备列表 ----
 
-    def usb_refresh(self, quiet=False):
-        adb = self.usb_adb or self._usb_load_adb()
-        if not adb:
-            self._usb_state("未找到 adb.exe —— 点「选择 adb」指定它的位置。", WARN)
-            if not quiet:
-                messagebox.showerror(
-                    "USB 手机弱网",
-                    "找不到 adb.exe。\n\n请点「选择 adb」指定它的位置 —— 它通常在 "
-                    "Android SDK 的 platform-tools 目录下。")
-            return
-        self._usb_state("正在读取设备列表…", MUTED)
-        self._usb_run(lambda: UP.list_devices(adb),
-                      lambda res: self._usb_on_devices(res, quiet))
 
-    def _usb_on_devices(self, res, quiet=False):
-        if "devices" not in res:
-            err = res.get("msg") or res.get("error") or "未知错误"
-            # 最常见的：adb server 起不来 / 被安全软件拦了
-            self._usb_state("读取设备失败：" + err[:70], WARN)
-            W.log_event("usb", "刷新设备失败：" + err[:150])
-            if not quiet:
-                messagebox.showerror("刷新设备", "adb devices 执行失败：\n\n" + err)
-            return
 
-        devs = res.get("devices") or []
-        blocked = res.get("blocked") or []
-        self.usb_devices = devs
-        labels = [("%s  " % d["model"] if d["model"] else "") + d["serial"] for d in devs]
-        self.usb_combo.configure(values=labels)
-
-        serials = [d["serial"] for d in devs]
-        if labels:
-            if self.usb_serial in serials:
-                self.usb_combo.current(serials.index(self.usb_serial))
-            else:
-                self.usb_serial = serials[0]
-                self.usb_combo.current(0)
-        else:
-            self.usb_serial = None
-            self.usb_combo.set("")
-
-        if blocked:
-            b = blocked[0]
-            self._usb_state("有 %d 台设备不可用：%s（%s）" % (len(blocked), b["serial"],
-                                                            b["state"]), WARN)
-            if not quiet:
-                messagebox.showwarning(
-                    "设备未授权",
-                    "检测到设备 %s 的状态是 %s。\n\n请在手机上确认「允许 USB 调试」"
-                    "（必要时先在开发者选项里撤销授权、重新插线），再点「🔄 刷新设备」。"
-                    % (b["serial"], b["state"]))
-        elif not devs:
-            self._usb_state("没有检测到手机 —— 插好 USB 线（要能传数据）、打开"
-                            "「开发者选项 → USB 调试」并允许本机调试后刷新。", MUTED)
-            if not quiet:
-                messagebox.showinfo(
-                    "没有可用设备",
-                    "adb 没列出可用设备。\n\n检查三件事：\n"
-                    "1. USB 线能传数据（不是纯充电线）\n"
-                    "2. 手机上「开发者选项 → USB 调试」已打开\n"
-                    "3. 手机上已点过「允许 USB 调试」（本机）")
-        else:
-            self._usb_state("已发现 %d 台设备，选一台点「连接手机」。" % len(devs), MUTED)
-            W.log_event("usb", "刷新设备：发现 %d 台" % len(devs))
-
-    def _usb_pick(self, _event=None):
-        i = self.usb_combo.current()
-        if 0 <= i < len(self.usb_devices):
-            self.usb_serial = self.usb_devices[i]["serial"]
 
     # ---- 连接 / 断开 ----
 
-    def usb_connect(self):
-        adb = self.usb_adb or self._usb_load_adb()
-        if not adb:
-            messagebox.showerror("连接手机", "找不到 adb.exe，请先点「选择 adb」指定它。")
-            return
-        if not self.usb_serial:
-            self._usb_state("还没选设备 —— 先点「🔄 刷新设备」。", WARN)
-            messagebox.showinfo("连接手机", "还没选设备。\n\n先点「🔄 刷新设备」，"
-                                            "再从下拉框里选一台。")
-            return
-        serial, port = self.usb_serial, W.G.proxy_port
-        prev = (self.usb_conn_serial, self.usb_conn_port) if self.usb_on else (None, None)
-        self._usb_state("正在连接 %s …" % serial, MUTED)
 
-        def job():
-            # 换机 / 换端口前先把上一台还原：账本记的是「已接管的那台」，不是下拉框
-            # 当前选项。不这么做的话，旧机、旧端口的映射都会留到拔线为止。
-            if prev[0]:
-                UP.disconnect(adb, prev[0], prev[1] or port)
-            return UP.connect(adb, serial, port)
 
-        self._usb_run(job, lambda res: self._usb_on_connect(res, serial, port))
 
-    def _usb_on_connect(self, res, serial=None, port=None):
-        serial = serial or self.usb_serial or "（未知设备）"
-        port = port or W.G.proxy_port
-        self.usb_on = False                  # 连接前可能刚把上一台断开了
-        self.usb_conn_serial = None
-        self.usb_conn_port = None
-        if not res.get("ok"):
-            stage = res.get("stage", "")
-            msg = res.get("msg", "未知错误")
-            if stage in ("settings", "verify"):
-                # 端口映射已经建好了但代理没写上，留着就是残骸 —— 撤掉
-                self._usb_run(lambda: UP.disconnect(self.usb_adb, serial, port), None)
-                title = "手机拒绝了代理设置"
-                body = ("写入失败：\n\n" + msg + "\n\n" + self._usb_alt_help(port))
-            elif stage == "reverse":
-                title = "端口映射失败"
-                body = (msg + "\n\n请确认：手机已允许 USB 调试、USB 线能传数据"
-                              "（不是纯充电线）、且没被其它程序占用 adb。")
-            else:
-                title = "连接手机失败"
-                body = msg
-            self._usb_state("连接失败（%s）" % (stage or "adb"), WARN)
-            W.log_event("usb", "USB 手机连接失败（%s）：%s" % (stage, msg[:150]))
-            # 关窗过程中不能再弹模态框：窗口马上销毁，没人点它，进程会一直挂着
-            if not self._closing:
-                messagebox.showerror(title, body)
-            return
 
-        self.usb_on = True
-        self.usb_conn_serial = res.get("serial") or serial
-        self.usb_conn_port = port
-        W.log_event("usb", "USB 手机已接管：%s → %s" % (serial, res.get("proxy")))
-        if res.get("watch"):
-            W.log_event("usb", "已装拔线守护：反向端口消失后手机自动恢复直连")
-        else:
-            W.log_event("usb", "拔线守护未装上（%s）：拔线后手机可能仍指向本地代理，需插回清理"
-                        % (res.get("watch_msg") or "未知原因"))
-        if W.G.limit_on:
-            self._usb_state("已接管 %s → %s" % (serial, res.get("proxy")), OK)
-        else:
-            self._usb_state("已接管 %s → %s，但限速未开启（当前等同直连）"
-                            % (serial, res.get("proxy")), WARN)
-            W.log_event("usb", "提示：限速未开启，手机流量只是经过代理，还没施加弱网")
-        self._usb_sync_btns()
-
-    def _usb_alt_help(self, port):
-        """写不进全局设置时的替代途径。这条限制很常见，说明白比只报个错有用得多。"""
-        lan = W.G.lan_ip or "电脑的局域网 IP"
-        return ("这是 Android 的 ROM 限制：adb 不能改写全局设置"
-                "（需要 WRITE_SECURE_SETTINGS 权限），国产 ROM 上尤其常见。\n\n"
-                "可以试试这几条：\n"
-                "1. 手机「开发者选项」里打开「USB 调试（安全设置）」或"
-                "「禁止权限监控」，拔插 USB 后重试\n"
-                "2. 手机已 root：先执行 adb root 再连\n"
-                "3. 改用 Wi-Fi 手动代理：手机连上与电脑同一个 Wi-Fi，在 WLAN 的"
-                "代理里填 %s:%d（电脑这边要先开「开启局域网访问」）\n"
-                "4. 或在手机上安装 WeakNet.apk —— VpnService 直接接管整机流量，"
-                "不需要这些权限" % (lan, port))
-
-    def usb_disconnect(self, reason="", wait=False):
-        """还原手机直连。wait=True 时同步跑（退出程序时用，没机会等回调）。"""
-        if self.usb_on and self.usb_conn_serial:
-            serial, port = self.usb_conn_serial, self.usb_conn_port or W.G.proxy_port
-        else:
-            serial, port = self.usb_serial, W.G.proxy_port
-        if not serial:
-            return
-        adb = self.usb_adb or self._usb_load_adb()
-        if not adb:
-            # adb 都没了就清不掉，只能让用户自己动手 —— 这时候必须说清楚，
-            # 否则用户会以为已经还原了
-            self._usb_state("adb 不见了，无法自动还原！请手动检查手机代理。", WARN)
-            W.log_event("usb", "找不到 adb.exe，无法自动还原手机代理")
-            # 关窗时没机会让人点确认框，弹出来就是永远关不掉
-            if not self._closing:
-                messagebox.showwarning(
-                    "无法还原手机", "找不到 adb.exe，没法自动清除手机上的代理。\n\n"
-                    "请手动在手机上执行：\n"
-                    "  设置 → 开发者选项 → 撤销 USB 调试授权\n"
-                    "或在 WLAN 里把代理改回「无」，否则手机会一直上不了网。")
-            return
-        if wait:
-            self._usb_on_disconnect(UP.disconnect(adb, serial, port, timeout=8), reason)
-        else:
-            self._usb_run(lambda: UP.disconnect(adb, serial, port),
-                          lambda res: self._usb_on_disconnect(res, reason))
-
-    def _usb_on_disconnect(self, res, reason=""):
-        prefix = (reason + "：") if reason else ""
-        if res.get("ok"):
-            self.usb_on = False
-            self.usb_conn_serial = None
-            self.usb_conn_port = None
-            self._usb_state("已断开，手机恢复直连", MUTED)
-            W.log_event("usb", prefix + "已断开手机代理，恢复直连")
-        else:
-            msg = res.get("msg") or "未知错误"
-            self._usb_state("还原手机失败：" + msg[:70] + "（请手动检查手机代理！）", WARN)
-            W.log_event("usb", prefix + "还原手机失败：" + msg[:150])
-            if not self._closing:
-                messagebox.showwarning(
-                    "还原手机失败",
-                    "没能自动清除手机上的代理：\n\n" + msg +
-                    "\n\n请手动处理，否则手机可能上不了网：\n"
-                    "  手机「设置 → WLAN」把代理改回「无」，或\n"
-                    # 只 delete 在 MIUI 上不够：系统会把代理镜像进当前 Wi-Fi 的网络
-                    # 配置，删全局行清不掉那一份 —— 必须写 :0 让它同步一次
-                    "  adb shell settings put global http_proxy :0")
-        self._usb_sync_btns()
 
     # ---- 线程与状态 ----
 
-    def _usb_run(self, fn, done):
-        """把 adb 命令丢到后台线程。结果进队列，由主线程的 refresh() 取。"""
-        if self.usb_busy:
-            return
-        self.usb_busy = True
-        self._usb_sync_btns()
 
-        def worker():
-            try:
-                res = fn()
-                if not isinstance(res, dict):
-                    res = {"ok": False, "msg": "adb 返回了意外的结果：%r" % (res,)}
-            except Exception as e:
-                res = {"ok": False, "stage": "adb",
-                       "msg": "%s: %s" % (type(e).__name__, e)}
-            try:
-                self.usb_q.put((res, done))
-            except Exception:
-                pass
 
-        threading.Thread(target=worker, daemon=True).start()
 
-    def _usb_pump(self):
-        """主线程里取出后台 adb 的结果（tkinter 只能在主线程碰控件）"""
-        try:
-            while True:
-                res, done = self.usb_q.get_nowait()
-                self.usb_busy = False
-                self._usb_sync_btns()
-                if done is not None:
-                    done(res)
-        except queue.Empty:
-            pass
-        except Exception as e:
-            W.log("USB 回调异常：%r" % e)
-
-    def _usb_state(self, text, color=MUTED):
-        try:
-            self.usb_state.config(text=text, fg=color)
-        except Exception:
-            pass
-
-    def _usb_sync_btns(self):
-        try:
-            busy = self.usb_busy
-        except Exception:
-            return
-        for name in ("btn_usb_scan", "btn_usb_conn", "btn_usb_cut", "btn_usb_adb"):
-            btn = getattr(self, name, None)
-            if btn is not None:
-                btn.config(state="disabled" if busy else "normal")
-        conn = getattr(self, "btn_usb_conn", None)
-        if conn is not None:
-            conn.config(text="连接中…" if busy else
-                        ("重新连接" if self.usb_on else "连接手机"))
 
     # ---------------- 交互 ----------------
 
@@ -3236,10 +1609,9 @@ class App:
         """限速总开关的按钮态：未开启时是实心主按钮（邀请点开），运行中变成浅底的停止。"""
         if not hasattr(self, "btn_run"):
             return
-        on = W.G.limit_on
-        self.btn_run.config(text=("⏹ 停止限速（恢复直连）" if on else "▶ 开启限速"),
-                            bg=BTN2 if on else ACCENT,
-                            fg=TEXT if on else "white")
+        v = S.run_btn_view(W.G.limit_on)
+        self._set(self.btn_run, text=v["text"], bg=self._tone(v["bg"]),
+                  fg=self._tone(v["fg"]))
 
     def toggle_run(self):
         """开启 / 关闭限速。关闭不是丢场景：preset_key 保留，再开就复原。"""
@@ -3313,56 +1685,49 @@ class App:
                 except Exception:
                     pass
 
-    def _usb_restore_on_close(self, reason="退出程序", budget=10.0):
-        """退出时还原手机：后台跑、最多等 budget 秒，绝不弹模态框。
 
-        adb 服务重启/拔线后，一串 adb 命令可能各卡到超时；同步跑完再销毁
-        窗口，用户看到的就是「点了关闭进程也不消失」。
+    # ---------------- 刷新：只在值真的变了才动控件 ----------------
+
+    def _tone(self, tone):
+        """语义色调 → 当前主题色值；None 表示这一项不该改颜色。"""
+        if tone is None:
+            return None
+        return {"ok": OK, "warn": WARN, "muted": MUTED, "text": TEXT,
+                "accent": ACCENT, "btn2": BTN2, "white": "white"}.get(tone)
+
+    def _set(self, w, **opts):
+        """给控件下发选项，但**只下发变化的那些**。
+
+        500ms 一轮是常驻路径，绝大多数轮次的值与上一轮完全相同；Tk 的 config()
+        即使写同值也要走一遍选项解析并安排重绘。实测原来每轮无条件下发 20 次，
+        等于每分钟 2400 次空转。这里按控件记住上次下发的值，没变就直接返回。
+
+        缓存用 WeakKeyDictionary：预设/自定义/组合按钮每次改动都会重画，
+        旧控件被回收后缓存条目自动消失，不会把新控件认成旧的。
         """
-        if self.usb_on and self.usb_conn_serial:
-            serial, port = self.usb_conn_serial, self.usb_conn_port or W.G.proxy_port
-        else:
-            serial, port = self.usb_serial, W.G.proxy_port
-        if not serial:
-            return
-        adb = self.usb_adb or self._usb_load_adb()
-        if not adb:
-            self._usb_state("adb 不见了，无法自动还原！请手动检查手机代理。", WARN)
-            W.log_event("usb", "退出：找不到 adb.exe，未能自动还原手机代理")
-            return
-        box = {}
-
-        def job():
-            try:
-                box["res"] = UP.disconnect(adb, serial, port, timeout=4)
-            except Exception as e:
-                box["res"] = {"ok": False, "stage": "cleanup",
-                              "msg": "%s: %s" % (type(e).__name__, e)}
-
-        th = threading.Thread(target=job, daemon=True)
-        th.start()
-        th.join(budget)
-        if th.is_alive():
-            W.log_event("usb", "退出：还原手机超过 %.0f 秒未完成，先退出；"
-                        "若手机仍上不了网，请插回后点「断开」" % budget)
-            return
-        self._usb_on_disconnect(box.get("res") or {"ok": False, "msg": "没有返回结果"}, reason)
-
-    # ---------------- 刷新 ----------------
+        cache = self._wcache.get(w)
+        if cache is None:
+            cache = {}
+            self._wcache[w] = cache
+        delta = {k: v for k, v in opts.items() if cache.get(k, _UNSET) != v}
+        if not delta:
+            return False
+        cache.update(delta)
+        w.config(**delta)
+        return True
 
     def refresh_header(self):
-        lan = W.G.proxy_host == "0.0.0.0"
-        addr = f"{W.G.lan_ip}:{W.G.proxy_port}" if lan else f"127.0.0.1:{W.G.proxy_port}"
-        self.lab_proxy.config(text=f"代理地址：{addr}　（App / 设备把代理指向它）")
-        self.lab_ctrl.config(text=f"控制接口：http://127.0.0.1:{self.ctrl_port}/"
-                                  f"　局域网 IP：{W.G.lan_ip}")
-        self.btn_lan.config(text="关闭局域网访问" if lan else "开启局域网访问")
         try:
             on = W.sysproxy_enabled()
         except Exception:
             on = False
-        self.btn_sys.config(text="解除接管" if on else "一键接管本机流量",
-                            bg=OK if on else ACCENT)
+        v = S.header_view(W.G.proxy_host, W.G.proxy_port, W.G.lan_ip,
+                          self.ctrl_port, on)
+        self._set(self.lab_proxy, text=v["proxy"])
+        self._set(self.lab_ctrl, text=v["ctrl"])
+        self._set(self.btn_lan, text=v["lan_text"])
+        self._set(self.btn_sys, text=v["sys_text"],
+                  bg=OK if v["sys_on"] else ACCENT)
 
     def _paint_selected(self, btns, sel_key, attr):
         """给选中按钮上色；选中项没变就整轮跳过。
@@ -3380,6 +1745,7 @@ class App:
     def refresh(self):
         if self._closing:
             return
+        _t_frame = time.perf_counter()
         self._usb_pump()      # 后台 adb 的结果在这里回到主线程
         self._update_pump()   # GitHub 新版本检查结果也在主线程落到版本号标签
         g = W.G
@@ -3405,31 +1771,23 @@ class App:
         self._paint_tabs(getattr(self, "cur_tab", "scene"))
         try:
             n = len(W.G.inbox)    # 收到的同名环境，没人管就别让按钮看着平平无奇
-            self.btn_share.config(text="🔗 环境共享" + ("（%d 条待处理）" % n if n else ""))
+            self._set(self.btn_share, text=S.share_view(n))
         except Exception:
             pass
         # 顶栏那颗状态灯说的是「限速有没有在跑」，不是「服务在不在跑」：
         # 启动后默认未开启，此时流量原样直通，必须让用户一眼看出来
-        if not g.limit_on:
-            self.dot.config(text="● 限速未开启", fg=MUTED)
-        else:
-            self.dot.config(text=("● 限速运行中" if g.gate_open else "● 周期断网中"),
-                            fg=OK if g.gate_open else WARN)
+        light, light_tone = S.light_view(g.limit_on, g.gate_open)
+        self._set(self.dot, text=light, fg=self._tone(light_tone))
         # 未开启限速时 profile 还是直连（选场景不会灌进引擎），
         # 直接显示 profile 的名字会永远是「直连（不限制）」——按 preset_key 显示选中的那支
-        scene = g.profile.get("name", "-")
-        if not g.limit_on and g.preset_key:
-            try:
-                scene = W.build_preset_profile(g.preset_key).get("name", scene) + "（未开启）"
-            except Exception:
-                pass
-        self.stat["scene"].config(text=scene)
-        self.stat["conns"].config(text=str(g.conns_total))
-        self.stat["active"].config(text=str(g.conns_active))
-        self.stat["down"].config(text=fmt_rate(self._rate[0]))
-        self.stat["up"].config(text=fmt_rate(self._rate[1]))
-        self.stat["gate"].config(text="畅通" if g.gate_open else "已断网",
-                                 fg=OK if g.gate_open else WARN)
+        scene = S.scene_label(g.profile.get("name", "-"), g.preset_key, g.limit_on,
+                              lambda k: W.build_preset_profile(k).get("name", "-"))
+        for key, text, tone in S.stats_view(g.conns_total, g.conns_active,
+                                            self._rate, g.gate_open, scene):
+            if tone is None:
+                self._set(self.stat[key], text=text)
+            else:
+                self._set(self.stat[key], text=text, fg=self._tone(tone))
 
         self._paint_selected(self.preset_btns, g.preset_key, "_sel_preset")
         # 自定义场景按钮与内置档位同样高亮当前生效的那一个
@@ -3476,6 +1834,14 @@ class App:
             for e in list(ev)[-60:][::-1]:
                 self.logbox.insert("end", f"[{e['t']}] {e['msg']}\n")
             self.logbox.configure(state="disabled")
+
+        # 帧统计：间隔包含定时器调度延迟，单帧耗时是本轮 refresh 自身的开销。
+        # 每 60 帧（约 30 秒）落一条 perf 日志，长时间卡顿事后能定位到时间点。
+        if self._frames is None:
+            self._frames = P.FrameStats()
+        if self._frames.record(_t_frame * 1000.0,
+                              (time.perf_counter() - _t_frame) * 1000.0):
+            W.log("[perf] GUI 刷新 " + self._frames.summary())
 
         self._after_id = self.root.after(500, self.refresh)
 

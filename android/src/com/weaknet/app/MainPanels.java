@@ -47,8 +47,6 @@ import java.util.Map;
  *   · 事件日志：比对条数与最后一条时间戳，没变化就不碰 TextView。
  */
 public class MainPanels {
-    /** 场景按钮一行几个：手机竖屏窄，3 列刚好放得下短名 */
-    private static final int COLS = 3;
     /** 日志最多显示多少条（引擎侧保留 300 条） */
     private static final int LOG_MAX = 60;
 
@@ -666,8 +664,11 @@ public class MainPanels {
             return;
         }
         LinearLayout row = null;
+        // 列数每次现算：折叠屏开合 / 平板旋转跨过 600/840dp 断点后，
+        // 下一次 sync() 重画就自动跟上（sync 每 3 秒兜底一次）
+        final int cols = Ui.columns(a);
         for (int i = 0; i < items.size(); i++) {
-            if (i % COLS == 0) {
+            if (i % cols == 0) {
                 row = new LinearLayout(a);
                 row.setOrientation(LinearLayout.HORIZONTAL);
                 host.addView(row, new LinearLayout.LayoutParams(
@@ -1015,14 +1016,14 @@ public class MainPanels {
                     Window win = editorDlg.getWindow();
                     if (win == null) return;
                     try {
-                        int wide = a.getResources().getDisplayMetrics().widthPixels - dp(24);
+                        int wide = Ui.sheetContentWidth(a, 24);
                         int maxH = (int) (a.getResources().getDisplayMetrics().heightPixels * 0.9);
                         card.measure(
                                 View.MeasureSpec.makeMeasureSpec(wide, View.MeasureSpec.EXACTLY),
                                 View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED));
                         // 内容高度 + 底部按钮行（约 46dp）+ 外边距
                         int h = card.getMeasuredHeight() + dp(46) + dp(24);
-                        win.setLayout(WindowManager.LayoutParams.MATCH_PARENT,
+                        win.setLayout(Ui.sheetWindowWidth(a, 24),
                                 Math.min(h, maxH));
                     } catch (Exception e) {
                         // 测量失败就保持系统默认高度

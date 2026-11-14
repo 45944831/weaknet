@@ -33,9 +33,10 @@ import java.util.Map;
  * 悬浮窗面板（{@link FloatScenePanel}）只负责「切换」，组合本身得有个能创建的地方，
  * 否则手机上永远列不出任何组合 —— 这个卡片就是那个入口。
  *
- * 列表排版与「自定义场景」共用一套：3 列等宽小方块（{@link #COLS}），
- * 选中整块染主色 + 白字，段数/时长这类副信息挪到选中后的摘要行 ——
- * 早先的整宽 Button 会把名字居中、左边空一大片，和场景那排小方块明显不是一路。
+ * 列表排版与「自定义场景」共用一套：等宽小方块（列数随屏宽自适应，见
+ * {@link Ui#columns}），选中整块染主色 + 白字，段数/时长这类副信息挪到
+ * 选中后的摘要行 —— 早先的整宽 Button 会把名字居中、左边空一大片，
+ * 和场景那排小方块明显不是一路。
  *
  * 生效规矩与场景按钮完全一致（见 {@link WeakNet#selectCombo}）：
  *  - 弱网已在测试中：点一下立即从第一段开始播，到点自动切下一段
@@ -43,9 +44,6 @@ import java.util.Map;
  */
 public class ComboSheet {
     private final MainActivity a;
-
-    /** 与「自定义场景」完全一致：一行 3 个、等宽、末尾一行自然撑满 */
-    private static final int COLS = 3;
 
     private LinearLayout grid;
     private LinearLayout tailRow;
@@ -195,8 +193,10 @@ public class ComboSheet {
                 grid.addView(hint("还没有组合，点上面「＋ 新建组合」排一支"));
             } else {
                 LinearLayout row = null;
+                // 列数与场景网格同一口径（Ui.columns）：手机 3 列，平板/内屏 5~6 列
+                final int cols = Ui.columns(a);
                 for (int i = 0; i < items.size(); i++) {
-                    if (i % COLS == 0) {
+                    if (i % cols == 0) {
                         row = new LinearLayout(a);
                         row.setOrientation(LinearLayout.HORIZONTAL);
                         grid.addView(row, new LinearLayout.LayoutParams(

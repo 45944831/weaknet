@@ -3,6 +3,9 @@ package com.weaknet.app;
 import java.net.DatagramPacket;
 import java.net.DatagramSocket;
 import java.net.InetAddress;
+import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 /** 一条 UDP 会话（DNS 等）：转发到真实网络并回写 tun */
@@ -30,6 +33,15 @@ public class UdpSession {
     private final Object sendLock = new Object();
     private final int fastIdx;
 
+    /**
+     * 本会话专属的串行发送队列。
+     *
+     * 旧实现把每个 UDP 包都丢给服务的共享 cached 线程池：DNS/QUIC 这类高包率流量
+     * 会让线程池反复建销线程，而且同一会话的包序无保证。改成每会话单线程后，
+     * 线程数按会话算（空闲 30s 自动回收），包序与到达顺序一致。
+     */
+    private final ThreadPoolExecutor serial;
+
     UdpSession(VpnNetService vpn, String clientIp, int clientPort,
                String remoteIp, int remotePort, String key) {
         this.vpn = vpn;
@@ -42,6 +54,19 @@ public class UdpSession {
         this.remoteIpB = IpUtil.ipToBytes(remoteIp);
         this.delay = new DelayLine("udp-delay", 256 << 10);
         this.fastIdx = PortIdx.of(clientPort, remotePort);
+        ThreadPoolExecutor e = new ThreadPoolExecutor(1, 1, 30L, TimeUnit.SECONDS,
+                new LinkedBlockingQueue<Runnable>());
+        e.allowCoreThreadTimeOut(true);
+        this.serial = e;
+    }
+
+    /** 提交一个发送任务（同一会话内严格串行）；会话已关闭时静默丢弃 */
+    void submit(Runnable r) {
+        try {
+            serial.execute(r);
+        } catch (Exception e) {
+            // 已关闭或池已停：丢弃
+        }
     }
 
     boolean isClosed() {
@@ -79,6 +104,13 @@ public class UdpSession {
                     DatagramSocket s = new DatagramSocket();
                     vpn.protect(s);
                     s.setSoTimeout(30000);
+                    // UDP 没有接收自调优：512KB 收缓冲对齐 hev-socks5-core 的做法
+                    //（hev-socks5-misc.c:31），弱网高丢包下突发到达时不白丢内核队列
+                    try {
+                        s.setReceiveBufferSize(512 * 1024);
+                    } catch (Exception ignore) {
+                        // 个别 ROM 限制缓冲上限：默认值也能工作
+                    }
                     ds = s;
                     remoteAddr = InetAddress.getByAddress(remoteIpB);
                     startReceive();
@@ -143,6 +175,11 @@ public class UdpSession {
     void close() {
         if (closed.compareAndSet(false, true)) {
             vpn.clearUdpFast(fastIdx, this);
+            try {
+                serial.shutdownNow();
+            } catch (Exception e) {
+                // ignore
+            }
             try {
                 delay.close();
             } catch (Exception e) {

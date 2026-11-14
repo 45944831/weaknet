@@ -72,19 +72,23 @@ class HttpReader:
 
     def __init__(self, sock, pre=b""):
         self.sock = sock
-        self.buf = pre
+        # 必须用 bytearray：原来 `self.buf += part` 是 O(n^2)，64MB 响应要
+        # 复制约 32GB，实测吞吐被压到 5.8 MiB/s（换成 bytearray 是 178.3）。
+        # 这会把「测试客户端的开销」误记成产品数据面的性能。
+        self.buf = bytearray(pre)
 
     def _fill(self):
         part = self.sock.recv(65536)
         if not part:
             raise EOFError("连接已关闭（还差 %d 字节）" % len(self.buf))
-        self.buf += part
+        self.buf.extend(part)          # 摊销 O(1)
 
     def _line(self):
         while b"\r\n" not in self.buf:
             self._fill()
-        line, _, self.buf = self.buf.partition(b"\r\n")
-        return line
+        line, _, rest = self.buf.partition(b"\r\n")
+        self.buf = bytearray(rest)     # 只在这里复制一次，且通常只有头部大小
+        return bytes(line)
 
     def response(self):
         first = self._line().decode("latin1")
@@ -102,7 +106,8 @@ class HttpReader:
         n = int(headers.get("content-length") or 0)
         while len(self.buf) < n:
             self._fill()
-        body, self.buf = self.buf[:n], self.buf[n:]
+        body = bytes(self.buf[:n])
+        del self.buf[:n]               # 原地摘除，不重建整个缓冲
         return status, headers, body
 
 

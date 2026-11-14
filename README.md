@@ -2,7 +2,7 @@
 
 把设备流量接管到本地通道，按场景施加**带宽限速、延迟抖动、丢包卡顿、随机断连、黑洞超时、DNS 故障、周期断网**等网络损伤，用来验证 App 在真实弱网下的表现。
 
-**v1.1.16** · Windows（EXE） · Android 7.0+ · [下载最新版](https://github.com/45944831/weaknet/releases/latest)
+**v1.1.17** · Windows（EXE） · Android 7.0+ · [下载最新版](https://github.com/45944831/weaknet/releases/latest)
 
 ## 功能
 
@@ -23,12 +23,14 @@
 
 | 文件 | 平台 | 大小 | SHA-256（前 16 位） |
 |---|---|---|---|
-| [`WeakNet.exe`](https://github.com/45944831/weaknet/releases/latest/download/WeakNet.exe) | Windows GUI，免装 Python，无 DOS 黑框 | 10.34 MB | `c9948caa016bbc53` |
-| [`WeakNet.apk`](https://github.com/45944831/weaknet/releases/latest/download/WeakNet.apk) | Android 7.0+ | 201 KB | `6c268eb879b2133f` |
+| [`WeakNet.exe`](https://github.com/45944831/weaknet/releases/latest/download/WeakNet.exe) | Windows GUI，免装 Python，无 DOS 黑框 | 10.36 MB | `9c2233571971002a` |
+| [`WeakNet.apk`](https://github.com/45944831/weaknet/releases/latest/download/WeakNet.apk) | Android 7.0+ | 209 KB | `dd506aa4d73477c2` |
 
 发布页：<https://github.com/45944831/weaknet/releases/latest>
 
-> **v1.1.16 重点**：采集数据修复版——产品功能与 v1.1.15 完全一致，修掉并发流 steady 假 0、dumpsys PSS 取错、EXE RSS 假 0 三个静默缺陷，补齐场景快照与报告口径，数据复检从 11 个错误降到 0。
+> **v1.1.17 重点**：两端限速的突发额度对齐——Android 令牌桶容量从 1.0 s 收到 0.25 s，与 Windows 同源（`Bucket.BURST_SEC`）。此前 Android 空闲攒满后能一口气放行整秒配额，1 MB 短传输实测超发 1.46×，看起来像限速失效；对齐后降到 1.01×。同时修正三处参数说明：4G/5G 的「RTT」改成按上行+下行相加的真实往返口径，`down_kbps` 的单位说明改成代码实际使用的 1024 进制。规格 hash `6a95fc73` → `9990e03d`，**限速行为与文案都变了，属产品变更**。
+>
+> 上一版 **v1.1.16 重点**：采集数据修复版——产品功能与 v1.1.15 完全一致，修掉并发流 steady 假 0、dumpsys PSS 取错、EXE RSS 假 0 三个静默缺陷，补齐场景快照与报告口径，数据复检从 11 个错误降到 0。
 >
 > 上一版 **v1.1.15 重点**：自定义场景与弱网组合的名字统一限 10 个字（双端码点截断，中文输入法组字不被打断）；弱网组合列表改成和自定义场景一致的三列小方块，去掉 🔀、选中实心绿、下方带段数/循环/时长摘要；新增标签同步状态机，从飘窗或控制台选中项时才翻页，用户手动点开的页不再被 3 秒轮询拽回。首次启动自动注入 5 个内置场景 + 5 个组合。
 >
@@ -40,8 +42,8 @@
 <summary>完整 SHA-256</summary>
 
 ```text
-c9948caa016bbc531d004190c95e93f49c9d18ff12c67bd23b0619d1fe5edd35  WeakNet.exe
-6c268eb879b2133fa0442b7a110b78f47374c61fdf1ee54a9c34d176768016a0  WeakNet.apk
+9c2233571971002a96f81e05d653f48a52fb878d4a30eb7ea481c54429be9a0b  WeakNet.exe
+dd506aa4d73477c2883ef505ffcde647ae4500953f65323e04b8adefcdbdcb2a  WeakNet.apk
 ```
 
 </details>
@@ -111,11 +113,67 @@ python -m PyInstaller --onefile --windowed --clean --noconfirm --name WeakNet \
 
 # 回归
 python -m pytest
-python -m pytest -m perf
+python -m pytest -m perf              # 性能门禁：同机指纹 + 相对基线（见下）
 python -m pytest -m device     # 需先设置 ANDROID_SERIAL
+
+# 性能基线：默认只比较不写入；确认要换基线时才置 1
+WN_PERF_UPDATE_BASELINE=1 python -m pytest -m perf
 ```
 
-依赖、版本号约束、签名口令与测试夹具说明见[构建与测试](docs/build.md)。
+性能门禁的判定规则在 `tests/perf/baseline.py`：**同机指纹**才比较，默认
+warn 5% / fail 15%，每项 7 次取中位数与 p95；换机器只提示不判定。
+采样用 `tools/perf_profile.py`（py-spy，约 5% 开销，可直接 attach EXE）：
+
+```bash
+python tools/perf_profile.py record -d 30 -o perf-flame.svg
+python tools/perf_profile.py top
+python tools/perf_profile.py dump            # 卡死时看调用栈
+```
+
+外部真值、偏差曲线与冷启动归因（日志和 iperf3 二进制都放在仓库外 `_tmp/`，
+结果与 JSON 归档在 `tests/perf/archive/v1.1.16/`）：
+
+```bash
+python tools/perf_iperf.py --quick                        # 链路自检：服务端 / 隧道 / 引擎
+python tools/perf_iperf.py                               # 8 场景 × 7 次 × 20s，正式外部真值
+python tools/perf_iperf.py --gap 1.5                     # 轮间冷却秒数（默认 1.5，0=背靠背）
+python tools/perf_iperf.py --curve                       # 带宽偏差曲线（6 档）
+python tools/perf_iperf.py --curve-latency --curve-loss  # 高延迟×低带宽 + 丢包×带宽曲线
+python tools/perf_coldstart.py                           # -X importtime 冷启动导入归因
+python tools/perf_exe_measure.py --exe <exe> --runs 5    # EXE 冷启动就绪时间 + 进程树 RSS
+python -m pytest tests/perf/test_drain_ab.py -m perf -q -o addopts=""   # 写路径 A/B 证据
+python -m pytest tests/perf/test_slow_callbacks.py -m perf -q -o addopts=""  # 慢回调清单
+```
+
+> **外部真值的主口径是接收端**（iperf3 的 `sum_received`），不是客户端本地的
+> `sum_sent`：多流共享瓶颈时后者会系统性少计最多 36%，拿它当限速精度结论会造出
+> 假缺陷。口径由 `tests/perf/test_iperf_extract.py` 锁死，详见
+> [精度声明 §4.2](docs/precision.md)。
+>
+> 曲线与正式场景现在**统一窗口**（`--time 20 --omit 3 --repeats 7`），不再需要
+> 额外参数；跨批次比较仍须核对归档 JSON 里的 `context.inputs`。
+>
+> **采集质量自证**：每轮记 `cpu_busy_pct` / `engine_kbps`（代理层自计，与 iperf3
+> 独立），归档给出 `cv_pct` / `suspect_rounds` / `quality.usable`。
+> **`cv_pct > 5` 时禁止引用中位数**——「稳定 7946」与「双峰 2459/7946」的中位数
+> 与 p95 完全相同，只有变异系数能区分。详见 [精度声明 §4.5](docs/precision.md)。
+
+慢回调清单（P0-2 的另一半产物）把「事件循环里堵了超过 50 ms 的同步回调」列成表：
+py-spy 只看得到 CPU 热点，看不到谁把一段阻塞塞进了事件循环。排查「切场景不即时 /
+界面卡顿」时先跑它：
+
+```bash
+WN_SLOW_CB_MS=50 python tools/perf_profile.py record --source --slow-cb 50 -d 30
+```
+
+基线与所有结果统一口径：产品 `1 kbps = 1024 bit/s`；iperf3 原始
+`bits_per_second` 是 SI（1000 进制），归档同时保留原始值。默认基线为
+`SCHEMA=2`，含机器指纹、依赖版本、固定输入、预热、重复次数与单位口径；
+换基线必须显式 `WN_PERF_UPDATE_BASELINE=1`，避免「跑一次就自动改写门禁」。
+
+依赖、版本号约束、签名口令与测试夹具说明见[构建与测试](docs/build.md)，
+弱网参数能信到什么程度（含 2026-11-13 实测偏差表）见[精度声明](docs/precision.md)。
+
 
 ## 目录结构
 
@@ -134,7 +192,7 @@ weaknet/
 
 ## 验证与已知限制
 
-v1.1.16 为采集数据修复版（产品功能无变化）：版本一致性 14/14、pytest 138 通过、EXE 冒烟与 APK 真机版本校验通过、数据复检 0 错误；产物 EXE 10,839,282 B / `c9948caa…`、APK 205,860 B / `6c268eb8…`。v1.1.15 真机回归 **68/68**（深度 34 + 组合 11 + 默认项 12 + UI 11），EXE 冒烟 7/7，pytest 138 通过，版本一致性 14/14、规格 hash 一致。另做了关闭残留检测：Windows 正常关窗后进程 / 端口 / 系统代理全部清空，Android 强停后进程、服务与 tun 全清。v1.1.13 的 250/250 全量数据与更早版本见[验证记录](docs/verification.md)。
+v1.1.17 为两端限速对齐版：版本一致性 **16/16**（新增 C5/C6 产物新鲜度检查）、pytest **228** 通过、Java 纯 JDK **19** 套件、跨端一致性 **22/22**、真机契约 **13**、TUN 数据面 **11/11**（透明转发逐字节一致、限速 4,223 kbps、800 ms RTT 首字节 2,070 ms、5% 丢包正文完整、100% 拒连 80 ms、100% 黑洞 17.8 s 挂住、撤掉后 400 ms 恢复）、真机 10 并发限速 8000 聚合 **7,995 kbps**（一份全局桶）、1–10 Mbps 限速精度 **±0.3%**；产物 EXE 10,862,443 B / `9c223357…`、APK 214,052 B / `dd506aa4…`。v1.1.16 为采集数据修复版（产品功能无变化）：版本一致性 14/14、pytest 138 通过、EXE 冒烟与 APK 真机版本校验通过、数据复检 0 错误；产物 EXE 10,839,282 B / `c9948caa…`、APK 205,860 B / `6c268eb8…`。v1.1.15 真机回归 **68/68**（深度 34 + 组合 11 + 默认项 12 + UI 11），EXE 冒烟 7/7，pytest 138 通过，版本一致性 14/14、规格 hash 一致。另做了关闭残留检测：Windows 正常关窗后进程 / 端口 / 系统代理全部清空，Android 强停后进程、服务与 tun 全清。v1.1.13 的 250/250 全量数据与更早版本见[验证记录](docs/verification.md)。
 
 已知限制：
 
@@ -149,6 +207,7 @@ v1.1.16 为采集数据修复版（产品功能无变化）：版本一致性 14
 
 - [使用说明](docs/guide.md)：Windows / Android / USB 全功能操作、17 支场景与 13 项参数说明
 - [构建与测试](docs/build.md)：两端构建、版本号约束、pytest 回归
-- [验证记录](docs/verification.md)：v1.1.0 – v1.1.16 实测与已修缺陷
+- [精度声明](docs/precision.md)：模拟层次、各参数真实语义、已知偏差与校准方法
+- [验证记录](docs/verification.md)：v1.1.0 – v1.1.17 实测与已修缺陷
 
 问题与建议请提 [Issue](https://github.com/45944831/weaknet/issues)。

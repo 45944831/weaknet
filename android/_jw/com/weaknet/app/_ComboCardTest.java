@@ -89,8 +89,10 @@ public class _ComboCardTest {
         String shuffle = "\uD83D\uDD00";   // 🔀
         ck("C2 组合列表不再用「🔀 名字」的居中 Button",
                 sheet.indexOf("setText(\"" + shuffle + " \" + c.name)") < 0);
-        ck("C3 与场景同一网格密度：COLS = 3",
-                sheet.contains("int COLS = 3") && panels.contains("int COLS = 3"));
+        ck("C3 与场景同一网格密度：两处网格都走 Ui.columns 自适应（手机仍 3 列）",
+                sheet.contains("Ui.columns(a)") && panels.contains("Ui.columns(a)")
+                        && !sheet.contains("int COLS = 3")
+                        && !panels.contains("int COLS = 3"));
         ck("C4 每个小方块等宽：weight 1f + 同色底同圆角 + 单行省略",
                 sheet.contains("0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f")
                         && sheet.contains("box(0xFFF1F4FA, 0xFFD7DEEA, 8)")

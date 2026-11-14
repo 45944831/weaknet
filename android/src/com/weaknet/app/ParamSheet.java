@@ -123,9 +123,13 @@ public class ParamSheet {
         return row;
     }
 
-    /** 正文可用宽度（像素）：屏幕宽减去卡片与浮层的留白 */
+    /** 正文可用宽度（像素）：窗口内容宽减去卡片与浮层的留白 */
     private int textWidth() {
-        int wide = a.getResources().getDisplayMetrics().widthPixels;
+        // 紧凑屏沿用旧口径（窗口全宽）；≥600dp 窗口封顶，折行宽度跟着封顶，
+        // 否则预览行比实际渲染的长、TextView 会在行中再折一次
+        int wide = Ui.widthDp(a) < Ui.WSC_MEDIUM_DP
+                ? a.getResources().getDisplayMetrics().widthPixels
+                : Ui.sheetContentWidth(a, 32);
         return Math.max(dp(120), wide - dp(16) * 2 - NOTE_PAD * 2 - dp(2));
     }
 
@@ -285,13 +289,13 @@ public class ParamSheet {
         Window w = dlg == null ? null : dlg.getWindow();
         if (w == null || card == null) return;
         try {
-            int wide = a.getResources().getDisplayMetrics().widthPixels - dp(32);
+            int wide = Ui.sheetContentWidth(a, 32);
             card.measure(
                     View.MeasureSpec.makeMeasureSpec(wide, View.MeasureSpec.EXACTLY),
                     View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED));
             int h = card.getMeasuredHeight() + dp(32);
             int maxH = (int) (a.getResources().getDisplayMetrics().heightPixels * 0.8);
-            w.setLayout(WindowManager.LayoutParams.MATCH_PARENT, Math.min(h, maxH));
+            w.setLayout(Ui.sheetWindowWidth(a, 32), Math.min(h, maxH));
         } catch (Exception e) {
             // 测量失败就保持系统默认，不影响功能
         }

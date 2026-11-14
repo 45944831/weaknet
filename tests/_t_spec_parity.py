@@ -39,6 +39,7 @@ import weaknet as W  # noqa: E402
 SPEC_PATH = Path(ROOT) / "spec" / "spec.json"
 SPEC_SRC_PATH = Path(ROOT) / "android" / "src" / "com" / "weaknet" / "app" / "SpecGen.java"
 PROFILE_SRC_PATH = Path(ROOT) / "android" / "src" / "com" / "weaknet" / "app" / "Profile.java"
+PIPE_SRC_PATH = Path(ROOT) / "android" / "src" / "com" / "weaknet" / "app" / "Pipe.java"
 
 # 与 tools/gen_spec.py 的 FIELD_OF 互逆
 KEY_OF_FIELD = {
@@ -201,6 +202,19 @@ def check_static(spec):
     prof = read(PROFILE_SRC_PATH)
     rec("A10 Profile.java 不再硬编码场景名 / 文案",
         "电梯" not in prof and "Wi-Fi 良好" not in prof and "PARAM_NOTES.put" not in prof)
+
+    # 令牌桶的突发额度必须是「时间额度」：cap = 速率 × 秒数，而不是一批固定字节。
+    # 写成固定字节会让短样本超发比例随速率漂移；2026-11-14 曾把 1MB 档 +25~29%
+    # 误归因为「固定 0.42MB 免费额度」，就是漏了这一步。这里只断言「按时间计」，
+    # 两端的秒数差（Windows 0.25s / Android 1.0s）写在 detail 里，供选型时判断。
+    pipe = read(PIPE_SRC_PATH)
+    m_sec = re.search(r"BURST_SEC\s*=\s*([0-9.]+)", pipe)
+    rec("A11 两端突发额度同源且一致（cap = 速率 × BURST_SEC）",
+        bool(m_sec) and W.Bucket.BURST_SEC == float(m_sec.group(1))
+        and 0 < W.Bucket.BURST_SEC <= 2.0,
+        "Windows BURST_SEC=%.2fs / Android BURST_SEC=%s（两端一致）"
+        % (W.Bucket.BURST_SEC,
+           m_sec.group(1) if m_sec else "未找到"))
 
 
 def check_generated(spec):

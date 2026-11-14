@@ -321,13 +321,13 @@ public class ShareSheet {
         Window w = dlg == null ? null : dlg.getWindow();
         if (w == null || card == null) return;
         try {
-            int wide = a.getResources().getDisplayMetrics().widthPixels - dp(24);
+            int wide = Ui.sheetContentWidth(a, 24);
             card.measure(
                     View.MeasureSpec.makeMeasureSpec(wide, View.MeasureSpec.EXACTLY),
                     View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED));
             int h2 = card.getMeasuredHeight() + dp(24);
             int maxH = (int) (a.getResources().getDisplayMetrics().heightPixels * 0.9);
-            w.setLayout(WindowManager.LayoutParams.MATCH_PARENT, Math.min(h2, maxH));
+            w.setLayout(Ui.sheetWindowWidth(a, 24), Math.min(h2, maxH));
         } catch (Exception e) {
             // ignore
         }

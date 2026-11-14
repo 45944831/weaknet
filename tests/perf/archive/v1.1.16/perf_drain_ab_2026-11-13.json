@@ -1,0 +1,260 @@
+{
+  "schema": 2,
+  "date": "2026-11-13 20:53:16",
+  "purpose": "P1-5 受控 A/B：证明/证伪按写缓冲水位 drain 的收益",
+  "context": {
+    "schema": 2,
+    "spec_hash": "6a95fc73",
+    "fingerprint": {
+      "platform": "Windows-10-10.0.26100-SP0",
+      "python": "3.10.11",
+      "cpu_count": 12,
+      "machine": "AMD64",
+      "host": "renan"
+    },
+    "version": "1.1.16",
+    "build": 126,
+    "dependencies": {
+      "python": "3.10.11",
+      "pytest": "9.2.0",
+      "psutil": "unavailable",
+      "certifi": "2022.12.7"
+    },
+    "inputs": {
+      "bw_8000_kbps": {
+        "path": "/big",
+        "kb": 2048,
+        "profile": {
+          "down_kbps": 8000
+        }
+      },
+      "rtt_400ms_s": {
+        "path": "/small",
+        "profile": {
+          "latency_up_ms": 200,
+          "latency_down_ms": 200
+        }
+      },
+      "bw_concurrent8_kbps": {
+        "path": "/big",
+        "kb": 128,
+        "concurrency": 8,
+        "profile": {
+          "down_kbps": 8000
+        }
+      },
+      "stop_release_s": {
+        "path": "/big",
+        "kb": 1024,
+        "profile": {
+          "down_kbps": 300
+        },
+        "stop_after_s": 0.6
+      }
+    },
+    "warmup": 0,
+    "repeats": 7,
+    "unit_convention": {
+      "kbps": "1 kbps = 1024 bit/s",
+      "MiB": "1 MiB = 1048576 B",
+      "steady_window": "整段响应从首字节到末字节，不剔除慢启动；计时从 sendall 开始"
+    },
+    "ci": false
+  },
+  "repeats": 7,
+  "unit_convention": {
+    "kbps": "1 kbps = 1024 bit/s",
+    "MiB": "1 MiB = 1048576 B",
+    "steady_window": "整段响应从首字节到末字节，不剔除慢启动；计时从 sendall 开始"
+  },
+  "results": {
+    "8000kbps_2MiB": {
+      "workload": {
+        "kb": 2048,
+        "rate_kbps": 8000,
+        "unit": "kbps = 1024 bit/s"
+      },
+      "variants": {
+        "waterline": {
+          "DRAIN_HIGH": 131072,
+          "n": 7,
+          "median": 8325.203252060099,
+          "p95": 8454.076367412421,
+          "min": 8320.975114221023,
+          "max": 8454.076367412421
+        },
+        "always": {
+          "DRAIN_HIGH": -1,
+          "n": 7,
+          "median": 8454.076367412421,
+          "p95": 8458.440887947705,
+          "min": 8389.144905236933,
+          "max": 8458.440887947705
+        }
+      },
+      "waterline_vs_always_pct": -1.5243902438483294,
+      "pairs": [
+        {
+          "round": 1,
+          "order": [
+            "waterline",
+            "always"
+          ],
+          "waterline": 8325.203252060099,
+          "always": 8389.144905236933
+        },
+        {
+          "round": 2,
+          "order": [
+            "always",
+            "waterline"
+          ],
+          "always": 8458.440887947705,
+          "waterline": 8389.144905236933
+        },
+        {
+          "round": 3,
+          "order": [
+            "waterline",
+            "always"
+          ],
+          "waterline": 8454.076367412421,
+          "always": 8389.144905236933
+        },
+        {
+          "round": 4,
+          "order": [
+            "always",
+            "waterline"
+          ],
+          "always": 8454.076367412421,
+          "waterline": 8320.975114221023
+        },
+        {
+          "round": 5,
+          "order": [
+            "waterline",
+            "always"
+          ],
+          "waterline": 8389.144905236933,
+          "always": 8458.440887947705
+        },
+        {
+          "round": 6,
+          "order": [
+            "always",
+            "waterline"
+          ],
+          "always": 8389.144905236933,
+          "waterline": 8320.975114221023
+        },
+        {
+          "round": 7,
+          "order": [
+            "waterline",
+            "always"
+          ],
+          "waterline": 8320.975114221023,
+          "always": 8458.440887947705
+        }
+      ]
+    },
+    "50000kbps_2MiB": {
+      "workload": {
+        "kb": 2048,
+        "rate_kbps": 50000,
+        "unit": "kbps = 1024 bit/s"
+      },
+      "variants": {
+        "waterline": {
+          "DRAIN_HIGH": 131072,
+          "n": 7,
+          "median": 70017.09401806936,
+          "p95": 70017.09401806936,
+          "min": 69719.14894031474,
+          "max": 70017.09401806936
+        },
+        "always": {
+          "DRAIN_HIGH": -1,
+          "n": 7,
+          "median": 69719.14894031474,
+          "p95": 74812.78538407144,
+          "min": 69719.1489316803,
+          "max": 74812.78538407144
+        }
+      },
+      "waterline_vs_always_pct": 0.4273504227793723,
+      "pairs": [
+        {
+          "round": 1,
+          "order": [
+            "waterline",
+            "always"
+          ],
+          "waterline": 70017.09401806936,
+          "always": 69719.14894031474
+        },
+        {
+          "round": 2,
+          "order": [
+            "always",
+            "waterline"
+          ],
+          "always": 69719.1489316803,
+          "waterline": 69719.14894031474
+        },
+        {
+          "round": 3,
+          "order": [
+            "waterline",
+            "always"
+          ],
+          "waterline": 70017.09401806936,
+          "always": 70017.09401806936
+        },
+        {
+          "round": 4,
+          "order": [
+            "always",
+            "waterline"
+          ],
+          "always": 70017.09400936095,
+          "waterline": 70017.09401806936
+        },
+        {
+          "round": 5,
+          "order": [
+            "waterline",
+            "always"
+          ],
+          "waterline": 70017.09401806936,
+          "always": 69719.14894031474
+        },
+        {
+          "round": 6,
+          "order": [
+            "always",
+            "waterline"
+          ],
+          "always": 69719.1489316803,
+          "waterline": 69719.14894031474
+        },
+        {
+          "round": 7,
+          "order": [
+            "waterline",
+            "always"
+          ],
+          "waterline": 70017.09401806936,
+          "always": 74812.78538407144
+        }
+      ]
+    }
+  },
+  "conclusion": "两档限速下 waterline 与 always 的中位数/p95 均无实质差异，P1-5 不可宣称提速，不计入优化收益；按方案 §6「不凭猜测改转发逻辑」，后续再改 Windows 写路径必须先有 py-spy/yappi 热点证据。",
+  "limitations": [
+    "进程内引擎 + 本机回环源站，不等价于真机 WAN 链路",
+    "只测单连接 2 MiB 两档限速；多并发/慢档位/长稳场景未覆盖",
+    "同一进程内交替执行，仍可能受 Windows 调度与后台负载影响"
+  ]
+}

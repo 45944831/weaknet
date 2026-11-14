@@ -8,6 +8,7 @@ import android.os.Build;
 import android.os.Handler;
 import android.os.Looper;
 import android.provider.Settings;
+import android.text.TextUtils;
 import android.util.TypedValue;
 import android.view.Gravity;
 import android.view.MotionEvent;
@@ -66,16 +67,94 @@ public class FloatWindow {
     /** 参数变化时由 WeakNet 回调立刻重画一次，不用干等 500ms 轮询 */
     private final Runnable uiWatcher = new Runnable() {
         public void run() {
-            if (shown) update();
+            if (shown) updateWithStats();
         }
     };
     private final Runnable tick = new Runnable() {
         public void run() {
             if (!shown) return;
-            update();
+            updateWithStats();
+            // 顺带把位置钳回安全区：折叠屏开合 / 平板旋转会改变屏尺寸与
+            // 刘海边距，overlay 收不到 onChange 类回调，用现成轮询兜底。
+            clampPosition();
             h.postDelayed(this, 500);
         }
     };
+
+    /**
+     * 把飘窗钳进可见显示框（lp 坐标空间）。
+     *
+     * API 29 起系统不再替 FLAG_LAYOUT_NO_LIMITS 的窗口兜底：拖出屏幕的部分
+     * 直接被裁剪，拖进刘海等于把窗口弄丢（用户再也够不着）。拖动、显示、
+     * 每 500ms 轮询三个点都收口到这里。
+     *
+     * 坐标空间（真机 ColorOS 实测的两个坑）：① overlay 渲染自带状态栏偏移
+     * （lp.y=0 → 屏上 frame.y=107），拿 lp 对比物理屏会在底部越界 43px；
+     * ② NO_LIMITS 窗口的 getWindowVisibleDisplayFrame 返回哨兵 ±100000
+     * （等于不设限），不能当可见框用。所以：实测「屏上位置 − lp」偏移
+     * （ROM 映射），用真实屏尺寸与状态栏/导航条高度换算出 **lp 空间的
+     * 可见框** 再钳。偏移只在非拖动状态下重新实测（拖动中视图还没走到
+     * 新位置，实测会得到错误值）。
+     */
+    private int scrOffX, scrOffY;      // 屏上位置 = lp + 偏移（ROM 映射，随时可能变）
+    private boolean dragging;
+
+    private void captureScreenOffset() {
+        if (root == null || lp == null) return;
+        int[] pos = new int[2];
+        root.getLocationOnScreen(pos);
+        scrOffX = pos[0] - lp.x;
+        scrOffY = pos[1] - lp.y;
+    }
+
+    private void clampPosition() {
+        if (root == null || lp == null) return;
+        int vw = root.getWidth(), vh = root.getHeight();
+        if (vw <= 0 || vh <= 0) return;
+        if (!dragging) captureScreenOffset();
+        int[] real = Ui.realDisplaySize(app);
+        float den = app.getResources().getDisplayMetrics().density;
+        int statusH = Ui.systemBarHeight(den, "status_bar_height", 24);
+        int navH = Ui.systemBarHeight(den, "navigation_bar_height", 48);
+        // lp 空间的可见框：屏上可见区 [statusH, realH-navH] 往回扣掉实测偏移
+        int[] p = Ui.clampOverlay(lp.x, lp.y, vw, vh,
+                -scrOffX, statusH - scrOffY,
+                real[0] - scrOffX, real[1] - navH - scrOffY);
+        if (p[0] == lp.x && p[1] == lp.y) return;
+        lp.x = p[0];
+        lp.y = p[1];
+        try {
+            wm.updateViewLayout(root, lp);
+        } catch (Exception ignore) {
+        }
+    }
+
+    /**
+     * 刷新并记账（P2-3 帧率统计）。
+     *
+     * <p>500ms 轮询会把「卡了多久」完全盖住，所以这里额外记录每次刷新的
+     * 真实间隔与本次刷新自身耗时，每 60 次打一条日志，便于在真机上判断
+     * 「数字不动」到底是弱网慢还是 UI 线程被堵。
+     */
+    private final FrameStats frames = new FrameStats();
+    private int tickCount = 0;
+
+    private void updateWithStats() {
+        long t0 = System.currentTimeMillis();
+        try {
+            update();
+        } finally {
+            frames.record(t0, System.currentTimeMillis() - t0);
+            tickCount++;
+            if (tickCount % 60 == 0) {
+                try {
+                    WeakNet.I.log("perf", "浮窗刷新：" + frames.snapshot().summary());
+                } catch (Exception e) {
+                    // 统计永远不该影响浮窗本身
+                }
+            }
+        }
+    }
 
     private FloatWindow(Context c) {
         app = c.getApplicationContext();
@@ -153,8 +232,8 @@ public class FloatWindow {
             gd.setCornerRadius(16f);
             gd.setStroke(1, 0x55FFFFFF);
             root.setBackgroundDrawable(gd);
-            int pad = dp(10);
-            root.setPadding(pad + 2, pad, pad + 2, pad);
+            int pad = dp(7);
+            root.setPadding(pad + 1, pad, pad + 1, pad);
 
             // 标题行：场景名（未勾选「场景名」时只显示产品标识）+ 关闭
             LinearLayout top = new LinearLayout(app);
@@ -163,6 +242,9 @@ public class FloatWindow {
             tTitle.setTextColor(0xFFFFFFFF);
             tTitle.setTextSize(TypedValue.COMPLEX_UNIT_SP, st.textSp + 2);
             tTitle.setSingleLine(true);
+            // 瘦身（用户反馈飘窗太宽）：超长场景名截断，别让标题行把窗口撑到半屏
+            tTitle.setEllipsize(TextUtils.TruncateAt.END);
+            tTitle.setMaxWidth(dp(150));
             tTitle.setText("⚡ WeakNet");
             LinearLayout.LayoutParams tl = new LinearLayout.LayoutParams(0,
                     LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
@@ -173,7 +255,7 @@ public class FloatWindow {
             bSwitch.setText("⇄");
             bSwitch.setTextColor(0xFF9EC5FF);
             bSwitch.setTextSize(TypedValue.COMPLEX_UNIT_SP, st.textSp + 3);
-            bSwitch.setPadding(dp(8), 0, dp(6), 0);
+            bSwitch.setPadding(dp(4), 0, dp(2), 0);
             bSwitch.setOnClickListener(new View.OnClickListener() {
                 public void onClick(View v) {
                     toggleScene();
@@ -187,7 +269,7 @@ public class FloatWindow {
             bPause.setText("⏸");
             bPause.setTextColor(0xFF9EC5FF);
             bPause.setTextSize(TypedValue.COMPLEX_UNIT_SP, st.textSp + 2);
-            bPause.setPadding(dp(6), 0, dp(6), 0);
+            bPause.setPadding(dp(4), 0, dp(3), 0);
             bPause.setContentDescription("暂停弱网测试");
             bPause.setOnClickListener(new View.OnClickListener() {
                 public void onClick(View v) {
@@ -200,7 +282,7 @@ public class FloatWindow {
             close.setText("✕");
             close.setTextColor(0xFF9AA4B2);
             close.setTextSize(TypedValue.COMPLEX_UNIT_SP, st.textSp + 3);
-            close.setPadding(dp(6), 0, dp(2), 0);
+            close.setPadding(dp(4), 0, dp(1), 0);
             close.setOnClickListener(new View.OnClickListener() {
                 public void onClick(View v) {
                     hide();
@@ -255,15 +337,15 @@ public class FloatWindow {
                                 // 面板的位置是在「打开那一刻」算出来的，拖动后它会挂在错的地方：
                                 // 直接收起，用户要换场景时再点一下「⇄」即可
                                 if (scenePanel != null) scenePanel.close();
+                                dragging = true;          // 拖动中偏移量不重实测，见 clampPosition
                                 lp.x = sx + dx;
                                 lp.y = sy + dy;
-                                try {
-                                    wm.updateViewLayout(root, lp);
-                                } catch (Exception ignore) {
-                                }
+                                // 钳进可见显示框（刘海/手势条/屏边界），见 clampPosition 注释
+                                clampPosition();
                             }
                             return moved;
                         case MotionEvent.ACTION_UP:
+                            dragging = false;             // 松手后 tick 会重实测偏移量
                             return moved;                 // 拖动过就不再触发点击
                     }
                     return false;
@@ -281,11 +363,24 @@ public class FloatWindow {
             lp.x = dp(12);
             lp.y = dp(90);
             lp.alpha = st.alpha;
+            // API 29 起 FLAG_LAYOUT_NO_LIMITS 不再允许画进刘海（渲染被裁剪）：
+            // 显式声明 ALWAYS，配合 clampPosition() 双保险 —— 窗口获准进入
+            // 状态栏区域，但钳制逻辑保证它始终停在安全区内。
+            if (Build.VERSION.SDK_INT >= 28) {
+                lp.layoutInDisplayCutoutMode =
+                        WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS;
+            }
 
             wm.addView(root, lp);
+            // 首次布局完成后也钳一次：dp(90) 在超小屏 / 异形屏上可能压到刘海
+            root.post(new Runnable() {
+                public void run() {
+                    clampPosition();
+                }
+            });
             shown = true;
             lastT = 0;
-            update();
+            updateWithStats();
             WeakNet.I.addUiWatcher(uiWatcher);   // 切场景/开关变化时会被即时唤醒
             h.removeCallbacks(tick);
             h.postDelayed(tick, 500);
@@ -414,10 +509,11 @@ public class FloatWindow {
             // 场景名固定在标题行常驻显示（不看「场景名」行有没有勾选）：
             // 悬浮窗本来就是给「现在在测哪支场景」看的，藏在可选行里容易被关掉找不到
             String scene = sceneName(p);
+            // 状态后缀用窄分隔（原「 · 」三字符占整行近一成宽度，飘窗要窄）
             String state = "";
-            if (WeakNet.I.paused) state = " · 已暂停";
-            else if (!WeakNet.I.gateOpen) state = " · 断网中";
-            else if (!WeakNet.I.limitOn) state = " · 未生效";
+            if (WeakNet.I.paused) state = "·已暂停";
+            else if (!WeakNet.I.gateOpen) state = "·断网中";
+            else if (!WeakNet.I.limitOn) state = "·未生效";
             tTitle.setText("⚡ " + scene + state);
             syncPauseBtn();
 
@@ -480,7 +576,8 @@ public class FloatWindow {
     }
 
     private static String resolveName(String key) {
-        if (key == null || key.length() == 0 || "direct".equals(key)) return "直连（不限制）";
+        // 飘窗瘦身：全宽括号注解在 360dp 屏上要占近 1/4 行宽，主界面已有完整说明
+        if (key == null || key.length() == 0 || "direct".equals(key)) return "直连";
         if (key.startsWith("u:")) {
             try {
                 MyPresets.Item it = MyPresets.find(key.substring(2));
@@ -506,8 +603,8 @@ public class FloatWindow {
 
     private String lineText(String id, Profile p, double rd, double ru,
                             long dn, long up, long now, java.util.Map<String, String> v) {
-        if ("limit".equals(id)) return "限速 ↓" + kbps(p.downKbps) + "   ↑" + kbps(p.upKbps);
-        if ("rate".equals(id)) return "实时 ↓" + bps(rd) + "   ↑" + bps(ru);
+        if ("limit".equals(id)) return "限速 ↓" + kbps(p.downKbps) + " ↑" + kbps(p.upKbps);
+        if ("rate".equals(id)) return "实时 ↓" + bps(rd) + " ↑" + bps(ru);
         if ("conns".equals(id))
             return "连接 " + WeakNet.I.connActive.get() + " / " + WeakNet.I.connTotal.get();
         if ("total".equals(id)) return "累计 ↓" + bytes(dn) + " ↑" + bytes(up);

@@ -1,0 +1,51 @@
+{
+ "exe_size_mb": 10.34,
+ "runs": [
+  {
+   "run": 1,
+   "ready_s": 2.29,
+   "rss_mb": 50.8,
+   "rss_src": "ctypes",
+   "mei_mb": 21.4
+  },
+  {
+   "run": 2,
+   "ready_s": 2.64,
+   "rss_mb": 51.3,
+   "rss_src": "ctypes",
+   "mei_mb": 21.4
+  },
+  {
+   "run": 3,
+   "ready_s": 2.7,
+   "rss_mb": 51.4,
+   "rss_src": "ctypes",
+   "mei_mb": 21.4
+  },
+  {
+   "run": 4,
+   "ready_s": 2.67,
+   "rss_mb": 52.3,
+   "rss_src": "ctypes",
+   "mei_mb": 21.4
+  },
+  {
+   "run": 5,
+   "ready_s": 2.66,
+   "rss_mb": 52.3,
+   "rss_src": "ctypes",
+   "mei_mb": 21.4
+  }
+ ],
+ "summary": {
+  "ready_min": 2.29,
+  "ready_max": 2.7,
+  "ready_med": 2.66,
+  "rss_med_mb": 51.4,
+  "rss_n": 5,
+  "rss_src": [
+   "ctypes"
+  ]
+ },
+ "note": "rss_mb 为 /api/status 就绪后立即采样的进程树工作集总和；None 表示本次没测到（不计入统计），不是 0"
+}

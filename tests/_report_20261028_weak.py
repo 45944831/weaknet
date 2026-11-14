@@ -274,12 +274,21 @@ def download(path, timeout=90.0, out=None):
             t_b = t_first + span * 0.95
             out["steady_win_ms"] = [round(t_a * 1000.0, 1), round(t_b * 1000.0, 1)]
             out["steady_kbps"] = _rate(tl, t_a, t_b)
+            # 复测 §3.3：窗口内采样点过少的 steady 没有统计意义——网络拥塞
+            # 512kbps 档实测过「1 个点算出 −44%」却以同一字段名义进报告。
+            # 点数 <10 落 null + 原因，与「窗口太短算不出」同样显式。
+            n_pts = sum(1 for t, _b in tl if t_a <= t <= t_b)
+            out["steady_points"] = n_pts
+            if out["steady_kbps"] is not None and n_pts < 10:
+                out["steady_kbps"] = None
+                out["steady_reason"] = "稳态窗口内采样点 %d < 10，不具统计意义" % n_pts
         c.close()
     except Exception as e:
         out["total_ms"] = round((now() - t0) * 1000.0, 1)
         out["bytes"] = got
         out["ok"] = False
         out["error"] = type(e).__name__ + ": " + str(e)[:90]
+        out["steady_points"] = 0   # \u5931\u8d25\u6837\u672c\u4e5f\u8981\u6709\u8be5\u5b57\u6bb5\uff1a\u62a4\u680f\u5fc5\u586b\uff08\u590d\u6d4b \u00a73.1\u2461\uff09
         try:
             c.close()
         except Exception:
@@ -439,6 +448,12 @@ R = {"meta": {
         "steady_kbps": ("窗口取「首字节时刻」之后 30%~95%，并夹到 timeline "
                         "实际覆盖区间：连接/握手不参与。窗口 <5ms 记 null"
                         "（算不出），不是 0。短连接上它会明显高于 avg"),
+        "steady_points": "稳态窗口内的采样点数（复测 §3.3）；<10 时 steady_kbps"
+                         "记 null 并写 steady_reason，该值不具统计意义",
+        "premise": "采样前的引擎前提快照（复测 §3.7）：limit_on / down_kbps / "
+                   "preset_key；premise_ok=false 的样本 valid=false，统计端必须剔除",
+        "valid": "premise_ok 且下载完成；false 的样本禁止进任何统计",
+        "ideal_s": "样本理想传输时长 = kb×8/kbps 秒；<1s 的样本首段含 cap=rate×0.25s 突发额度（两端同源），引用 steady/avg 前必须核对。",
         "pc": "percentile，线性插值",
     },
 }, "presets_note": "库存默认值；本轮实际下发值见各段 params（flapping 有覆盖）",
@@ -459,6 +474,30 @@ def baseline():
            up.get("kbps") or 0))
 
 
+def premise(expect_down=None):
+    """采样前落一份引擎前提快照（复测 §3.7）。
+
+    3.9× 假差异的真实教训：两次 16MB 都标「重建后」，第二次却继承了上一段
+    的 limit_on=true, down=4000，实测恰好等于限速值——事后 sha 完全发现不了。
+    所以每个样本前把引擎状态落进样本本身，与预期不符的标 valid=false，
+    让统计端可以显式剔除。Windows 引擎无 vpn/mtu 概念，只记 limit/档位/速率。
+    """
+    try:
+        st = ENGINE.status()
+    except Exception as e:
+        return {"premise_ok": False, "reason": "status 不可达: %r" % (e,)}
+    prof = st.get("profile") or {}
+    prem = {"limit_on": st.get("limit_on"),
+            "down_kbps": prof.get("down_kbps"),
+            "preset_key": st.get("preset_key")}
+    if expect_down is not None and prem["down_kbps"] != expect_down:
+        prem["premise_ok"] = False
+        prem["reason"] = "down_kbps=%r != 预期 %r" % (prem["down_kbps"], expect_down)
+    else:
+        prem.setdefault("premise_ok", True)
+    return prem
+
+
 def accuracy():
     log("带宽/时延精度（每个场景约 3s 载荷 × 2）")
     rows = [("4G LTE", "4g"), ("4G 弱网", "4g_weak"), ("弱 Wi-Fi", "wifi_weak"),
@@ -467,10 +506,20 @@ def accuracy():
         p = preset(key)
         apply(**p)
         kbps = p.get("down_kbps") or 0
-        kb = max(32, int(kbps * 0.375))
+        # 复测 §3.3：低速档样本太短会让稳态窗口只剩个位数采样点。样本量
+        # 抬到固定 512KB 下限（512kbps → 8s/轮），配合点数门槛才有效。
+        kb = max(512, int(kbps * 0.375))
         runs = []
         for _ in range(2):
-            runs.append(download("/big?kb=%d" % kb, timeout=120))
+            prem = premise(expect_down=kbps)
+            r = download("/big?kb=%d" % kb, timeout=180)
+            # 复测 §4.3：短样本含 cap=rate×0.25s 的时间额度（两端同源）。
+            # ideal_s < 1s 的样本引用 steady/avg 前必须核对突发额度。
+            ideal_s = (kb * 8.0 / kbps) if kbps else None
+            r["ideal_s"] = round(ideal_s, 2) if ideal_s else None
+            r["premise"] = prem
+            r["valid"] = bool(prem.get("premise_ok") and r.get("ok"))
+            runs.append(r)
             time.sleep(0.25)
         small = keepalive(5, timeout=60, reconnect=True)
         p50 = small["stats"].get("p50")
@@ -484,7 +533,10 @@ def accuracy():
                           ("电梯 / 地下车库", "elevator", 128)):
         p = preset(key)
         apply(**p)
+        prem = premise()
         run = download("/big?kb=%d" % kb, timeout=120)
+        run["premise"] = prem
+        run["valid"] = bool(prem.get("premise_ok") and run.get("ok"))
         small = keepalive(4, timeout=60, reconnect=True)
         log("  %s：ok=%s 用时 %.1f ms 平均 %.1f kbps；症状=%s"
             % (name, run.get("ok"), run.get("total_ms") or 0,
@@ -505,6 +557,7 @@ def accuracy():
 def mid_stop(name, key, kb, wait_s, note=""):
     """弱网中途停止：下载进行到 wait_s 时点「停止」，观察恢复与连接存活。"""
     apply(**preset(key))
+    prem = premise()
     out = {}
     th = threading.Thread(target=download, args=("/big?kb=%d" % kb, 90, out), daemon=True)
     th.start()
@@ -545,6 +598,7 @@ def mid_stop(name, key, kb, wait_s, note=""):
 
     row = {
         "name": name, "key": key, "kb": kb, "wait_s": wait_s, "note": note,
+        "premise": prem,
         "stop_api_ms": st["api_ms"],
         "before_stop_kbps": pre,
         "after_stop_window_kbps": post,
@@ -603,6 +657,7 @@ def blackhole():
     resume = round((now() - t_stop) * 1000.0, 1) if out.get("ok") else None
     stop()   # 收尾，确保回到直连
     R["blackhole"] = {
+        "premise": premise(),
         "client_timeout": client,
         "stop_api_ms": st["api_ms"],
         "resume_after_stop_ms": resume,
@@ -646,6 +701,7 @@ def flap():
     retry = download("/big?kb=8192", 90)
     recover_ms = round((now() - t_stop) * 1000.0, 1)
     R["flap"] = {
+        "premise": premise(),
         "params": p,
         "during_blackout": during,
         "first_ok": out.get("ok"), "first_error": first_error,
@@ -702,6 +758,7 @@ def concurrency():
             "error": o.get("error"),
         })
     R["concurrency"] = {
+        "premise": premise(),
         "kb": 3072, "streams": 4, "stop_at_s": 1.5,
         "stop_api_ms": st["api_ms"],
         "all_ok": all(o.get("ok") for o in outs),
@@ -722,6 +779,7 @@ def post_stop_small():
     time.sleep(0.1)
     after = keepalive(10, timeout=30)
     R["post_stop_small"] = {
+        "premise": premise(),
         "preset": "4g_weak",
         "before": before,
         "after": after,
@@ -752,7 +810,7 @@ def connect_cost():
             time.sleep(0.05)
     finally:
         W.proc_name_of_peer = orig
-    R["connect_cost"] = {"with_lookup_ms": with_lookup, "without_lookup_ms": without}
+    R["connect_cost"] = {"premise": premise(), "with_lookup_ms": with_lookup, "without_lookup_ms": without}
     log("  默认 %s ms；跳过反查 %s ms" % (with_lookup, without))
 
 
@@ -774,7 +832,7 @@ def fairness():
     for i, o in enumerate(outs):
         rows.append({"i": i, "ok": o.get("ok"), "connect_ms": o.get("connect_ms"),
                      "total_ms": o.get("total_ms"), "avg_kbps": o.get("avg_kbps")})
-    R["fairness"] = {"streams": rows, "snapshots": snaps,
+    R["fairness"] = {"premise": premise(), "streams": rows, "snapshots": snaps,
                      "all_ok": all(o.get("ok") for o in outs)}
     log("  进度 %s；建连 %s ms；完成耗时 %s ms"
         % ([s["bytes"] for s in snaps],
@@ -788,7 +846,7 @@ def uploads():
     for name, key, kb in (("4G LTE", "4g", 2048), ("网络拥塞", "congestion", 64)):
         apply(**preset(key))
         u = upload(kb)
-        rows.append({"name": name, "key": key, "result": u})
+        rows.append({"name": name, "key": key, "premise": premise(), "result": u})
         log("  %s 上行设定 %d kbps：%dKB 用时 %.2f s，实测 %.1f kbps，ok=%s"
             % (name, preset(key).get("up_kbps"), kb, (u.get("total_ms") or 0) / 1000.0,
                u.get("kbps") or 0, u.get("ok")))

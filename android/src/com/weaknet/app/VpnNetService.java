@@ -9,6 +9,7 @@ import android.content.Intent;
 import android.net.VpnService;
 import android.os.Build;
 import android.os.ParcelFileDescriptor;
+import android.os.Process;
 
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
@@ -18,6 +19,8 @@ import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 
 /**
  * VPN 接管服务：把设备全部流量导入 tun，在 IP 层重放 TCP/UDP 并注入弱网参数。
@@ -26,6 +29,98 @@ import java.util.concurrent.Executors;
 public class VpnNetService extends VpnService {
     public static final String ACTION_STOP = "com.weaknet.app.STOP_VPN";
     public static final String ACTION_START = "com.weaknet.app.START_VPN";
+
+    /**
+     * tun 的 MTU —— **单一真值**。
+     *
+     * MSS 通告值、TcpSession 的下游读缓冲都从 {@link #tunMtu()} 派生。三者必须一起变：
+     * 只把 MTU 调大，对端仍按旧 MSS 分段，TUN 侧永远收不到大包，实验会得出
+     * 「提 MTU 没有收益」的错误结论（回归用例见 _jw/.../_MssClampTest.java 与
+     * _MtuAbTest.java，语义说明见 docs/precision.md §3.5）。
+     * 默认仍取 1500：更大 MTU 需要机型兼容性与 PMTUD 验证后才可切换；
+     * 实验档只能通过 {@link #applyMtuTier(int)} 在建立 tun 之前选中。
+     */
+    static final int DEFAULT_TUN_MTU = 1500;
+
+    /**
+     * 允许的 MTU 档位（P1-2 / P1-3 的实验档）。
+     *
+     * 1280 是 IPv6 要求的最小链路 MTU；16384 让 TcpSession 的下游读缓冲与
+     * MSS 一起落到 16 KB 级（16344 B），也就是方案 P1-2 说的「对齐到 16 KB 级」——
+     * 只有把 MTU 抬上来才谈得上对齐，默认 1500 时上限就是 1460。
+     *
+     * 只允许取这几档：任意值会让「MSS / 缓冲 / setMtu 三处同源」失去可验证性，
+     * 也让真机 A/B 的结论无法复现。
+     */
+    static final int[] MTU_TIERS = {1280, 1500, 9000, 16384};
+
+    /** 当前生效的 MTU。默认 1500；实验档必须在建立 tun 之前切换。 */
+    private static volatile int tunMtu = DEFAULT_TUN_MTU;
+
+    /**
+     * 当前 tun **实际**生效的 MTU：establish() 成功时落档，stopVpn() 清零。
+     * 与 {@link #tunMtu()}（静态请求档）的区别：rebuild 是异步的（stop + 700ms
+     * 后才 ACTION_START），期间静态档已是新值而 tun 还不存在或还是旧档——
+     * 复测 §3.6 实证过「响应 ok 但 vpn_active=false、无 tun0」的窗口，
+     * 贴着这个窗口开测会产出「标签正确、前提错误」的脏样本。调用方必须
+     * 轮询 /api/status 的 effective_mtu == 目标档后才能开测。
+     */
+    private static volatile int effectiveTunMtu = 0;
+
+    static int tunMtu() {
+        return tunMtu;
+    }
+
+    static int effectiveMtu() {
+        return effectiveTunMtu;
+    }
+
+    /** 静态档与实际生效档一致、且 tun 存在 = 切档调用方可以开测 */
+    static boolean mtuReady() {
+        return effectiveTunMtu != 0 && effectiveTunMtu == tunMtu;
+    }
+
+    /** 无对端 MSS 时的默认值：IPv4 20B + TCP 20B 头 */
+    static int defaultMss() {
+        return tunMtu - 40;
+    }
+
+    /**
+     * 切换 MTU 档（仅实验用）。返回值 false 表示档位不在 {@link #MTU_TIERS} 里。
+     *
+     * 已经建立的会话各自持有协商好的 clientMss，不会被这次切换改变 —— 所以
+     * A/B 必须在「停止 → 设档 → 启动」之间做，不能边跑边切。
+     */
+    static boolean applyMtuTier(int mtu) {
+        for (int t : MTU_TIERS) {
+            if (t == mtu) {
+                tunMtu = mtu;
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * MTU↔MSS 联动的**参数化纯函数**：P1-3 四档 A/B（1500/4096/8192/16384）
+     * 只要换 mtu 就能算出该档的 MSS 与下游读缓冲，不必改四处硬编码。
+     * 真机吞吐实验仍需打包后进行；这里锁住的是「三处必然一起变」的正确性。
+     */
+    static int mssForMtu(int mtu, int peerMss) {
+        int max = Math.max(536, mtu - 40);      // IPv4 20B + TCP 20B 头
+        if (peerMss <= 0) return max;          // 未知 MSS → 用该档上限
+        return Math.max(536, Math.min(peerMss, max));
+    }
+
+    /** 下游读缓冲大小：与 MSS 同源派生，杜绝「MTU 提了、缓冲还锁在 1400」 */
+    static int downstreamBufferForMtu(int mtu) {
+        return mssForMtu(mtu, 0);
+    }
+
+    /** 把对端/默认 MSS 收进合法区间，上限随当前 MTU 走 */
+    static int clampMss(int mss) {
+        return mssForMtu(tunMtu(), mss);
+    }
 
     public static volatile boolean active = false;
     /** 用户是否主动停止过接管。START_STICKY 会让系统在 stopService 后重启本服务，
@@ -42,8 +137,27 @@ public class VpnNetService extends VpnService {
     private ParcelFileDescriptor tun;
     private FileInputStream tunIn;
     private FileOutputStream tunOut;
+    /** 只在「写线程未运行」的兜底直写路径上使用；正常路径靠单写线程天然串行 */
     private final Object writeLock = new Object();
     private volatile boolean running = false;
+
+    /**
+     * 写回 tun 的有界队列 + 单写线程。
+     *
+     * 旧实现是 `synchronized (writeLock) { tunOut.write(packet); }`：一次 tun fd 写约
+     * 50µs，所有 TCP/UDP 流的下行包都在这把锁上排队，且调用方（会话锁内）要陪着等
+     * —— 一条慢连接能把所有流一起拖住（Outline SDK #631 是同一个问题）。
+     * 现在改成「入队即返回、单线程串行写」：会话锁的临界区从「一次系统调用」
+     * 缩到「一次入队」，下行顺序由 FIFO 保证，与原来的锁序等价。
+     *
+     * 队列必须有界：满了就让调用方阻塞，压力沿链路回传（与原 writeLock 的阻塞语义一致）。
+     * 1024 × ~1.5KB ≈ 1.5MB 上限。
+     */
+    private static final int OUTQ_CAP = 1024;
+    /** 抽成纯 JDK 类是为了让「有界 / FIFO / 停止清空」能被单测覆盖，见 _TunWriteQueueTest */
+    private final TunWriteQueue outQ = new TunWriteQueue(OUTQ_CAP);
+    private volatile boolean writerRunning = false;
+    private Thread writerThread;
 
     private final ConcurrentHashMap<String, TcpSession> tcpSessions =
             new ConcurrentHashMap<String, TcpSession>();
@@ -59,6 +173,8 @@ public class VpnNetService extends VpnService {
     private final TcpSession[] tcpFast = new TcpSession[65536];
     private final UdpSession[] udpFast = new UdpSession[65536];
     private ExecutorService exec;
+    /** 定时任务（延迟清理）：用调度器而不是「池线程里 sleep」。见 scheduleRemove */
+    private ScheduledExecutorService sched;
     private Thread cleanThread;
 
     /** 会话关闭时清槽。身份校验：槽位可能已被同端口对的新流占用，不能误清。 */
@@ -74,7 +190,15 @@ public class VpnNetService extends VpnService {
         }
     }
 
-    /** 把任务投到共享线程池（下游读循环用：省每连接建线程，顺序天然保持） */
+    /**
+     * 把任务投到共享线程池（下游读循环用：省每连接建线程，顺序天然保持）。
+     *
+     * 这里**必须**保持 cached 语义、不能换成固定大小的池：下游读循环是阻塞式
+     * `sin.read()`，每条活跃连接会长期占住一个线程直到 EOF。固定池在连接数超过
+     * 池大小时会让新连接的上行直接没有线程可用（数据面停摆），而 cached 池的
+     * 线程数与「活跃连接数」同阶，正是阻塞 IO 的固有代价。
+     * 真正能压缩的线程在别处：延迟清理不再 sleep、UDP 不再每包派发。
+     */
     public void runOnPool(Runnable r, String name) {
         ExecutorService e = exec;
         if (e == null || e.isShutdown()) {
@@ -97,7 +221,25 @@ public class VpnNetService extends VpnService {
      * 必须拿到实例自己 stopSelf()，同时先 stopForeground 撤掉前台通知。
      */
     public static void stop(Context ctx) {
+        stop(ctx, true);
+    }
+
+    /**
+     * @param resetMtuTier 用户主动停止时把 MTU 实验档复位到默认 1500（复测 P2：
+     *                     关闭不复位的话，下次不带 mtu 开启会悄悄沿用上次的
+     *                     实验档）。rebuild 走 {@code stop(ctx, false)}——重建
+     *                     就是为了用新档建 tun，复位会把刚选的档冲掉。
+     */
+    public static void stop(Context ctx, boolean resetMtuTier) {
         userStopped = true;
+        if (resetMtuTier && tunMtu != DEFAULT_TUN_MTU) {
+            tunMtu = DEFAULT_TUN_MTU;
+            try {
+                WeakNet.I.log("config", "MTU 实验档已复位 1500（MSS " + defaultMss() + "）");
+            } catch (Exception e) {
+                // ignore
+            }
+        }
         VpnNetService s = instance;
         if (s != null) {
             try {
@@ -132,7 +274,7 @@ public class VpnNetService extends VpnService {
      */
     public static void rebuild(Context ctx) {
         boolean was = active;
-        stop(ctx);
+        stop(ctx, false);      // 重建就是为用新档建 tun，复位会把刚选的档冲掉
         if (!was) return;
         new android.os.Handler(ctx.getMainLooper()).postDelayed(new Runnable() {
             public void run() {
@@ -149,6 +291,28 @@ public class VpnNetService extends VpnService {
     }
 
     public int onStartCommand(Intent intent, int flags, int startId) {
+        // 实验档入口（P1-2 / P1-3 的真机 A/B 用）：
+        //   POST /api/vpn {"enable":true,"mtu":16384}
+        // 只接受 MTU_TIERS 里的值；非法值保持原档并记一条日志。
+        // 注意不能从 adb 直接起服务：清单里本服务声明了 BIND_VPN_SERVICE 权限，
+        // `am start-foreground-service ... -e mtu 16384` 会被系统拒掉
+        // （Error: Requires permission android.permission.BIND_VPN_SERVICE），
+        // 所以真机切档只能走控制接口（由 App 自己发起）。
+        // 必须发生在 startVpn() 之前：tun 一旦建立，MTU 就定了。
+        if (intent != null && intent.hasExtra("mtu")) {
+            try {
+                String raw = intent.getStringExtra("mtu");
+                int want = Integer.parseInt(String.valueOf(raw).trim());
+                if (applyMtuTier(want)) {
+                    dlog("mtu: 实验档 " + want + "（MSS " + defaultMss() + "）"
+                            + (running ? "；tun 已建立，下次启动生效" : ""));
+                } else {
+                    dlog("mtu: 忽略非法档位 " + want + "（可选 1280/1500/9000/16384）");
+                }
+            } catch (Exception e) {
+                dlog("mtu: 解析失败 " + e);
+            }
+        }
         String act = (intent == null) ? null : intent.getAction();
         if (ACTION_STOP.equals(act)) {
             userStopped = true;
@@ -164,7 +328,7 @@ public class VpnNetService extends VpnService {
         if (ACTION_START.equals(act)) {
             // 用户显式启动：清除「已停止」意图，保证停止后能再次接管
             userStopped = false;
-            if (!running) startVpn();
+            if (!running) startVpnGuarded();
             return START_STICKY;
         }
         // 走到这里说明 intent 为 null 或没有 action —— 典型情况是系统因 START_STICKY 重启本服务。
@@ -173,8 +337,38 @@ public class VpnNetService extends VpnService {
             stopSelf();
             return START_NOT_STICKY;
         }
-        if (!running) startVpn();
+        if (!running) startVpnGuarded();
         return START_STICKY;
+    }
+
+    /**
+     * 建 tun 的统一入口：先无条件进前台，再决定要不要真的接管。
+     *
+     * Android 的硬性契约：被 startForegroundService() 拉起的服务必须在 5 秒内
+     * 调用 startForeground()，否则系统直接杀掉整个进程，logcat 里是
+     *   Killing <pid> (adj 200): user request after error:
+     *   Context.startForegroundService() did not then call Service.startForeground()
+     *
+     * startVpn() 有若干条「这次不接管」的早退路径（接管范围=仅选定却没选 App、
+     * 系统未授权导致 establish() 返回 null……）。以前这些路径都直接 return，
+     * 于是「没建起来」被系统升级成「进程被杀」—— 用户看到的是 App 突然消失、
+     * 悬浮窗和通知一起没了，日志里只有一句 ANR，与真实原因（没授权）完全对不上。
+     * 真机实测踩到过：/api/vpn 打开时 establish() 返回 null，5 秒后进程被 KILL。
+     *
+     * 所以顺序改成「先进前台 → 再建 tun → 没建成就撤前台并 self-stop」，
+     * 任何早退路径都不会再违反契约。
+     */
+    private void startVpnGuarded() {
+        startForegroundCompat();
+        startVpn();
+        if (!running) {
+            try {
+                stopForeground(true);
+            } catch (Exception e) {
+                // ignore
+            }
+            stopSelf();
+        }
     }
 
     public void onDestroy() {
@@ -190,13 +384,31 @@ public class VpnNetService extends VpnService {
     }
 
     private void startVpn() {
+        // 先向系统确认授权状态。
+        //
+        // VpnService.prepare() 在 appops ACTIVATE_VPN 已放行时直接返回 null，
+        // 副作用是**把本包标记为已准备**——不调它，establish() 会一律返回 null
+        // （logcat 只有一句 "VPN 未获得授权"，看不出其实是「没 prepare」）。
+        // 这也让 /api/vpn 这条无界面通道以前根本开不了 VPN：只有界面点「开始」
+        // 的路径调过 prepare()，脚本驱动的测试因此只能靠点按钮。
+        // 返回非 null 说明系统要弹授权框，服务里没法弹，只能让用户去界面上点一次。
+        try {
+            Intent consent = VpnService.prepare(this);
+            if (consent != null) {
+                WeakNet.I.log("error", "VPN 尚未授权：请先在界面上点一次「开始弱网测试」");
+                return;
+            }
+        } catch (Exception e) {
+            WeakNet.I.log("error", "VPN 授权检查失败：" + e.getMessage());
+            return;
+        }
         Builder b = new Builder()
                 .setSession("WeakNet 弱网模拟")
                 .addAddress("10.8.0.2", 24)
                 .addRoute("0.0.0.0", 0)
                 .addDnsServer("8.8.8.8")
                 .addDnsServer("114.114.114.114")
-                .setMtu(1500)
+                .setMtu(tunMtu())
                 .setBlocking(true);
         // ---- 按接管范围决定哪些 App 的流量进 tun ----
         // 注意：addAllowedApplication 与 addDisallowedApplication 互斥，二者只能取其一，
@@ -260,8 +472,12 @@ public class VpnNetService extends VpnService {
         tunOut = new FileOutputStream(tun.getFileDescriptor());
         running = true;
         active = true;
+        effectiveTunMtu = tunMtu;   // 采集/脚本的就绪判据（见 effectiveTunMtu 注释）
         userStopped = false;
         exec = Executors.newCachedThreadPool();
+        sched = Executors.newSingleThreadScheduledExecutor();
+        // 写线程必须早于 readLoop 起来：readLoop 处理完第一个包就会开始回写
+        startWriter();
         WeakNet.onProfileChange = new Runnable() {
             public void run() {
                 // 恢复直连 / 停止模拟时不要掐断：连接会自然按新参数继续（限速桶已归零）
@@ -273,7 +489,8 @@ public class VpnNetService extends VpnService {
                 udpSessions.clear();
             }
         };
-        startForegroundCompat();
+        // 前台通知已经在 startVpnGuarded() 里发过了（必须在建 tun 之前，
+        // 否则早退路径会触发系统的 5 秒契约检查）；这里只记账。
         WeakNet.I.log("config", "VPN 接管已开启：全部 App 流量进入弱网模拟");
         // 限速飘窗（悬浮显示当前场景与实时速率）；未授予悬浮窗权限时自动跳过
         try {
@@ -284,6 +501,11 @@ public class VpnNetService extends VpnService {
 
         Thread readThread = new Thread(new Runnable() {
             public void run() {
+                // 数据面热线程提权到 nice -8（THREAD_PRIORITY_URGENT_DISPLAY）：
+                // AntMonitor 在完全相同的两个角色（tun 读线程 + 受保护网 I/O 线程）
+                // 上就是这么做的；净效果是 CPU 争抢（GC / 后台编译 / 其它 App）
+                // 时不被降权。不用 AUDIO(-16/-19)：会饿死自己的非数据线程。
+                Process.setThreadPriority(Process.THREAD_PRIORITY_URGENT_DISPLAY);
                 readLoop();
             }
         }, "tun-read");
@@ -310,16 +532,22 @@ public class VpnNetService extends VpnService {
     private void stopVpn() {
         running = false;
         active = false;
+        effectiveTunMtu = 0;   // tun 已不存在：就绪判据立即失效（先于一切清理）
         for (TcpSession s : tcpSessions.values()) s.close();
         tcpSessions.clear();
         for (UdpSession s : udpSessions.values()) s.close();
         udpSessions.clear();
+        stopWriter();          // 先停写线程再关 fd：否则它可能阻塞在已失效的 fd 上
         try {
             if (tunIn != null) tunIn.close();
             if (tunOut != null) tunOut.close();
             if (tun != null) tun.close();
         } catch (Exception e) {
             // ignore
+        }
+        if (sched != null) {
+            sched.shutdownNow();
+            sched = null;
         }
         if (exec != null) exec.shutdownNow();
         try {
@@ -443,7 +671,7 @@ public class VpnNetService extends VpnService {
                 }
                 if (s == null) {
                     if (syn && !ackFlag) {
-                        int mss = 1460;
+                        int mss = defaultMss();
                         int i = off + 20;
                         while (i + 1 < off + dataOff) {
                             int kind = pkt[i] & 0xFF;
@@ -524,7 +752,10 @@ public class VpnNetService extends VpnService {
                 }
                 final UdpSession fus = us;
                 final byte[] fp = payload;
-                exec.execute(new Runnable() {
+                // 每个包都往共享池扔一个任务，在 DNS/QUIC 这种高包率下会让 cached 池
+                // 反复建销线程，而且同一会话的包顺序没有保证。改走会话自己的串行队列：
+                // 线程数按会话算（空闲 30s 回收），顺序也与到达顺序一致。
+                fus.submit(new Runnable() {
                     public void run() {
                         fus.send(fp, fp.length);
                     }
@@ -539,6 +770,9 @@ public class VpnNetService extends VpnService {
     /**
      * 写回 tun —— 下行流量的唯一出口，限速在这里统一执行，
      * 保证送给 App 的每一个字节都过闸（包括 TCP/UDP/控制包）。
+     *
+     * 限速仍在**入队前**同步执行（语义不变：不是「先排队再限速」）；
+     * 真正的 fd 写在单写线程里串行完成，调用方只花一次入队。
      */
     public void write(byte[] packet) {
         int payload = payloadLength(packet);
@@ -550,16 +784,96 @@ public class VpnNetService extends VpnService {
             }
             WeakNet.I.bytesDown.addAndGet(payload);
         }
+        if (DIAG) {
+            dlog("write: " + packet.length + "B proto=" + (packet[9] & 0xFF)
+                    + " dst=" + IpUtil.ipToString(packet, 16)
+                    + ":" + IpUtil.u16(packet, ihlOf(packet) + 2));
+        }
+        // 入队；队列满则阻塞（保留背压）。写线程若已退出则退回直写兜底，
+        // 避免停止过程中把 RST/FIN 这类控制包丢掉。
+        while (writerRunning) {
+            try {
+                if (outQ.offer(packet, 200)) return;
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return;
+            }
+        }
+        writePacket(packet);          // 兜底直写也走唯一写入点，不会与写线程交错写 fd
+    }
+
+    /**
+     * tun fd 的唯一写入点。
+     *
+     * 常态只有单写线程调用，`synchronized` 无竞争（偏向锁，成本可忽略）；
+     * 保留这把锁是为了停止窗口：`stopWriter()` 把 writerRunning 置 false 后，
+     * 旧写线程可能还在写，此时 `write()` 会走兜底直写 —— 两者若不共用一把锁，
+     * 就有交错写同一个 FileOutputStream 的窄竞态（2026-11-13 核查发现）。
+     */
+    private boolean writePacket(byte[] p) {
         synchronized (writeLock) {
             try {
-                dlog("write: " + packet.length + "B proto=" + (packet[9] & 0xFF)
-                        + " dst=" + IpUtil.ipToString(packet, 16)
-                        + ":" + IpUtil.u16(packet, ihlOf(packet) + 2));
-                tunOut.write(packet);
+                if (tunOut == null) return false;
+                tunOut.write(p);
+                return true;
             } catch (Exception e) {
                 dlog("write: EXC " + e);
-                // ignore
+                return false;
             }
+        }
+    }
+
+    private void startWriter() {
+        writerRunning = true;
+        Thread t = new Thread(new Runnable() {
+            public void run() {
+                // 与 tun-read 同一优先级（nice -8），见 readThread 处注释
+                Process.setThreadPriority(Process.THREAD_PRIORITY_URGENT_DISPLAY);
+                writeLoop();
+            }
+        }, "tun-write");
+        t.setDaemon(true);
+        writerThread = t;
+        t.start();
+    }
+
+    private void stopWriter() {
+        writerRunning = false;
+        Thread t = writerThread;
+        writerThread = null;
+        if (t != null) {
+            t.interrupt();
+            // 等写线程把在途控制包收尾再清队列；join 有上界，不会卡住 stopVpn()
+            try {
+                t.join(500);
+            } catch (InterruptedException ie) {
+                Thread.currentThread().interrupt();
+            }
+        }
+        outQ.clear();
+    }
+
+    /** 单写线程：FIFO 出队 → 一次 fd 写。顺序即入队顺序，与旧锁序等价。 */
+    private void writeLoop() {
+        // 身份校验：重建通道时 startWriter 会起新线程，旧线程可能还没退出。
+        // 只靠 writerRunning 的话，旧线程会在标志重新置 true 后「复活」，
+        // 与写新 tun 的线程一起消费同一个队列 —— 顺序会乱。
+        Thread me = Thread.currentThread();
+        while (writerRunning && writerThread == me) {
+            byte[] p;
+            try {
+                p = outQ.poll(200);
+            } catch (InterruptedException e) {
+                break;
+            }
+            if (p == null) continue;
+            if (!writePacket(p) && !writerRunning) break;
+        }
+        // 退出前把剩余控制包尽量写完（tunOut 已关时立刻失败退出）
+        if (writerThread != me && writerThread != null) return;   // 已被新线程接管：不要抢写
+        byte[] p;
+        while ((p = outQ.poll()) != null) {
+            if (!writePacket(p)) break;
         }
     }
 
@@ -583,19 +897,25 @@ public class VpnNetService extends VpnService {
         return 0;
     }
 
+    /**
+     * 延迟关闭会话（黑洞模拟：SYN 后不响应，60s 后再清）。
+     *
+     * 旧实现在共享池里 `Thread.sleep(60000)`：每关一条连接就白占一个池线程一分钟，
+     * 黑洞场景下几十条 SYN 就能堆出几十个「只睡觉」的线程。改用调度器后不占线程。
+     */
     public void scheduleRemove(final String key, final TcpSession s, long delayMs) {
-        if (exec == null || exec.isShutdown()) return;
-        exec.execute(new Runnable() {
-            public void run() {
-                try {
-                    Thread.sleep(60000);
-                } catch (InterruptedException e) {
-                    // ignore
+        ScheduledExecutorService sc = sched;
+        if (sc == null || sc.isShutdown()) return;
+        try {
+            sc.schedule(new Runnable() {
+                public void run() {
+                    s.close();
+                    tcpSessions.remove(key);
                 }
-                s.close();
-                tcpSessions.remove(key);
-            }
-        });
+            }, Math.max(0, delayMs), TimeUnit.MILLISECONDS);
+        } catch (Exception e) {
+            // 服务正在停止：调度器已关闭，丢弃即可
+        }
     }
 
     /** 清理长时间无流量的会话 */

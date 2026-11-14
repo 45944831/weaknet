@@ -113,13 +113,19 @@ public class Pipe {
 
     /** 令牌桶限速器（字节/秒） */
     public static class Bucket {
+        /** æ¡¶å®¹é = rate Ã BURST_SECï¼æ¶é´é¢åº¦ï¼ä¸æ¯åºå®å­èï¼ã
+         *  ä¸ Windows ç«¯ Bucket.BURST_SEC=0.25 åæºï¼æ¡¶æ¯å¨å±å±äº«çï¼ç©ºé²ææ»¡å
+         *  ä¸ä¸ª 4MB ä¸è½½è½ä¸å£æ°åææ´ç§éé¢ãæ¾ç»ç¨ 1.0sï¼ä¸ Windows
+         *  ç 0.25s å·® 4 åï¼è¿å precision.md Â§5 ãä¸¤ç«¯ä¸è´ãæ¿è¯ºï¼å¤æµ Â§4.4ï¼ã
+         *  æé æ¶èµ·å§ä¸ºç©ºï¼å Windowsï¼ï¼é¢åº¦éç©ºé²æ¶é´æ cap æã */
+        static final double BURST_SEC = 0.25;
         private double rate;
         private double tokens;
         private long last;
 
         public Bucket(int kbps) {
             rate = kbps > 0 ? kbps * 128.0 : 0;
-            tokens = Math.min(rate, 4096);
+            tokens = 0;                     // èµ·å§ä¸ºç©ºï¼ç­æ ·æ¬æµçæ¯çº¯éçï¼ä¸å«èµ·å§çªå
             last = System.nanoTime();
         }
 
@@ -131,7 +137,7 @@ public class Pipe {
         public synchronized void setKbps(int kbps) {
             refill();
             rate = kbps > 0 ? kbps * 128.0 : 0;
-            if (tokens > rate) tokens = rate;
+            tokens = Math.min(tokens, cap());
             if (rate <= 0) tokens = 0;      // 不限速：把欠账清零
             notifyAll();                    // 唤醒正在等令牌的线程，立即恢复
         }
@@ -159,15 +165,19 @@ public class Pipe {
                 // 否则会话关闭打断 worker 线程时，每次中断都留下一笔"幽灵欠债"，
                 // 并发连接多、中断多，欠债会累积到远超实际流量的规模 ——
                 // 实测 8 并发后单连接 256KB 卡 90s 以上、要几分钟才自然还清。
-                tokens = Math.min(tokens + n, rate);
+                tokens = Math.min(tokens + n, cap());
                 throw ie;
             }
         }
 
+        private double cap() {
+            return rate * BURST_SEC;
+        }
+
         private void refill() {
             long now = System.nanoTime();
-            if (tokens < rate) {
-                tokens = Math.min(tokens + (now - last) / 1e9 * rate, rate);
+            if (tokens < cap()) {
+                tokens = Math.min(tokens + (now - last) / 1e9 * rate, cap());
             }
             last = now;
         }

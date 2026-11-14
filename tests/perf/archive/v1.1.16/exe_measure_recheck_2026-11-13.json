@@ -1,0 +1,110 @@
+{
+ "schema": 1,
+ "date": "2026-11-13",
+ "purpose": "第四轮复测：EXE 冷启动/RSS，新构建 vs 11-06 旧产物（同机同时段）",
+ "new_build": {
+  "schema": 1,
+  "date": "2026-11-13 21:03:28",
+  "exe": "E:\\WorkBuddy1\\2026-10-13-15-51-24\\weaknet\\_build_exe_20261113\\WeakNet.exe",
+  "exe_size_mb": 10.34,
+  "runs": [
+   {
+    "run": 1,
+    "ready_s": 2.67,
+    "rss_mb": 52.7,
+    "rss_src": "ctypes",
+    "mei_mb": 21.4
+   },
+   {
+    "run": 2,
+    "ready_s": 2.14,
+    "rss_mb": 51.0,
+    "rss_src": "ctypes",
+    "mei_mb": 21.4
+   },
+   {
+    "run": 3,
+    "ready_s": 2.16,
+    "rss_mb": 51.0,
+    "rss_src": "ctypes",
+    "mei_mb": 21.4
+   },
+   {
+    "run": 4,
+    "ready_s": 2.18,
+    "rss_mb": 51.1,
+    "rss_src": "ctypes",
+    "mei_mb": 21.4
+   },
+   {
+    "run": 5,
+    "ready_s": 2.67,
+    "rss_mb": 51.7,
+    "rss_src": "ctypes",
+    "mei_mb": 21.4
+   }
+  ],
+  "summary": {
+   "ready_med": 2.18,
+   "ready_min": 2.14,
+   "ready_max": 2.67,
+   "rss_med_mb": 51.1,
+   "rss_n": 5,
+   "mei_mb": 21.4
+  },
+  "note": "rss_mb 为 /api/status 就绪后立即采样的进程树工作集总和；None 表示本次没测到（不计入统计），不是 0"
+ },
+ "old_build_1106": {
+  "schema": 1,
+  "date": "2026-11-13 21:03:55",
+  "exe": "E:\\WorkBuddy1\\2026-10-13-15-51-24\\weaknet\\WeakNet.exe",
+  "exe_size_mb": 10.34,
+  "runs": [
+   {
+    "run": 1,
+    "ready_s": 2.17,
+    "rss_mb": 51.6,
+    "rss_src": "ctypes",
+    "mei_mb": 21.4
+   },
+   {
+    "run": 2,
+    "ready_s": 2.25,
+    "rss_mb": 51.6,
+    "rss_src": "ctypes",
+    "mei_mb": 21.4
+   },
+   {
+    "run": 3,
+    "ready_s": 2.7,
+    "rss_mb": 51.4,
+    "rss_src": "ctypes",
+    "mei_mb": 21.4
+   },
+   {
+    "run": 4,
+    "ready_s": 2.65,
+    "rss_mb": 53.0,
+    "rss_src": "ctypes",
+    "mei_mb": 21.4
+   },
+   {
+    "run": 5,
+    "ready_s": 2.15,
+    "rss_mb": 52.3,
+    "rss_src": "ctypes",
+    "mei_mb": 21.4
+   }
+  ],
+  "summary": {
+   "ready_med": 2.25,
+   "ready_min": 2.15,
+   "ready_max": 2.7,
+   "rss_med_mb": 51.6,
+   "rss_n": 5,
+   "mei_mb": 21.4
+  },
+  "note": "rss_mb 为 /api/status 就绪后立即采样的进程树工作集总和；None 表示本次没测到（不计入统计），不是 0"
+ },
+ "conclusion": "新构建 2.18 s / 51.1 MB vs 旧产物 2.25 s / 51.6 MB，差 0.07 s 与 0.5 MB 均在轮间噪声内；≤2.0 s 目标仍未达标，根因是 onefile 解包 21.4 MB（MEI），与本轮代码改动无关。"
+}

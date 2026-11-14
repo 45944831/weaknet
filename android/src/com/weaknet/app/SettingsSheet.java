@@ -223,13 +223,15 @@ public class SettingsSheet {
         Window w = dlg == null ? null : dlg.getWindow();
         if (w == null || card == null) return;
         try {
-            int wide = a.getResources().getDisplayMetrics().widthPixels - dp(24);
+            // 宽屏封顶：紧凑屏 = 旧行为（窗口全宽），≥600dp 时窗口与卡片同宽、
+            // 居中（Ui.sheetWindowWidth / sheetContentWidth 两条口径配套）
+            int wide = Ui.sheetContentWidth(a, 24);
             card.measure(
                     View.MeasureSpec.makeMeasureSpec(wide, View.MeasureSpec.EXACTLY),
                     View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED));
             int h = card.getMeasuredHeight() + dp(24);
             int maxH = (int) (a.getResources().getDisplayMetrics().heightPixels * 0.9);
-            w.setLayout(WindowManager.LayoutParams.MATCH_PARENT, Math.min(h, maxH));
+            w.setLayout(Ui.sheetWindowWidth(a, 24), Math.min(h, maxH));
         } catch (Exception e) {
             // 测量失败就保持系统默认，不影响功能
         }

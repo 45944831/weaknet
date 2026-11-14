@@ -106,6 +106,64 @@ def test_custom_profile_is_clamped_and_enables(engine):
     assert body["preset_key"] == "custom"
 
 
+# ---------------------------------------------------------------- 收敛契约
+# 2026-11-14 全面检测发现：`/api/profile` 是**唯一直接接收外部任意 JSON 的入口**，
+# 却没有复用 `_norm_user_profile()`（保存/应用用户预设都走那一个），而是自己写了
+# 一份只做 `max(0, v)` 的简化版。上面那条用例只测了「负数」，恰好漏掉两个真陷阱：
+#
+#   {"down_kbps": true} → True 落库。isinstance(True, int) 为真、max(0, True) 仍是
+#                          True，/api/status 于是返回 "down_kbps": true，前端读不懂；
+#   {"down_kbps": 1e18} → 原样落库，而 Android 侧同一请求会被 Profile.apply() 的
+#                          num(v, SpecGen.paramMax(...)) 夹到 spec 上限 —— 两端对
+#                          同一份配置给出不同状态，违反「双端同构」。
+#
+# 教训：单测覆盖了正确函数（test_unit_profile.py 有 bool/上限用例），但没覆盖
+# **调用点**，于是缺陷从两条用例的缝里漏过去了。下面把端到端行为钉死。
+
+def test_profile_rejects_bool_as_number(engine):
+    """`true` 不是带宽：必须被忽略，不能变成 1。"""
+    assert engine.api.post("/api/profile", {"down_kbps": True}).status == 200
+    body = engine.status()
+    assert body["profile"]["down_kbps"] == 0
+    assert body["limit_on"] is False
+
+
+def test_profile_clamps_to_spec_max(engine):
+    """超大值夹到 spec 上限，与 Android 的 num(v, paramMax) 同语义。"""
+    assert engine.api.post("/api/profile", {"down_kbps": 1e18}).status == 200
+    assert engine.status()["profile"]["down_kbps"] == W.PROF_LIMITS["down_kbps"]
+
+
+def test_profile_ignores_string_and_unknown_key(engine):
+    r = engine.api.post("/api/profile", {"down_kbps": "4000", "foo": 1})
+    assert r.status == 200
+    body = engine.status()
+    assert body["profile"]["down_kbps"] == 0      # 字符串不是「差不多能用」
+    assert "foo" not in body["profile"]
+
+
+def test_profile_percent_fields_clamped(engine):
+    """丢包 999% 与 100% 等价；-5% 就是 0。别让状态里出现 999。"""
+    engine.api.post("/api/profile", {"loss_pct": 999, "disconnect_pct": -5})
+    body = engine.status()
+    assert body["profile"]["loss_pct"] == 100
+    assert body["profile"]["disconnect_pct"] == 0
+
+
+def test_profile_uses_the_same_norm_as_user_presets(engine):
+    """同一份畸形输入，`/api/profile` 与「保存用户预设」必须给出同一份结果。
+
+    这是防止两套实现再次分叉的核心断言：正确函数只该有一个。
+    """
+    payload = {"down_kbps": True, "loss_pct": 999, "up_kbps": 1e18, "foo": 1}
+    expect = W._norm_user_profile("自定义", payload)
+    engine.api.post("/api/profile", payload)
+    got = engine.status()["profile"]
+    for k in ("down_kbps", "up_kbps", "loss_pct"):
+        assert got[k] == expect[k], "%s 两条路径不一致：%r vs %r" % (
+            k, got[k], expect[k])
+
+
 def test_stop_endpoint_is_idempotent(engine):
     engine.apply(latency_up_ms=200)
     for _ in range(2):

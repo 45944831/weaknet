@@ -60,9 +60,9 @@ public class MainActivity extends Activity {
     public void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
 
-        // 固定竖版：Manifest 已声明 portrait，这里再做一次运行时兜底，
-        // 覆盖部分厂商 ROM 忽略 manifest 声明 / 横屏状态下冷启动的情况。
-        setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_PORTRAIT);
+        // 方向策略（见 applyOrientationPolicy）：手机锁竖版（旧行为不变），
+        // 平板 / 折叠屏内屏放开。Manifest 仍声明 portrait，这里运行时覆盖。
+        applyOrientationPolicy(null);
 
         // 自定义场景与弱网组合都落在同一个 SharedPreferences：先把上下文备好，
         // 免得服务还没起来时读到的列表是空的
@@ -432,10 +432,11 @@ public class MainActivity extends Activity {
     private void applyLimitOn() {
         Profile restore = profileOf(WeakNet.I.presetKey);
         if (restore == null && "custom".equals(WeakNet.I.presetKey)) {
-            // 自定义参数：当前 profile 就是用户刚拖出来的那份，原样保留。
-            // 不能走下面的 lastProfile 回落——参数全 0（或只有 stall 之类不算 limits
-            // 的字段）时 hasLimits() 为 false，会把用户刚设的参数整个换成上次的场景。
-            restore = WeakNet.I.profile;
+            // 自定义参数：当前 profile 还带参数（用户刚拖出来的那份）就原样保留；
+            // 已被「停止」清成直连的回落 lastProfile —— 与 /api/run 同构（复测 4.1
+            // 修复：旧逻辑关→开 后取到的是被清空的直连，假开启）。纯 JVM 回归：
+            // _RunToggleRestoreTest；语义详见 WeakNet.resolveEnable 注释。
+            restore = WeakNet.I.resolveEnableRestore(null);
         } else if (restore == null || !restore.hasLimits()) {
             if (WeakNet.I.lastProfile != null) restore = WeakNet.I.lastProfile;
         }
@@ -524,12 +525,28 @@ public class MainActivity extends Activity {
         super.onDestroy();
     }
 
-    /** 极少数 ROM 仍会投递横屏配置变化，这里再按回竖版，保证界面方向恒定 */
+    /**
+     * 方向策略：紧凑屏（sw<600dp）锁定竖版 —— 全部手机都在这一档，旧行为不变，
+     * 同时覆盖部分厂商 ROM 忽略 manifest 声明 / 横屏状态下冷启动的情况。
+     *
+     * ≥600dp（平板、折叠屏内屏 750~900dp）不再锁定：Android 12L 起系统对
+     * 大屏上的方向锁定本来就会 letterbox（Adaptive App Quality 红线），
+     * Android 16/17 更是直接忽略锁定参数 —— 与其被动吃兼容模式，不如显式
+     * 放开。界面是纵向滚动布局，横屏 / 近方形下照常可用；弹层宽度已由
+     * Ui.sheetWindowWidth 封顶居中，网格列数由 Ui.columns 自适应。
+     */
+    private void applyOrientationPolicy(Configuration cfg) {
+        if (cfg == null) cfg = getResources().getConfiguration();
+        boolean largeScreen = cfg.smallestScreenWidthDp >= Ui.WSC_MEDIUM_DP;
+        setRequestedOrientation(largeScreen
+                ? ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
+                : ActivityInfo.SCREEN_ORIENTATION_PORTRAIT);
+    }
+
+    /** 折叠屏开合 / 平板旋转都会走到这里：按当前 sw 档位重套方向策略 */
     public void onConfigurationChanged(Configuration newConfig) {
         super.onConfigurationChanged(newConfig);
-        if (newConfig.orientation != Configuration.ORIENTATION_PORTRAIT) {
-            setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_PORTRAIT);
-        }
+        applyOrientationPolicy(newConfig);
     }
 
     public void onBackPressed() {
