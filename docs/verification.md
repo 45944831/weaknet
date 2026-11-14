@@ -48,6 +48,11 @@ v1.1.16 遗留的两端不一致：Windows 令牌桶容量是 `rate × 0.25 s`�
 | `WeakNet.exe` | 10,862,443 B | `9c2233571971002a` |
 | `WeakNet.apk` | 214,052 B | `dd506aa4d73477c2` |
 
+发布页：<https://github.com/45944831/weaknet/releases/tag/v1.1.17>（tag `v1.1.17` → `c09ce68`）。
+发布后把两个资产从 release 页下载回来重算 SHA-256，与上表逐字节一致；GitHub 侧记录的
+`digest` 也是 `sha256:9c223357…` / `sha256:dd506aa4…`。说明「上传的不是本地文件」这类
+事故被排除在发布环节之外。
+
 ## 未发版 · 2026-11-14（第十轮）外部真值采集质量自证
 
 「采集数据的准确性」此前只在 Android 采集脚本那条线上做过（`premise` / `valid` /
