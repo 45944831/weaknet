@@ -88,6 +88,15 @@ rec("延迟夹到 10000", p.get("latency_up_ms") == 10000 and p.get("latency_dow
 rec("loss 夹到 100", p.get("loss_pct") == 100, "loss=%s" % p.get("loss_pct"))
 rec("jitter 夹到 5000", p.get("jitter_ms") == 5000, "jit=%s" % p.get("jitter_ms"))
 
+print("== E2b 整数型超 int 上限（v1.1.19 回归） ==", flush=True)
+# 旧实现用 optInt：2147483648 截成负数后被判为非法，回落 0 → 静默不限速，仍回 ok:true。
+# Windows 同一请求会夹到 1000000，采集脚本按 10 Gbps 下发时两端样本前提完全不同。
+for v in (2147483648, 3000000000, 10000000000, 1e18):
+    p = set_profile({"name": "超int", "down_kbps": v})
+    rec("down_kbps=%s 夹到 1000000" % v, p.get("down_kbps") == 1000000,
+        "down=%s" % p.get("down_kbps"))
+
+
 print("== E3 非数字 / 类型错应被忽略而不是崩 ==", flush=True)
 call("/api/profile", {"name": "脏数据", "down_kbps": "abc",
                       "latency_up_ms": None, "loss_pct": [1, 2]})
@@ -112,15 +121,38 @@ rec("未知路径 → 404", st == 404, "status=%s" % st)
 st, _ = call("/api/status", method="DELETE")
 rec("不支持的方法不 5xx", st < 500, "status=%s" % st)
 
-print("== E6 全 0 profile 等价直连 ==", flush=True)
-set_profile({"name": "全0"})
+print("== E6 全 0 profile 与开关复位 ==", flush=True)
+# 两端语义（WeakNet.resolveEnable / CtrlServer /api/profile）：
+#   ① 应用「不含任何限制」的参数时，若限速开着，开关必须立刻复位为关 ——
+#      否则 limit_on=true 会对应「零整形」，采集侧会把直连样本当成弱网样本；
+#   ② 关→开 的复原取 lastProfile，所以「全 0 + 有历史」会被上一次生效过的场景复原，
+#      这是为避免 4000 → 关 → 再开 变 0 而**有意**付出的代价（见 WeakNet.java setProfile 注释）。
+# 旧用例只断言 ①，却把 ② 当成回归，必然误报；这里分开验。
+def limit_on():
+    st, raw = call("/api/run")
+    try:
+        return json.loads(raw).get("limit_on")
+    except Exception:
+        return None
+
+
+call("/api/profile", {"name": "有参数", "down_kbps": 4000})
 call("/api/run", {"enable": True})
+rec("有参数时开启生效", limit_on() is True, "limit_on=%s down=%s"
+    % (limit_on(), prof().get("down_kbps")))
+call("/api/profile", {"name": "全0", "down_kbps": 0, "up_kbps": 0,
+                      "latency_up_ms": 0, "latency_down_ms": 0,
+                      "jitter_ms": 0, "loss_pct": 0})
 p = prof()
-rec("全 0 参数开启限速后仍保持全 0",
+rec("全 0 应用后开关复位为关", limit_on() is False, "limit_on=%s" % limit_on())
+rec("全 0 应用后参数全 0",
     all(p.get(k) == 0 for k in ("down_kbps", "up_kbps", "latency_up_ms",
                                 "latency_down_ms", "jitter_ms", "loss_pct")),
-    "down=%s lat=%s loss=%s（回归：曾被 lastProfile 覆盖成上一次的场景）"
+    "down=%s lat=%s loss=%s"
     % (p.get("down_kbps"), p.get("latency_down_ms"), p.get("loss_pct")))
+call("/api/run", {"enable": True})
+rec("再开启按设计回落最近一次生效参数", prof().get("down_kbps") == 4000,
+    "down=%s（期望 4000，不是更早的 1000000）" % prof().get("down_kbps"))
 call("/api/run", {"enable": False})
 
 print("== E7 非法 preset / 缺 key ==", flush=True)

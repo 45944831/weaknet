@@ -216,15 +216,20 @@ def stats(values):
     * `mad` 中位绝对偏差：对离群点稳健，小样本比 stdev 更可信
     * `iqr` p75 − p25：四分位距，同样抗离群
     * `p95_is_extreme` n < 20 时为 True（此时 p95 就是 max，不是分位估计）
+    * `sem` 均值的标准误 = stdev / √n
+    * `ci95_low` / `ci95_high` **均值的 95% 置信区间**（小样本用 t 分布临界值，
+      df≤30 查表、更大用 1.96）。注意这是**均值**的区间，不是中位数的；
+      偏态分布下中位数可能落在区间外，报告里必须写清是哪一个。
 
-    `n < 2` 时离散度字段一律 None，**不写 0**——0 会被读成「完全稳定」，
+    `n < 2` 时离散度与区间字段一律 None，**不写 0**——0 会被读成「完全稳定」，
     而单样本恰恰是「完全不知道」。
     """
     xs = [v for v in values if v is not None]
     if not xs:
         return {"n": 0, "median": None, "p95": None, "min": None, "max": None,
                 "stdev": None, "cv_pct": None, "mad": None, "iqr": None,
-                "p95_is_extreme": None}
+                "p95_is_extreme": None, "sem": None,
+                "ci95_low": None, "ci95_high": None}
     s = sorted(xs)
     n = len(s)
     med = s[n // 2] if n % 2 else (s[n // 2 - 1] + s[n // 2]) / 2.0
@@ -239,9 +244,32 @@ def stats(values):
         out["mad"] = _median([abs(x - med) for x in s])
         q1, q3 = percentile(s, 0.25), percentile(s, 0.75)
         out["iqr"] = (q3 - q1) if (q1 is not None and q3 is not None) else None
+        # 不确定度：没有区间时，「中位 7946」会被当成一个精确值引用。
+        # 小样本（回归门禁 n=7）必须用 t 而不是 1.96，否则区间偏窄、假精确。
+        out["sem"] = out["stdev"] / (n ** 0.5)
+        half = _t95(n) * out["sem"]
+        out["ci95_low"] = mean - half
+        out["ci95_high"] = mean + half
     else:
-        out.update({"stdev": None, "cv_pct": None, "mad": None, "iqr": None})
+        out.update({"stdev": None, "cv_pct": None, "mad": None, "iqr": None,
+                    "sem": None, "ci95_low": None, "ci95_high": None})
     return out
+
+
+# 双侧 95% t 临界值（df=1..30）。n=7 的回归门禁落在 df=6→2.447，
+# 用 1.96 会把区间压窄约 20%，正好是「看起来更稳」的假象。
+_T95 = {
+    1: 12.706, 2: 4.303, 3: 3.182, 4: 2.776, 5: 2.571, 6: 2.447,
+    7: 2.365, 8: 2.306, 9: 2.262, 10: 2.228, 11: 2.201, 12: 2.179,
+    13: 2.160, 14: 2.145, 15: 2.131, 16: 2.120, 17: 2.110, 18: 2.101,
+    19: 2.093, 20: 2.086, 21: 2.080, 22: 2.074, 23: 2.069, 24: 2.064,
+    25: 2.060, 26: 2.056, 27: 2.052, 28: 2.048, 29: 2.045, 30: 2.042,
+}
+
+
+def _t95(n):
+    """样本量 n 对应的双侧 95% t 临界值；df>30 用正态近似 1.96。"""
+    return _T95.get(max(1, int(n) - 1), 1.96)
 
 
 def _median(xs):

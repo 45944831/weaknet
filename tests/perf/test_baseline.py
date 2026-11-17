@@ -33,6 +33,30 @@ def test_stats_empty_is_none_not_zero():
     st = B.stats([])
     assert st["n"] == 0
     assert st["median"] is None and st["p95"] is None
+    assert st["ci95_low"] is None and st["ci95_high"] is None
+
+
+def test_stats_ci95_uses_t_for_small_samples():
+    """n=5 必须用 t(0.975,4)=2.776，不能拿 1.96 冒充——后者会把区间压窄 29%。
+
+    区间是**均值**的，不是中位数的：这条测试同时锁住「别把两个口径混用」。
+    """
+    xs = [10, 12, 14, 16, 18]
+    st = B.stats(xs)
+    assert st["n"] == 5
+    assert st["sem"] is not None and st["sem"] > 0
+    half = 2.776 * st["sem"]
+    assert abs(st["ci95_low"] - (14 - half)) < 1e-9
+    assert abs(st["ci95_high"] - (14 + half)) < 1e-9
+    assert st["ci95_low"] < st["median"] < st["ci95_high"]
+
+
+def test_stats_ci95_single_sample_is_none():
+    """单样本不能自证稳定：区间字段必须是 None，不是 0 宽度的假区间。"""
+    st = B.stats([5])
+    assert st["n"] == 1
+    assert st["sem"] is None
+    assert st["ci95_low"] is None and st["ci95_high"] is None
 
 
 def test_compare_without_baseline_does_not_judge():

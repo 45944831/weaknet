@@ -17,8 +17,10 @@
     因此吞吐容差放宽到 0.55~1.35x，完整性/延迟注入/拒连/黑洞仍按严格口径判定。
   * 镜像对 UA 有 ACL，必须带 User-Agent；用 Range 精确锁定 N 字节，
     正文长度 = Content-Length，与直连结果逐字节比对。
-  * 选 37MB 的 ls-lR.gz 而不是 Release（后者只有 269KB，Range 超过文件大小时
-    服务端回 200 整个文件，1MB 限速样本会被"提前收满"误判成限速不足）。
+  * 选版本号固定的发行版 ISO（22.04.5，4.7 GB，Accept-Ranges: bytes），
+    而不是 ls-lR.gz：后者是**实时目录清单**，每次生成内容都会变。实测同一 URL
+    相隔 40 s 取到的 256 KB 长度相同、sha 不同，导致「撤销弱网后与基线逐字节一致」
+    这条用例偶发假红——问题在目标文件会变，不在数据面。
 """
 import hashlib
 import json
@@ -33,7 +35,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ADB = os.environ.get("WEAKNET_ADB") or r"C:/Program Files (x86)/Android/android-sdk/platform-tools/adb.exe"
 CTRL = "http://127.0.0.1:18899"
 PHONE_SH = "/data/local/tmp/wn_real.sh"
-URL_PATH = "/ubuntu/ls-lR.gz"
+URL_PATH = "/ubuntu-releases/22.04/ubuntu-22.04.5-desktop-amd64.iso"
 HOST = "mirrors.tuna.tsinghua.edu.cn"
 PORT = 80
 R = []
@@ -169,6 +171,19 @@ def main():
     vpn(True)
     st = api("/api/status")
     rec("VPN 已建立", st.get("vpn_active") is True, "vpn_active=%s" % st.get("vpn_active"))
+
+    # 采集口径前提：TUN 只接管 IPv4，IPv6/DoT 可能绕过（见 docs/precision.md §1.1）。
+    # 这里只观测、不改路由——直接加 ::/0 会让 v6 包进 tun 后被解析器丢弃。
+    try:
+        os.environ.setdefault("WEAKNET_ADB", ADB)
+        import device_premise as _dp
+        _snap = _dp.snapshot()
+        rec("采集口径快照可读", _snap.get("scope") != "no-tun",
+            "scope=%s ipv6_bypass=%s dns=%s mtu=%s"
+            % (_snap.get("scope"), _snap.get("ipv6_bypass"),
+               _snap.get("private_dns_mode"), _snap.get("tun_mtu")))
+    except Exception as e:                       # 前提观测失败不该中断数据面测试
+        rec("采集口径快照可读", False, "前提快照失败：%r" % (e,))
     scene("direct")
     s1 = (api("/api/status").get("stats") or {})
     b1, t1, f1, w1 = probe(262144, tag=2)

@@ -53,6 +53,45 @@ v1.1.16 遗留的两端不一致：Windows 令牌桶容量是 `rate × 0.25 s`�
 `digest` 也是 `sha256:9c223357…` / `sha256:dd506aa4…`。说明「上传的不是本地文件」这类
 事故被排除在发布环节之外。
 
+## 未发版 · 2026-11-16 采集口径与测量不确定度补齐
+
+全网检索（2025–2026）后确认 6 个旧方案零覆盖的方向，本轮把其中 5 个可落地的
+全部落地；第 6 个（状态丢包）属产品语义变更，只补文档边界，不改代码。
+
+### 改动
+
+| 方向 | 落点 | 内容 |
+|---|---|---|
+| **IPv6 / DNS 接管边界** | `docs/precision.md` §1.1、`tests/device_premise.py`、`_t_apk_tun_real.py` | 明确 TUN 仅 IPv4；新增设备前提快照（`scope / ipv6_bypass / private_dns_mode / tun_mtu`），TUN 数据面测试自动记录 |
+| **iperf3 已知偏差** | `tools/perf_iperf.py` | 新增 `--block-kb` / `--affinity`；丢包曲线默认 `-l 4K`（官方 Known Issue #125）；归档与每条结果记录实际生效参数 |
+| **测量不确定度** | `tests/perf/baseline.py`、`test_baseline.py` | `stats()` 增 `sem` / `ci95_low` / `ci95_high`，小样本用 t 分布（n=7 → 2.447，不是 1.96） |
+| **RFC 6349 前提** | `tests/_report_20261028_weak.py` | `premise()` 增 `baseline_rtt_ms` / `bdp_bytes` / `pmtu`（Windows 无 TUN，pmtu 明确 null） |
+| **采集质量汇总** | `_check_collect_data.py` | 新增 `check_data_quality()`：有效样本、premise 覆盖率、steady_points<10、RFC6349 前提覆盖 |
+| **状态丢包 / 工具边界** | `docs/precision.md` §5 | 声明不与 netem `loss state` 等价；Toxiproxy/Pumba 只能交叉证伪，不能当真值 |
+
+### 实测（2026-11-16）
+
+| 项 | 结果 |
+|---|---|
+| pytest | **239 passed**（新增 11 项：设备前提 6 + 置信区间 2 + iperf 参数 3） |
+| 版本一致性 | **16/16**（C5/C6 仍通过：产品源码未改，产物仍比产品源码新） |
+| Java 纯 JDK | **19 套件全过** |
+| 数据复检 | **0 错误 / 0 遗漏 / 0 重复 / 24 提示**，exit 0 |
+| 采集质量摘要 | 有效样本 **11/12**；premise 完整 11；steady_points<10 **4 条**；RFC6349 前提 **0 条**（旧数据集诚实标注） |
+| 影子实证 | 注入 `valid=false, steady=32000`（设定 20000）后偏差仍 **−1.7%**，脏样本未进中位 → 上轮 P0 确认已堵死 |
+| 全量编译 | **139 个 py** 全通过 |
+
+### 边界
+
+- **未重采数据集**：`_弱网测试数据_2026-11-14.json` 仍是旧 schema（无 RFC6349 前提），
+  复检器已如实标注「0 条」，不冒充已覆盖。
+- **未做真机数据面实测**：19:27 接回一台新设备 `70e07492`（alioth / SDK 33），
+  但未安装 WeakNet，故只验证了前提快照本身：`scope=no-tun`、无全局 IPv6、
+  `private_dns_mode=null`（已按 null 归一化），退出码 0；`device_premise` 的
+  6 项纯函数单测通过，真机 `ip` 输出兼容性已在本机确认。
+- **未改转发语义**：IPv6 仍未接管（这是刻意选择，加 `::/0` 会断网）。
+- 未打包、未发布、未 commit/push。
+
 ## 未发版 · 2026-11-14（第十轮）外部真值采集质量自证
 
 「采集数据的准确性」此前只在 Android 采集脚本那条线上做过（`premise` / `valid` /

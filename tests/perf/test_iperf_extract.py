@@ -82,3 +82,28 @@ def test_stream_details_retained():
     assert v["streams"] == 8
     assert len(v["stream_bps"]) == 8
     assert len(v["stream_recv_bps"]) == 8
+
+
+# ---------------------------------------------------------------- 参数拼装
+
+def test_cmd_default_does_not_change_legacy_flags():
+    """默认路径必须与历史口径一致：不传 -l / -A。"""
+    from perf_iperf import _iperf_cmd
+    a = _iperf_cmd(5201, 1, 20, 3)
+    assert "-l" not in a and "-A" not in a
+    assert a[:2] == ["-c", "127.0.0.1"]
+
+
+def test_cmd_loss_block_is_bytes_and_affinity_is_core():
+    """-l 的单位是字节（CLI 用 KB 输入）；-A 只在显式 >=0 时出现。"""
+    from perf_iperf import _iperf_cmd
+    a = _iperf_cmd(5201, 1, 20, 3, block_kb=4, affinity=2)
+    assert a[a.index("-l") + 1] == str(4 * 1024)
+    assert a[a.index("-A") + 1] == "2"
+
+
+def test_cmd_udp_and_reverse_compose():
+    from perf_iperf import _iperf_cmd
+    a = _iperf_cmd(5201, 4, 10, 2, reverse=True, udp=True, kbps=8000)
+    assert "-R" in a and "-u" in a
+    assert a[a.index("-b") + 1] == "8000K"

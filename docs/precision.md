@@ -15,6 +15,42 @@
 **直接后果**：WeakNet 看到的「包」是它自己转发时的一次读写块（Windows 侧 64KB、Android 侧按 MSS），
 不是 TCP 段，更不是 IP 包。因此所有参数的**粒度**都受这一层限制，不能与 netem 直接等价。
 
+### 1.1 接管范围：Android 侧只有 IPv4（2026-11-16）
+
+Android 的 TUN 由 `VpnNetService` 的 Builder 创建，当前只声明 IPv4：
+
+```java
+.addAddress("10.8.0.2", 24)
+.addRoute("0.0.0.0", 0)
+```
+
+转发解析器也会把非 IPv4 包直接丢掉：
+
+```java
+if ((pkt[0] >> 4) != 4) { dlog("hp: not ipv4"); return; }
+```
+
+因此采集口径必须按下面这张表理解：
+
+| 流量类型 | 是否受弱网控制 | 采集后果 |
+|---|---|---|
+| IPv4（TCP/UDP，含经 tun 的 DNS） | 是 | 正常 |
+| IPv6（双栈 App 的 AAAA 路径） | **否**，走物理网 | 测出来是真实网速，看起来「弱网没生效」 |
+| DoH / DoT（Private DNS） | **可能否**（netd 按 Network Score 选出口） | DNS 阶段不吃延迟/丢包，首字节偏小 |
+
+**不要直接加 `addRoute("::/0", 0)`**：解析器只支持 IPv4，加了会让 IPv6 包进 tun 后被
+`not ipv4` 分支丢弃，双栈 App 反而断网。真支持 IPv6 需要 v6 头解析、ICMPv6/NDP、NAT64，
+是独立工程，不在「本地调试工具」的范围内。
+
+**采集约定**（2026-11-16 起）：
+
+- 每个真机样本前跑 `tests/device_premise.py`（`_t_apk_tun_real.py` 已自动记录），
+  把 `scope / ipv6_bypass / private_dns_mode / tun_mtu` 落进前提快照；
+- `ipv6_bypass=true` 时，结论只能表述为「IPv4 子集」，**不能表述为「整机流量」**；
+- 设备本身没有 IPv6 出口（`ipv6_default_route=false`）时 `ipv6_bypass=false`，
+  不构成缺陷，但要在报告里注明「本机未验证 IPv6 路径」；
+- 被测 App 若启用 DoH/DoT，DNS 解析阶段不受控，**不得用它来评价 DNS 弱网能力**。
+
 ## 2. 每个参数的真实语义
 
 | 参数 | 实现 | 语义与偏差 |
@@ -442,4 +478,12 @@ Android `Pipe.Bucket` 原容量是 `rate`（1.0 s），2026-11-14 已对齐为
 - 不模拟链路层的 MTU 分片、PMTUD 失败、ECN、AQM（`tail-drop`/`RED`）行为。
 - 不模拟中间设备（NAT 超时、代理劫持、运营商 QoS）。
 - 不模拟真实丢包引发的拥塞控制差异（CUBIC/BBR 的反应曲线）。
-- 不保证与 `tc netem` 在数值上等价，只保证**同一份配置在两端（Windows/Android）行为一致**。
+- **不接管 IPv6、DoH、DoT**（见 §1.1）；相关结论只能限定在 IPv4 子集。
+- **不模拟 netem 的 `loss state`（Gilbert-Elliot 两状态丢包）**：本项目「丢包」是
+  `stall_ms` 停顿语义，与 netem 的随机/状态丢包都不等价。要做状态丢包对照，
+  只能在 Linux 侧用 `tc netem loss state` 做外部参照，不能声称两端等价。
+- 不声称单向时延。iperf3 的 UDP jitter 是 RFC 3550 相邻到达时间差，
+  不需要同步时钟；真要测单向时延需要 PTP/TWAMP 四时间戳，本项目未实现。
+- **不保证与 `tc netem` 在数值上等价**，只保证同一份配置在两端（Windows/Android）行为一致。
+  Toxiproxy / Pumba 等应用层代理只能做**交叉证伪**（发现不一致），不能当作真值——
+  它们和 WeakNet 处在同一抽象层。

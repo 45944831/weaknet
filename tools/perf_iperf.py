@@ -490,6 +490,27 @@ def _quality(st, rounds, via, cv_limit=5.0, bias_pct=2.0):
     return q
 
 
+def _iperf_cmd(port, par, time_s, omit, reverse=False, udp=False, kbps=0,
+               block_kb=None, affinity=None):
+    """拼 iperf3 命令行（纯函数，便于单测）。
+
+    `-l` 与 `-A` 是官方 Known Issue 的规避参数（#125 高丢包区间失真、
+    #55 高 UDP 假丢包）。默认不传，只有调用方明确要求时才出现——
+    不能让「默认值」悄悄改变历史口径。
+    """
+    a = ["-c", "127.0.0.1", "-p", str(port), "-J",
+         "-t", str(time_s), "-O", str(omit), "-P", str(par)]
+    if block_kb:
+        a += ["-l", str(int(block_kb) * 1024)]
+    if affinity is not None and affinity >= 0:
+        a += ["-A", str(affinity)]
+    if reverse:
+        a += ["-R"]
+    if udp:
+        a += ["-u", "-b", "%dK" % kbps]
+    return a
+
+
 def _run_iperf(exe, args, timeout):
     """返回解析后的 JSON；失败返回 {"error": ...}，不让单轮噪声中断整批。"""
     cmd = [exe] + args
@@ -646,6 +667,14 @@ def main():
                     help="丢包（停顿）组合偏差曲线（P2-1）")
     ap.add_argument("--scenarios", default="", help="逗号分隔，覆盖默认档位")
     ap.add_argument("--json", default="", help="结果归档路径")
+    ap.add_argument("--block-kb", type=int, default=0,
+                    help="iperf3 -l 的块大小（KB，0=不指定）。高丢包档官方建议 4："
+                         "Known Issue #125 下 sender write 会阻塞到整块发完，"
+                         "区间报告时长会剧烈波动（iperf.fr/issues）")
+    ap.add_argument("--affinity", type=int, default=-1,
+                    help="iperf3 -A 绑定的 CPU 核号（-1=不指定）。高 UDP 速率下"
+                         "接收端可能恒定报 ~20%% 假丢包（Known Issue #55），"
+                         "绑核可缓解；绑定后归档里会记下来供横向比较")
     args = ap.parse_args()
 
     if args.quick:
@@ -675,6 +704,12 @@ def main():
         "tool": _iperf_version(exe),
         "date": time.strftime("%Y-%m-%d %H:%M:%S"),
         "context": B.context(),
+        # 测量参数必须随归档走：-l / -A 会改变读数，换参数后的批次不能与
+        # 历史默认参数批次直接横比（iperf 官方 Known Issue #125/#55）
+        "iperf_args": {"block_kb": args.block_kb or None,
+                       "cpu_affinity": args.affinity if args.affinity >= 0 else None,
+                       "time": args.time, "omit": args.omit,
+                       "repeats": args.repeats, "gap": args.gap},
         # 采集开始时的机器状态：数字要能和"当时机器什么样"一起解释
         "env": {"cpu_count": os.cpu_count(),
                 "mem_avail_mb": _SysLoad.mem_avail_mb(),
@@ -699,7 +734,7 @@ def main():
     }
 
     def one(name, via, par, udp, kbps, reverse=False, budget_kbps=None,
-            profile_extra=None):
+            profile_extra=None, block_kb=None):
         if via and udp:
             print("  [%s] 跳过：%s" % (name, UDP_VIA_PROXY))
             return {"skipped": UDP_VIA_PROXY, "n": 0, "errors": []}
@@ -711,10 +746,12 @@ def main():
             port = srv_port
         a = ["-c", "127.0.0.1", "-p", str(port), "-J",
              "-t", str(args.time), "-O", str(args.omit), "-P", str(par)]
-        if reverse:
-            a += ["-R"]
-        if udp:
-            a += ["-u", "-b", "%dK" % kbps]
+        # 生效块大小：显式 --block-kb 优先，其次调用方按场景传入。
+        # 不指定时保持 iperf3 默认，归档里记 null（而不是假装用了 4K）。
+        eff_block = block_kb if block_kb else (args.block_kb or None)
+        a = _iperf_cmd(port, par, args.time, args.omit, reverse=reverse,
+                       udp=udp, kbps=kbps, block_kb=eff_block,
+                       affinity=args.affinity)
         samples, errors, rounds = [], [], []
         for i in range(args.repeats):
             if i and args.gap > 0:
@@ -782,6 +819,10 @@ def main():
                        if x.get("sender_receiver_gap_pct") is not None])
         res = {"via_weaknet": via, "parallel": par, "udp": udp, "reverse": reverse,
                "set_kbps": kbps, "profile_extra": profile_extra or {},
+               # 测量参数自证：换了 -l / -A 的批次不能和历史默认参数批次直接横比，
+               # 所以把「实际生效值」写进每条结果，而不是只写在命令行里
+               "iperf_args": {"block_bytes": (int(eff_block) * 1024) if eff_block else None,
+                              "cpu_affinity": args.affinity if args.affinity >= 0 else None},
                # 主口径 = 接收端（真正抵达链路终点的字节）
                "median_kbps_1024": st["median"],
                "p95_kbps_1024": st["p95"], "min_kbps_1024": st["min"],
@@ -826,8 +867,12 @@ def main():
                 print("\n== 丢包（停顿）组合曲线（每档 %d 次 × %ds）=="
                       % (args.repeats, args.time))
                 for label, extra, k in CURVE_LOSS:
+                    # 丢包档按 iperf 官方 Known Issue #125 用 4KB 块：默认块大小下
+                    # sender 会阻塞到整块发完，区间报告时长被拉长，读数是「发送受阻」
+                    # 而不是链路能力。显式 --block-kb 可覆盖。
                     r = one("curve_%s" % label, True, 1, False, k,
-                            budget_kbps=k, profile_extra=extra)
+                            budget_kbps=k, profile_extra=extra,
+                            block_kb=(args.block_kb or 4))
                     out["curve_loss"][label] = r
                     print("  %-26s 设定 %6d → 实测 %.0f kbps（偏差 %+.1f%%）" %
                           (label, k, r["median_kbps_1024"] or -1,

@@ -490,6 +490,21 @@ def premise(expect_down=None):
     prem = {"limit_on": st.get("limit_on"),
             "down_kbps": prof.get("down_kbps"),
             "preset_key": st.get("preset_key")}
+    # RFC 6349 的三个前提：基线 RTT、PMTU、BDP。不是「多记几个字段」，
+    # 而是让「这批数据在什么路径条件下测得」可事后复核：
+    #   * baseline_rtt_ms = 上行单程 + 下行单程（空闲态设定值，不是实测）
+    #   * bdp_bytes = 带宽 × RTT，决定窗口/缓冲够不够跑满
+    #   * pmtu：Windows 侧是应用层代理，没有 TUN，**明确记 None**，
+    #     不用 MTU 1500 冒充路径 MTU（那会把「不知道」写成「已知」）
+    rtt_up = prof.get("latency_up_ms") or 0
+    rtt_down = prof.get("latency_down_ms") or 0
+    rtt_ms = float(rtt_up) + float(rtt_down)
+    down = prof.get("down_kbps") or 0
+    prem["baseline_rtt_ms"] = rtt_ms
+    prem["bdp_bytes"] = (round(down * 1024.0 / 8.0 * rtt_ms / 1000.0)
+                         if (down and rtt_ms) else None)
+    prem["pmtu"] = None
+    prem["pmtu_note"] = "Windows 应用层代理无 TUN/PMTU 概念；Android 侧见 device_premise"
     if expect_down is not None and prem["down_kbps"] != expect_down:
         prem["premise_ok"] = False
         prem["reason"] = "down_kbps=%r != 预期 %r" % (prem["down_kbps"], expect_down)

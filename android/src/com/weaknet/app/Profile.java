@@ -555,14 +555,14 @@ public class Profile {
     /** 只覆盖 JSON 里出现的字段；夹取上限来自 spec，避免两端各写一套 */
     private void apply(JSONObject o) {
         if (o == null) return;
-        latencyUpMs = num(o.optInt("latency_up_ms", latencyUpMs), SpecGen.paramMax("latency_up_ms"));
-        latencyDownMs = num(o.optInt("latency_down_ms", latencyDownMs), SpecGen.paramMax("latency_down_ms"));
-        jitterMs = num(o.optInt("jitter_ms", jitterMs), SpecGen.paramMax("jitter_ms"));
-        downKbps = num(o.optInt("down_kbps", downKbps), SpecGen.paramMax("down_kbps"));
-        upKbps = num(o.optInt("up_kbps", upKbps), SpecGen.paramMax("up_kbps"));
-        stallMs = num(o.optInt("stall_ms", stallMs), SpecGen.paramMax("stall_ms"));
-        flapSec = num(o.optInt("flap_sec", flapSec), SpecGen.paramMax("flap_sec"));
-        flapBlackoutSec = num(o.optInt("flap_blackout_sec", flapBlackoutSec),
+        latencyUpMs = clampNum(o.opt("latency_up_ms"), latencyUpMs, SpecGen.paramMax("latency_up_ms"));
+        latencyDownMs = clampNum(o.opt("latency_down_ms"), latencyDownMs, SpecGen.paramMax("latency_down_ms"));
+        jitterMs = clampNum(o.opt("jitter_ms"), jitterMs, SpecGen.paramMax("jitter_ms"));
+        downKbps = clampNum(o.opt("down_kbps"), downKbps, SpecGen.paramMax("down_kbps"));
+        upKbps = clampNum(o.opt("up_kbps"), upKbps, SpecGen.paramMax("up_kbps"));
+        stallMs = clampNum(o.opt("stall_ms"), stallMs, SpecGen.paramMax("stall_ms"));
+        flapSec = clampNum(o.opt("flap_sec"), flapSec, SpecGen.paramMax("flap_sec"));
+        flapBlackoutSec = clampNum(o.opt("flap_blackout_sec"), flapBlackoutSec,
                 SpecGen.paramMax("flap_blackout_sec"));
         lossPct = pct(o.optDouble("loss_pct", lossPct));
         disconnectPct = pct(o.optDouble("disconnect_pct", disconnectPct));
@@ -580,8 +580,34 @@ public class Profile {
         return v < 0 ? 0 : (v > 100 ? 100 : v);
     }
 
-    private static int num(int v, int max) {
-        return v < 0 ? 0 : (v > max ? max : v);
+    /**
+     * 数值字段解析：先按 Number/String 取 double，再夹到 [0, max]。
+     *
+     * 为什么不用 {@code JSONObject.optInt}：它内部会把 Number 转成 int 再和原值比，
+     * 2147483648 这类「整数型但超 int 上限」的值会截成负数，比较失败后回落到默认值 0，
+     * 于是「设 10 Gbps」被静默解释成「不限速」，接口还返回 ok:true —— 采集侧会拿到
+     * 一批前提错误的样本。Windows 的 _norm_user_profile 是 min(max(0,v), 上限)，
+     * 这里按同一语义处理；超上限直接夹到 spec 的 max，不经过 int 饱和。
+     *
+     * 字符串数字仍接受（org.json 原本会解析 "5000"），非数值/布尔返回默认值。
+     */
+    static int clampNum(Object raw, int def, int max) {
+        double d;
+        if (raw instanceof Number) {
+            d = ((Number) raw).doubleValue();
+        } else if (raw instanceof String) {
+            try {
+                d = Double.parseDouble(((String) raw).trim());
+            } catch (Exception e) {
+                return def;
+            }
+        } else {
+            return def;
+        }
+        if (Double.isNaN(d)) return def;
+        if (d <= 0) return 0;
+        if (d >= max) return max;
+        return (int) d;
     }
 
     /**
