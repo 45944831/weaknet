@@ -67,6 +67,12 @@ LEVELS = ("ok", "warn", "fail", "no-baseline", "different-machine")
 # 10%，fail 仍守 15%：正常波动只提示，真正的退化仍然红。
 CI_WARN_FLOOR = 0.10
 
+# 阈值比较的浮点容差。8192 * 0.9 = 7372.8，但 (7372.8 - 8192) / 8192
+# 在 IEEE-754 下是 -0.09999999999999998 —— 直接 `<= -0.10` 会把「恰好 -10%」
+# 判成 ok。CI 门禁自检注入 -10% 就栽在这里（warn 被放宽到 10% 后正好压线），
+# 真实的 10% 退化也会漏报。比较时放宽一个极小量，不改动阈值本身。
+THRESHOLD_EPS = 1e-9
+
 
 # ------------------------------------------------------------------ 指纹
 
@@ -339,10 +345,10 @@ def compare(name, value, base=None):
     msg = ("%s: 当前 %.3f%s / 基线 %.3f%s（%s%.1f%%）"
            % (name, cur, spec.get("unit", ""), ref, spec.get("unit", ""),
               sign, pct))
-    if delta <= -spec["fail"]:
+    if delta <= -spec["fail"] + THRESHOLD_EPS:
         return {"level": "fail", "delta": delta,
                 "msg": msg + "，不达标：%s超过 %.0f%%" % (worse_word, spec["fail"] * 100)}
-    if delta <= -spec["warn"]:
+    if delta <= -spec["warn"] + THRESHOLD_EPS:
         return {"level": "warn", "delta": delta,
                 "msg": msg + "，注意：%s超过 %.0f%%" % (worse_word, spec["warn"] * 100)}
     return {"level": "ok", "delta": delta, "msg": msg}

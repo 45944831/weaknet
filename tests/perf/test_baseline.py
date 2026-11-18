@@ -89,6 +89,18 @@ def test_compare_lower_better_levels():
     assert B.compare("rtt_400ms_s", 0.60, base)["level"] == "fail"     # +50%
 
 
+def test_compare_exact_threshold_survives_float_error():
+    """CI 把 bw 的 warn 放宽到 10%，注入 -10% 必须判 warn 而非 ok。
+
+    8192 * 0.9 算出的 delta 是 -0.09999999999999998，直接和 -0.10 比较会漏判。
+    这条用例锁住阈值边界的浮点容差，防止门禁自检再次在 CI 上误红。
+    """
+    base = _base({"bw_8000_kbps": {"median": 8192, "warn": 0.10, "fail": 0.15}})
+    v = B.compare("bw_8000_kbps", 8192 * 0.9, base)
+    assert v["level"] == "warn", v["msg"]
+    assert B.compare("bw_8000_kbps", 8192 * 0.85, base)["level"] == "fail"
+
+
 def test_compare_thresholds_from_baseline_entry():
     base = _base({"bw_8000_kbps": {"median": 8000, "warn": 0.20, "fail": 0.40}})
     assert B.compare("bw_8000_kbps", 7000, base)["level"] == "ok"      # -12.5% < 20%
