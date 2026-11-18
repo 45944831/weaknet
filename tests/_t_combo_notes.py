@@ -22,6 +22,14 @@ C  两端覆盖的语义关键词都在（防止文案被改到丢信息）
 import os
 import sys
 
+# GitHub Windows runner 的控制台是 cp1252，print 中文说明会直接 UnicodeEncodeError；
+# 本机 GBK/UTF-8 控制台不暴露这个问题，所以必须在脚本层固定编码。
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass
+
 # 仓库根：本文件在 <repo>/tests/ 下，向上两级即仓库根。
 # 用相对定位而不是写死绝对路径，换机器/换目录也能直接跑。
 HERE = os.path.dirname(os.path.abspath(__file__))

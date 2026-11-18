@@ -20,6 +20,12 @@
 #   * 基线 JSON 随 Release 归档（挂到 Release 附件 + workflow artifact）。
 name: perf
 
+# Windows runner 的 Python 默认按 cp1252 输出，pytest 里中文用例名与 golden 脚本的
+# 中文说明会 UnicodeEncodeError（本机 GBK/UTF-8 控制台不暴露）。脚本层已各自
+# reconfigure，这里再兜一层，防止新脚本漏配。
+env:
+  PYTHONIOENCODING: utf-8
+
 on:
   workflow_dispatch:
   schedule:
