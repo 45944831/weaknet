@@ -23,7 +23,7 @@ TUN_V4 = """5: tun0: <POINTOPOINT,MULTICAST,NOARP,UP,LOWER_UP> mtu 1500 qdisc fq
        valid_lft forever preferred_lft forever
 """
 
-# 真机 PEYM00 的实际形态：只有内核自动配的 link-local，没有全局地址
+# 真机 TestDevice 的实际形态：只有内核自动配的 link-local，没有全局地址
 TUN_V4_LINKLOCAL = TUN_V4 + """    inet6 fe80::9864:2349:491:5818/64 scope link stable-privacy
        valid_lft forever preferred_lft forever
 """

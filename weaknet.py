@@ -3700,6 +3700,10 @@ def status_payload():
         "version": VERSION,
         "build": BUILD,
         "profile": G.profile,
+        # 最后一次真正生效过的弱网场景（停止限速后 G.profile 会回到直连，
+        # 但 last_profile 保留着测过的内容）——报告据此还原「测了什么」，
+        # 否则测完点导出只会看到直连，把真实测过的场景丢掉。
+        "last_profile": dict(G.last_profile) if G.last_profile else None,
         "preset_key": G.preset_key,
         "limit_on": G.limit_on,
         "gate_open": G.gate_open,

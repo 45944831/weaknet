@@ -17,11 +17,16 @@ import android.view.ViewGroup;
 import android.view.Window;
 import android.view.WindowManager;
 import android.widget.Button;
+import android.widget.CheckBox;
+import android.widget.CompoundButton;
 import android.widget.FrameLayout;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.Toast;
+
+import java.util.ArrayList;
+import java.util.List;
 
 
 /**
@@ -44,6 +49,10 @@ public class SettingsSheet {
     private Button btnFloat;
     private Button btnPerm;
     private TextView tvPerm;
+    /** 悬浮窗显示内容多选：id -> 勾选框，sync 时按当前设置回填，避免界面和外部改的不同步 */
+    private final java.util.Map<String, CheckBox> floatFieldBoxes = new java.util.LinkedHashMap<String, CheckBox>();
+    /** 回填勾选框时抑制 onCheckedChanged，避免把「同步显示」误当成「用户又改了一次」 */
+    private boolean syncingFloatFields = false;
 
     // 关于 / 版本更新：只渲染「启动那一次检查」的结果，这里绝不发起网络请求
     private TextView tvVer;
@@ -95,6 +104,7 @@ public class SettingsSheet {
         tvPerm.setText(granted ? "悬浮窗权限：已授予" : "悬浮窗权限：未授予（飘窗显示不出来）");
         tvPerm.setTextColor(granted ? 0xFF2E7D32 : 0xFFD93025);
         btnPerm.setVisibility(granted ? View.GONE : View.VISIBLE);
+        syncFloatFields();
         renderUpdate();
     }
 
@@ -152,6 +162,11 @@ public class SettingsSheet {
         });
         card.addView(btnFloat, full(0, 0, 0, 6));
         card.addView(hint("悬浮显示当前场景与实时速率，可拖动，点主体回到 App。"));
+
+        // ---- 悬浮窗显示内容多选：勾选决定飘窗显示哪几行 ----
+        card.addView(label("悬浮窗显示内容（勾选即生效）"));
+        buildFloatFields(card);
+        card.addView(hint("场景名固定在飘窗标题行，无需勾选。"));
 
         tvPerm = new TextView(a);
         tvPerm.setTextSize(12);
@@ -314,6 +329,65 @@ public class SettingsSheet {
             } catch (Exception e) {
                 Toast.makeText(a, "无法打开悬浮窗权限设置", Toast.LENGTH_SHORT).show();
             }
+        }
+    }
+
+    // ---------------------------------------------------------------- 悬浮窗显示内容多选
+
+    /** 遍历可选字段渲染勾选框；勾选变化立即保存并让飘窗重建（不用收起再显示）。 */
+    private void buildFloatFields(LinearLayout host) {
+        floatFieldBoxes.clear();
+        final List<String> picked = new ArrayList<String>(FloatSettings.get().lines);
+        for (final String[] f : FloatSettings.FIELDS) {
+            final String id = f[0];
+            if (!FloatSettings.selectable(id)) continue;      // scene 固定在标题行
+            // 自定义文本不在设置界面露出：它没有输入入口，勾了也显示空行，徒增困惑。
+            // 底层 custom 字段 / /api/float 的 custom 参数 / {变量} 替换全部保留，
+            // 已有脚本照常可用；这里只是不渲染勾选框。
+            if ("custom".equals(id)) continue;
+            CheckBox cb = new CheckBox(a);
+            cb.setText(f[1] + "  ·  " + f[2]);
+            cb.setTextSize(12);
+            cb.setTextColor(0xFF3A4250);
+            cb.setChecked(picked.contains(id));
+            cb.setPadding(dp(2), dp(3), dp(2), dp(3));
+            cb.setOnCheckedChangeListener(new CompoundButton.OnCheckedChangeListener() {
+                public void onCheckedChanged(CompoundButton v, boolean checked) {
+                    if (syncingFloatFields) return;
+                    List<String> next = new ArrayList<String>(FloatSettings.get().lines);
+                    if (checked) {
+                        if (!next.contains(id)) next.add(id);
+                    } else {
+                        next.remove(id);
+                    }
+                    // orderedLines 按 FIELDS 顺序收敛，点击先后不影响飘窗行序
+                    FloatSettings.S s = FloatSettings.save(
+                            FloatSettings.orderedLines(next),
+                            FloatSettings.get().custom,
+                            FloatSettings.get().alpha,
+                            FloatSettings.get().textSp);
+                    FloatWindow.reload();                     // 正在显示就立刻按新配置重建
+                    WeakNet.I.log("config", "悬浮窗显示内容：" + (s.lines.isEmpty()
+                            ? "仅标题行" : s.lines.size() + " 行"));
+                }
+            });
+            floatFieldBoxes.put(id, cb);
+            host.addView(cb, full(dp(8), 0, dp(8), 0));
+        }
+    }
+
+    /** 外部（控制台 / 共享面板）改了悬浮窗设置时，回填勾选框，别让界面显示旧值。 */
+    private void syncFloatFields() {
+        if (floatFieldBoxes.isEmpty()) return;
+        syncingFloatFields = true;
+        try {
+            List<String> lines = FloatSettings.get().lines;
+            for (java.util.Map.Entry<String, CheckBox> e : floatFieldBoxes.entrySet()) {
+                boolean want = lines.contains(e.getKey());
+                if (e.getValue().isChecked() != want) e.getValue().setChecked(want);
+            }
+        } finally {
+            syncingFloatFields = false;
         }
     }
 

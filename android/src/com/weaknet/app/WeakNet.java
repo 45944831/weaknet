@@ -178,6 +178,12 @@ public class WeakNet {
     }
 
     public synchronized void setProfile(Profile p, String key) {
+        // 暂停的前提是「参数已撤到直连」。一旦有新参数要落地（切场景 / 选组合 /
+        // /api/profile 改参数），这个前提就破了：若还留着 paused=true，界面会继续
+        // 显示「已暂停」而流量其实已被限速 —— 状态与事实相反。这里统一结束暂停态。
+        // 注意 pause() 是先 setProfile 再置 paused=true，resume() 是先置 false 再
+        // setProfile，两条路径都不会被这行误伤。
+        if (paused) clearPauseLocked();
         profile = p;
         presetKey = key;
         gateOpen = true;
@@ -249,6 +255,17 @@ public class WeakNet {
         stopComboLocked();
         presetKey = key;
         if (p != null && p.hasLimits()) lastProfile = p.copy();
+        if (paused) {
+            // 暂停中换场景：仍保持暂停，参数不落地（暂停期间流量就该是直连），
+            // 只把「恢复时该施加哪一支」换掉。若在这里 setProfile，等于用户以为
+            // 还暂停着、流量却被悄悄限速 —— 比标签过期更糟。
+            pausedProfile = p != null ? p.copy() : new Profile();
+            pausedComboId = null;
+            pausedComboStep = -1;
+            pausedComboRemain = 0;
+            fireUiChange();
+            return;
+        }
         if (!limitOn) {
             // 没开启时参数不会落地，但「已选中哪一支」变了，飘窗标题要立刻改过来
             fireUiChange();
@@ -265,6 +282,10 @@ public class WeakNet {
      * @param restore 开启时要应用的场景（由调用方按 presetKey 解析好；为 null 则用直连）
      */
     public synchronized void setLimitOn(boolean on, Profile restore) {
+        // 总开关一动，暂停就失去意义：暂停快照必须清掉。
+        // 否则「暂停 → 停止 → 再开始」会带着 paused=true 起来，界面显示「已暂停」、
+        // 按钮显示暂停态，而实际参数已经施加、流量正在被限速 —— 状态与事实相反。
+        clearPauseLocked();
         if (on) {
             setProfile(restore != null ? restore : new Profile(), presetKey);
         } else {
@@ -273,6 +294,21 @@ public class WeakNet {
         }
         limitOn = on;      // 开关只认这里：自定义场景哪怕全零，用户点开了就算「已开启」
         fireUiChange();    // setProfile 那次 fire 时开关还是旧值，这里按最终状态再推一次
+    }
+
+    /**
+     * 清掉暂停快照。调用方须已持有本对象锁（synchronized 方法内）。
+     *
+     * 暂停快照（paused / pausedComboId / pausedComboStep / pausedComboRemain /
+     * pausedProfile）只在「暂停中」有意义；一旦总开关被显式操作，这段会话就结束了，
+     * 留着它只会让后续状态判断读到过期值。
+     */
+    private void clearPauseLocked() {
+        paused = false;
+        pausedComboId = null;
+        pausedComboStep = -1;
+        pausedComboRemain = 0;
+        pausedProfile = null;
     }
 
     /**
@@ -444,6 +480,16 @@ public class WeakNet {
         if (c == null || c.steps == null || c.steps.isEmpty()) return false;
         stopComboLocked();
         presetKey = comboKey(c.id);
+        if (paused) {
+            // 暂停中换组合：仍保持暂停，参数不落地；只记住「恢复时从第 1 段开始播」。
+            // 与 selectScene 的暂停分支同构，避免用户以为还暂停着、实际已经开始限速。
+            pausedComboId = c.id;
+            pausedComboStep = 0;
+            pausedComboRemain = 0;
+            pausedProfile = null;
+            fireUiChange();
+            return false;
+        }
         if (!limitOn) {
             fireUiChange();          // 「当前选中的是这支」要立刻反映到飘窗标题
             return false;
@@ -540,7 +586,10 @@ public class WeakNet {
                     // 这里却还按旧步骤把参数覆盖回去，用户点的那支被静默顶掉。
                     // selectScene / setLimitOn 都上这把锁，所以进来再校验一次是可靠的。
                     synchronized (this) {
-                        if (!key.equals(presetKey) || !limitOn) return;
+                        // paused 也要校验：pause() 不改 presetKey/limitOn，若组合线程
+                        // 恰好在暂停后挤进这把锁，会调 setProfile 把暂停态又清掉
+                        // （setProfile 见到 paused 就结束暂停），表现为「点了暂停又自己跑起来」。
+                        if (!key.equals(presetKey) || !limitOn || paused) return;
                         Profile p = profileOfStep(st.key);
                         if (p == null) {
                             // 这段的场景被删了（自定义场景常见）：跳过它，别把整支带崩
@@ -602,6 +651,7 @@ public class WeakNet {
         while (true) {
             if (!key.equals(presetKey)) return false;   // 用户点了别的场景
             if (!limitOn) return false;                 // 关了总开关
+            if (paused) return false;                   // 暂停：这段先按住，别继续倒计时
             long left = end - System.currentTimeMillis();
             if (left <= 0) return true;
             try {

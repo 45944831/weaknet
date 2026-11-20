@@ -2,7 +2,7 @@
 
 把设备流量接管到本地通道，按场景施加**带宽限速、延迟抖动、丢包卡顿、随机断连、黑洞超时、DNS 故障、周期断网**等网络损伤，用来验证 App 在真实弱网下的表现。
 
-**v1.1.19** · Windows（EXE） · Android 7.0+ · [下载最新版](https://github.com/45944831/weaknet/releases/latest)
+**v1.1.20** · Windows（EXE） · Android 7.0+ · [下载最新版](https://github.com/45944831/weaknet/releases/latest)
 
 ## 功能
 
@@ -23,12 +23,14 @@
 
 | 文件 | 平台 | 大小 | SHA-256（前 16 位） |
 |---|---|---|---|
-| [`WeakNet.exe`](https://github.com/45944831/weaknet/releases/latest/download/WeakNet.exe) | Windows GUI，免装 Python，无 DOS 黑框 | 10.36 MB | `8b23f552cbf8a534` |
-| [`WeakNet.apk`](https://github.com/45944831/weaknet/releases/latest/download/WeakNet.apk) | Android 7.0+ | 209 KB | `56220dca5a8531ea` |
+| [`WeakNet.exe`](https://github.com/45944831/weaknet/releases/latest/download/WeakNet.exe) | Windows GUI，免装 Python，无 DOS 黑框 | 10.37 MB | `9d80713c6761e6d4` |
+| [`WeakNet.apk`](https://github.com/45944831/weaknet/releases/latest/download/WeakNet.apk) | Android 7.0+ | 217 KB | `04e00ff5c3d4526f` |
 
 发布页：<https://github.com/45944831/weaknet/releases/latest>
 
-> **v1.1.19 重点**：参数采集修复版 —— 修掉一个会「静默关掉限速」的越界解析缺陷。Android 侧 `POST /api/profile` 对整数型超 int 上限的值（`2147483648`、`3000000000`、脚本下发的 `10^18`）用 `optInt` 解析，溢出截断后回落 0，`hasLimits()==false` 直接把限速关掉却仍返回 `ok:true`，用户以为在限速、实际是全速直连；Windows 侧同请求会夹到上限，两端语义不一致。现统一按 `Number/String` 解析并夹取到 spec 上限，新增 22 项纯 JDK 单测覆盖 `2^31` / `3e9` / `1e18` / 负值 / 字符串 / 布尔。同时把采集精度验证补成可复跑的真机七相位回归（`cfg` / `rate` / `delay` / `mtu` / `premise` / `integrity` / `resource`），并把 delay 判定从「首字节 = 2 跳往返」的错误假设改成数据驱动线性拟合——真机上新建 HTTPS 首字节实际 ≈ `3.2×(up+down)`（k=3.23、R²=0.989），旧口径会把准确注入误判成缺陷。
+> **v1.1.20 重点**：可解读报告 + 悬浮窗交互修复版。两端新增「测试报告」导出（9 段结构，含给开发的「解读总结」——有效性判定 / 测过场景 / 参数变更 / 关注点 / 下一步），场景序列识别补齐主界面「开始弱网测试」与组合播放文案，并修掉场景事件被环形缓冲挤出后误判「全程直连」的问题。Android 设置界面新增悬浮窗显示内容多选（勾选即时重建飘窗）；移除没有输入入口的「自定义文本」勾选项，底层 `/api/float` 的 custom 参数仍保留给脚本。悬浮窗暂停/切场景后主界面状态即时同步，总开关在暂停态改为橙色「⏸ 已暂停 · 点此停止」；同时修复 `paused` 标志残留（暂停→停止→再开会误报暂停）、暂停中切场景静默恢复限速、组合线程竞态清掉暂停态三个缺陷。
+>
+> 上一版 **v1.1.19 重点**：参数采集修复版 —— 修掉一个会「静默关掉限速」的越界解析缺陷。Android 侧 `POST /api/profile` 对整数型超 int 上限的值（`2147483648`、`3000000000`、脚本下发的 `10^18`）用 `optInt` 解析，溢出截断后回落 0，`hasLimits()==false` 直接把限速关掉却仍返回 `ok:true`，用户以为在限速、实际是全速直连；Windows 侧同请求会夹到上限，两端语义不一致。现统一按 `Number/String` 解析并夹取到 spec 上限，新增 22 项纯 JDK 单测覆盖 `2^31` / `3e9` / `1e18` / 负值 / 字符串 / 布尔。同时把采集精度验证补成可复跑的真机七相位回归（`cfg` / `rate` / `delay` / `mtu` / `premise` / `integrity` / `resource`），并把 delay 判定从「首字节 = 2 跳往返」的错误假设改成数据驱动线性拟合——真机上新建 HTTPS 首字节实际 ≈ `3.2×(up+down)`（k=3.23、R²=0.989），旧口径会把准确注入误判成缺陷。
 >
 > 上一版 **v1.1.17 重点**：两端限速的突发额度对齐——Android 令牌桶容量从 1.0 s 收到 0.25 s，与 Windows 同源（`Bucket.BURST_SEC`）。此前 Android 空闲攒满后能一口气放行整秒配额，1 MB 短传输实测超发 1.46×，看起来像限速失效；对齐后降到 1.01×。同时修正三处参数说明：4G/5G 的「RTT」改成按上行+下行相加的真实往返口径，`down_kbps` 的单位说明改成代码实际使用的 1024 进制。规格 hash `6a95fc73` → `9990e03d`，**限速行为与文案都变了，属产品变更**。
 >
@@ -44,8 +46,8 @@
 <summary>完整 SHA-256</summary>
 
 ```text
-8b23f552cbf8a5343cda2b638f08d3c560973c333f451e3fc4f992040eb5cc09  WeakNet.exe
-56220dca5a8531ea85ad018dd8b8928fa1c86a254f8a11db93bd4aeb24229c80  WeakNet.apk
+9d80713c6761e6d46317bd1863bb17191e254ef87d90fdcb9cc4bf550ae00d04  WeakNet.exe
+04e00ff5c3d4526fbf9ae77dcd1333e6c3bd42d2eb4dbbe89e85104b6558a08c  WeakNet.apk
 ```
 
 </details>
@@ -194,6 +196,7 @@ weaknet/
 
 ## 验证与已知限制
 
+v1.1.20 为可解读报告 + 悬浮窗交互修复版：版本一致性 **16/16**、pytest 全量通过、Java 纯 JDK **23** 套件全过；真机逐项验证三项功能（报告解读总结 / 悬浮窗多选 / 暂停态按钮同步），并修复暂停标志残留、暂停中切场景静默限速、组合线程竞态三个缺陷；产物 EXE 10,871,576 B / `9d80713c…`、APK 222,244 B / `04e00ff5…`。规格 hash 未变，仍 `9990e03d`。
 v1.1.19 为参数采集修复版：版本一致性 **16/16**、pytest **241** 通过、Java 纯 JDK **20** 套件、跨端一致性 **22/22**、数据全量复检 **0 错误 / 0 遗漏 / 0 重复**（24 条提示）；真机七相位（SM-G9730 / Android 12）**44/47 → delay 口径修正后全部通过**，限速稳态偏差 **−0.97% ~ −2.75%**（阈值 ±8%）、MTU/MSS 四档全对（1280/1500/9000/16384，MSS=MTU−40）、8 MB 定长下载直连与 4000 kbps 限速 sha 完全一致；产物 EXE 10,862,736 B / `8b23f552…`、APK 214,052 B / `56220dca…`。v1.1.17 为两端限速对齐版：版本一致性 **16/16**（新增 C5/C6 产物新鲜度检查）、pytest **228** 通过、Java 纯 JDK **19** 套件、跨端一致性 **22/22**、真机契约 **13**、TUN 数据面 **11/11**（透明转发逐字节一致、限速 4,223 kbps、800 ms RTT 首字节 2,070 ms、5% 丢包正文完整、100% 拒连 80 ms、100% 黑洞 17.8 s 挂住、撤掉后 400 ms 恢复）、真机 10 并发限速 8000 聚合 **7,995 kbps**（一份全局桶）、1–10 Mbps 限速精度 **±0.3%**；产物 EXE 10,862,443 B / `9c223357…`、APK 214,052 B / `dd506aa4…`。v1.1.16 为采集数据修复版（产品功能无变化）：版本一致性 14/14、pytest 138 通过、EXE 冒烟与 APK 真机版本校验通过、数据复检 0 错误；产物 EXE 10,839,282 B / `c9948caa…`、APK 205,860 B / `6c268eb8…`。v1.1.15 真机回归 **68/68**（深度 34 + 组合 11 + 默认项 12 + UI 11），EXE 冒烟 7/7，pytest 138 通过，版本一致性 14/14、规格 hash 一致。另做了关闭残留检测：Windows 正常关窗后进程 / 端口 / 系统代理全部清空，Android 强停后进程、服务与 tun 全清。v1.1.13 的 250/250 全量数据与更早版本见[验证记录](docs/verification.md)。
 
 已知限制：
@@ -210,6 +213,6 @@ v1.1.19 为参数采集修复版：版本一致性 **16/16**、pytest **241** �
 - [使用说明](docs/guide.md)：Windows / Android / USB 全功能操作、17 支场景与 13 项参数说明
 - [构建与测试](docs/build.md)：两端构建、版本号约束、pytest 回归
 - [精度声明](docs/precision.md)：模拟层次、各参数真实语义、已知偏差与校准方法
-- [验证记录](docs/verification.md)：v1.1.0 – v1.1.19 实测与已修缺陷
+- [验证记录](docs/verification.md)：v1.1.0 – v1.1.20 实测与已修缺陷
 
 问题与建议请提 [Issue](https://github.com/45944831/weaknet/issues)。

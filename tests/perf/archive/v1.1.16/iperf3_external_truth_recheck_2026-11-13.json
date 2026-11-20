@@ -10,7 +10,7 @@
    "python": "3.10.11",
    "cpu_count": 12,
    "machine": "AMD64",
-   "host": "renan"
+   "host": "local"
   },
   "version": "1.1.16",
   "build": 126,

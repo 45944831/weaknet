@@ -149,6 +149,30 @@ public class FloatSettings {
         return false;
     }
 
+    /**
+     * 该行能否作为设置界面的勾选项。
+     * scene 固定在飘窗标题行常驻（勾不勾都在），不当成可选项，免得用户勾了却
+     * 找不到那一行、以为设置没生效。
+     */
+    public static boolean selectable(String id) {
+        return known(id) && !"scene".equals(id);
+    }
+
+    /**
+     * 把用户勾选的行 id 收敛成用于保存的显示顺序：按 {@link #FIELDS} 定义顺序
+     * 排列、过滤未知/不可选项、去重。这样无论用户按什么顺序点勾选，飘窗各行
+     * 的上下顺序都稳定（跟字段清单一致），不会因点击先后而乱跳。
+     */
+    public static List<String> orderedLines(java.util.Collection<String> picked) {
+        List<String> out = new ArrayList<String>();
+        if (picked == null) return out;
+        for (String[] f : FIELDS) {
+            String id = f[0];
+            if (selectable(id) && picked.contains(id)) out.add(id);
+        }
+        return out;
+    }
+
     public static String nameOf(String id) {
         for (String[] f : FIELDS) if (f[0].equals(id)) return f[1];
         return id;

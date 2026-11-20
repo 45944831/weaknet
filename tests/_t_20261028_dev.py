@@ -455,7 +455,7 @@ def part_share_p0():
         pin = str(api("/api/share/pin").get("pin") or "")
     except Exception:
         pin = ""
-    peer = {"ip": "127.0.0.1", "share": 18890, "name": "PEYM00", "pin": pin}
+    peer = {"ip": "127.0.0.1", "share": 18890, "name": "TestDevice", "pin": pin}
 
     # 清掉 PC 侧同名测试环境
     ups = wapi("/api/upresets")

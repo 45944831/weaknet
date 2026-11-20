@@ -68,7 +68,7 @@ def parse_premise(tun_addr="", route6="", dns_mode="", sdk="", tun_name="tun0"):
     # 它**不能出网**。早期版本把 inet6 一律当成「tun 已接管 IPv6」，于是：
     #   设备有 v6 默认路由但 tun 只有 fe80 → ipv6_bypass 被误判为 False，
     #   真实存在的「v6 走物理网、绕过弱网」被掩盖成「已覆盖」。
-    # 真机 PEYM00 上正是 fe80 这一种，故按 global / link-local 分开判定。
+    # 真机 TestDevice 上正是 fe80 这一种，故按 global / link-local 分开判定。
     tun_present = bool(tun_addr.strip()) and tun_name in tun_addr
     has_v4 = bool(re.search(r"\binet\s+\d", tun_addr))
     v6_addrs = re.findall(r"\binet6\s+([0-9a-fA-F:]+)", tun_addr)

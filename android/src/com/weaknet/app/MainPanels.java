@@ -24,9 +24,14 @@ import android.widget.Toast;
 
 import org.json.JSONObject;
 
+import java.io.File;
+import java.io.FileOutputStream;
+import java.text.SimpleDateFormat;
 import java.util.ArrayList;
+import java.util.Date;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 
 /**
@@ -501,6 +506,47 @@ public class MainPanels {
         openEditor(null, p, s.length() > 0 ? s : p.name);
     }
 
+    // ---------------------------------------------------------------- 测试报告导出
+
+    /** 导出开发可读的 Markdown 报告：与桌面 GUI 的 report_gen.py 同一套结构。
+     *  写到应用专属外部目录（Android 10+ 无需存储权限），用 adb pull 即可取走。 */
+    private void exportReport() {
+        try {
+            String version = "?", buildS = "0";
+            try {
+                android.content.pm.PackageInfo pi = a.getPackageManager()
+                        .getPackageInfo(a.getPackageName(), 0);
+                version = pi.versionName;
+                buildS = String.valueOf(pi.versionCode);
+            } catch (Exception ignore) {
+            }
+            int build = 0;
+            try { build = Integer.parseInt(buildS); } catch (Exception ignore) {
+            }
+            Map<String, Object> snap = ReportGen.collect(version, build, null);
+            String md = ReportGen.build(snap);
+            String name = ReportGen.defaultFilename(
+                    new SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(new Date()));
+            File dir = new File(a.getExternalFilesDir(null), "reports");
+            if (!dir.exists() && !dir.mkdirs()) {
+                Toast.makeText(a, "无法创建报告目录", Toast.LENGTH_LONG).show();
+                return;
+            }
+            File f = new File(dir, name);
+            FileOutputStream out = new FileOutputStream(f);
+            try {
+                out.write(md.getBytes("UTF-8"));
+            } finally {
+                out.close();
+            }
+            WeakNet.I.log("export", "已导出测试报告：" + f.getAbsolutePath());
+            Toast.makeText(a, "报告已保存：\n" + f.getAbsolutePath()
+                    + "\n\n用 adb pull 取走", Toast.LENGTH_LONG).show();
+        } catch (Exception e) {
+            Toast.makeText(a, "导出报告失败：" + e, Toast.LENGTH_LONG).show();
+        }
+    }
+
     // ---------------------------------------------------------------- 事件日志
 
     private LinearLayout logCard() {
@@ -515,6 +561,19 @@ public class MainPanels {
         t.setTextColor(0xFF1F2430);
         t.setTypeface(null, Typeface.BOLD);
         head.addView(t, new LinearLayout.LayoutParams(0, dp(30), 1f));
+        // 「报告」：把当前状态快照渲染成开发可读的 Markdown，落到应用外部目录。
+        // 日志只是流水账，报告才是能直接发给开发的结论（与桌面 GUI 同一套口径）。
+        Button btnReport = new Button(a);
+        btnReport.setAllCaps(false);
+        btnReport.setTextSize(12);
+        btnReport.setText("报告");
+        btnReport.setTextColor(0xFF5A6472);
+        btnReport.setBackground(box(0xFFFFFFFF, 0xFFD7DEEA, 8));
+        btnReport.setPadding(dp(10), dp(4), dp(10), dp(4));
+        btnReport.setOnClickListener(new View.OnClickListener() {
+            public void onClick(View v) { exportReport(); }
+        });
+        head.addView(btnReport);
         Button btnClear = new Button(a);
         btnClear.setAllCaps(false);
         btnClear.setTextSize(12);

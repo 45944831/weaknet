@@ -916,6 +916,10 @@ public class CtrlServer implements Runnable {
             o.put("me", meJson());
             o.put("spec_hash", SpecGen.SPEC_HASH);
             o.put("profile", WeakNet.I.profile.toJson());
+            // 最后一次生效的弱网场景：停止限速后 profile 回直连，
+            // 报告据此还原「测过什么」（与 Windows 端 /api/status 同构）
+            o.put("last_profile", WeakNet.I.lastProfile == null ? null
+                    : WeakNet.I.lastProfile.toJson());
             o.put("preset_key", WeakNet.I.presetKey);
             o.put("limit_on", WeakNet.I.limitOn);
             o.put("gate_open", WeakNet.I.gateOpen);

@@ -9,7 +9,7 @@
   },
   "fingerprint": {
     "cpu_count": 12,
-    "host": "renan",
+    "host": "local",
     "machine": "AMD64",
     "platform": "Windows-10-10.0.26100-SP0",
     "python": "3.10.11"

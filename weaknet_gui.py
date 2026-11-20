@@ -155,6 +155,8 @@ from gui_text import (NOTE_PAD, NOTE_TEXT_W, NOTE_TIP_INDENT, NOTE_WIN_W,
 import gui_state as S
 # 刷新帧统计（P2-3）：口径与 Android FrameStats 一致，纯逻辑可单测。
 import gui_perf as P
+# 测试报告：把状态快照渲染成开发可读的 Markdown，纯逻辑可单测。
+import report_gen as R
 
 
 class App(NotesMixin, ScopeMixin, ShareMixin, UsbMixin):
@@ -1457,7 +1459,10 @@ class App(NotesMixin, ScopeMixin, ShareMixin, UsbMixin):
 
 
     def _build_log(self):
-        box = self._card(self.col_right, "事件日志", expand=True)
+        # 标题右侧挂「导出报告」：日志只是流水账，开发要的是能读的结论。
+        # 点一下把当前状态快照渲染成 Markdown 落成文件（见 export_report）。
+        box = self._card_x(self.col_right, "事件日志", expand=True,
+                           action=("导出报告", self.export_report))[0]
         wrap = tk.Frame(box, bg=CARD)
         wrap.pack(fill="both", expand=True)
         # 右栏一整列都给它，所以不写死行数，跟着窗口高度长。
@@ -1475,6 +1480,46 @@ class App(NotesMixin, ScopeMixin, ShareMixin, UsbMixin):
         sb.pack(side="right", fill="y")
         # 只读：不许编辑，但允许选中复制
         self.logbox.configure(state="disabled")
+
+    def export_report(self):
+        """把当前状态快照导出成 Markdown 报告（供开发阅读）。
+
+        取数走 W.status_payload()——与 Web 控制台 / 接口同一份口径，不另起一套。
+        帧统计是 GUI 独有的，单独从 self._frames 取；没有就写 None，不影响报告。
+        写盘失败要弹窗说清楚，不能让「点了没反应」看起来像功能不存在。
+        """
+        payload = W.status_payload()
+        frames = self._frames.snapshot() if self._frames is not None else None
+        text = R.build(payload, param_specs=W.PARAM_SPECS,
+                       param_notes=W.PARAM_NOTES, frames=frames)
+        initial = R.default_filename()
+        path = filedialog.asksaveasfilename(
+            title="导出弱网测试报告",
+            defaultextension=".md",
+            initialfile=initial,
+            filetypes=[("Markdown 报告", "*.md"), ("文本文件", "*.txt"),
+                       ("所有文件", "*.*")])
+        if not path:
+            return
+        try:
+            # newline=""：不让 Python 在 Windows 把 \n 改写成 \r\n，
+            # 报告在任意平台 diff / 归档都是同一份字节。
+            with open(path, "w", encoding="utf-8", newline="") as f:
+                f.write(text)
+        except Exception as e:
+            messagebox.showerror("导出报告", "保存失败：\n%s\n\n%r" % (path, e))
+            return
+        W.log_event("export", "已导出测试报告：" + path)
+        if messagebox.askyesno(
+                "导出报告",
+                "报告已保存：\n%s\n\n是否现在打开？" % path):
+            try:
+                if sys.platform == "win32":
+                    os.startfile(path)
+                else:
+                    webbrowser.open("file://" + path)
+            except Exception as e:
+                messagebox.showerror("导出报告", "打开失败：%r" % e)
 
     # ---------------- USB 手机弱网 ----------------
     #

@@ -56,6 +56,20 @@ public class MainActivity extends Activity {
     private ScopeSheet scope;
     private MainPanels panels;
     private final Handler handler = new Handler();
+    /**
+     * 状态卡 / 总开关跟着 WeakNet 的即时通知刷新。
+     *
+     * 悬浮窗上的 ⇄切场景、⏸暂停/恢复都不在 Activity 里，它们走
+     * WeakNet.fireUiChange() 推即时刷新。原先只有飘窗自己和 MainPanels 的
+     * 标签注册了 watcher，主界面的状态卡与「开始/停止」按钮没注册，结果
+     * 「在悬浮窗停了弱网，回到 App 状态却没变」。这里把 updateStatus 挂上去：
+     * fireUiChange 已经 post 到主线程，view 访问安全。
+     */
+    private final Runnable uiWatcher = new Runnable() {
+        public void run() {
+            updateStatus();
+        }
+    };
 
     public void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
@@ -188,6 +202,8 @@ public class MainActivity extends Activity {
         // ---- 三块内容面板：测试环境 / 我的自定义 / 事件日志 ----
         panels = new MainPanels(this);
         panels.build(content);
+        // 悬浮窗/控制台/共享面板的操作会 fireUiChange，主界面状态卡与总开关要跟着刷
+        WeakNet.I.addUiWatcher(uiWatcher);
 
         setContentView(root);
 
@@ -347,7 +363,11 @@ public class MainActivity extends Activity {
         // 未启动时 profile 还是直连（选场景不会灌进引擎），所以「已选哪一支」要按
         // presetKey 找，直接显示 p.name 会永远显示「直连（不限制）」
         String scene = sceneName();
-        if (on && lim) {
+        if (on && lim && WeakNet.I.paused) {
+            // 暂停时 limitOn 仍为真，但参数已撤到直连、连接按住不动。
+            // 不说清楚，用户从悬浮窗点暂停回来看见「进行中」会以为没生效。
+            status.setText("弱网测试已暂停 · " + scene + "\n点悬浮窗「▶」恢复，接着刚才的进度继续\n已接管流量（" + scope + "）");
+        } else if (on && lim) {
             status.setText("弱网测试进行中 · " + p.name + "\n" + p.summary() + "\n已接管流量（" + scope + "）");
         } else if (on) {
             status.setText("已接管流量，但未开始弱网测试\n按上面的按钮开始（已选：" + scene + "）");
@@ -406,10 +426,15 @@ public class MainActivity extends Activity {
     private void syncTestBtn() {
         if (btn == null) return;
         boolean on = testing();
-        btn.setText(on ? "⏹ 停止弱网测试" : "▶ 开始弱网测试");
+        boolean paused = on && WeakNet.I.paused;
+        // 暂停时 limitOn 仍为真，若照常显示「⏹ 停止弱网测试」，用户从悬浮窗点了
+        // ⏸ 回来会以为没暂停。按钮改成橙色「已暂停」一眼可辨；文案写「点此停止」
+        // 而非写成恢复——点击行为仍 stopTest，恢复交给悬浮窗的 ▶，避免误导。
+        btn.setText(paused ? "⏸ 已暂停 · 点此停止"
+                : (on ? "⏹ 停止弱网测试" : "▶ 开始弱网测试"));
         btn.setTextColor(Color.WHITE);
-        btn.setBackground(box(on ? 0xFFE5484D : 0xFF2F6FED,
-                on ? 0xFFE5484D : 0xFF2F6FED, 10));
+        int color = paused ? 0xFFF5A623 : (on ? 0xFFE5484D : 0xFF2F6FED);
+        btn.setBackground(box(color, color, 10));
     }
 
     /** 总开关：开 = 接管并按当前场景限速；关 = 断开接管，网络恢复 */
@@ -519,6 +544,7 @@ public class MainActivity extends Activity {
     }
 
     protected void onDestroy() {
+        WeakNet.I.removeUiWatcher(uiWatcher);   // 别让回调打到已销毁的 Activity
         if (panels != null) panels.close();
         if (scope != null) scope.close();
         if (sheet != null) sheet.close();
