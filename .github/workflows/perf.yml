@@ -162,7 +162,11 @@ jobs:
 
       # 直接挂到 Release 附件上，发布页面里就能下载比对依据。
       # 失败不阻断 Release（附件不是发布的必要条件）。
+      # 必须显式 shell: bash：下面用了 bash 的续行符 \ 与 || 兜底，
+      # windows runner 默认 PowerShell 不认 \ 续行，会 ParserError 让整个 job 红掉
+      # （2026-11-20 v1.1.20 release 实测踩到）。
       - name: 归档基线到 Release 附件
+        shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ github.event.release.tag_name }}
