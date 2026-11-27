@@ -53,6 +53,10 @@ def reset_engine_state():
     W.G.gate_open = True
     W.G.gen = 0
     W.G.wake = None
+    W.G.profile_gen = 0
+    W.G.proc_name_cache = {"at": 0.0, "map": {}}
+    W.G.prev_proxy = None
+    W.G.sysproxy_on = False
     W.G.flap_task = None
     W.G.combo_task = None
     W.G.combo_id = None
@@ -70,6 +74,7 @@ def reset_engine_state():
     W.G.bytes_bypass = 0
     W.G.share_pin = ""
     W.G.allow_legacy = False
+    W.G.share_fail.clear()   # PIN 失败计数：上例遗留的锁定会污染下例
     W.G.share_port = 0
     W.G.share_server = None
 
@@ -90,8 +95,19 @@ def tmp_store(tmp_path, monkeypatch):
     monkeypatch.setattr(W, "_seeded", True, raising=False)
     W.G.inbox.clear()
     W.G.peers.clear()
+    # 共享鉴权状态是模块级全局，用例里直接赋值（含 API 写入）会泄漏给后续
+    # 用例。进入/退出都钉成默认值，保证用例顺序无关；这里用直接赋值而不是
+    # monkeypatch，是因为退出时要还原成「默认值」而不是「进入时的残留值」。
+    W.G.share_pin = ""
+    W.G.allow_legacy = False
+    W.G.share_fail.clear()   # PIN 失败计数同样会跨用例泄漏（reset_engine_state 也复位它）
     W.ensure_identity()
-    return tmp_path
+    try:
+        yield tmp_path
+    finally:
+        W.G.share_pin = ""
+        W.G.allow_legacy = False
+        W.G.share_fail.clear()
 
 
 # ---------------------------------------------------------------- 进程内引擎

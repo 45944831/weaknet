@@ -32,11 +32,11 @@ async def push_to_local(peer, item_ids, combo_ids=None):
 
 def test_push_roundtrip_with_long_chinese_name(tmp_store):
     W.G.user_name = "本机"
-    W.G.share_pin = ""
+    W.G.share_pin = "1234"                # S3：无 PIN 会被 409 拒收，先设好口令
     name = "地铁通勤弱网环境" * 3          # 27 个汉字 = 81 字节
     item, _ = W.upsert_user_preset(name, {"down_kbps": 500, "loss_pct": 3})
 
-    res = run_async(push_to_local({"pin": ""}, [item["id"]]), timeout=20)
+    res = run_async(push_to_local({"pin": "1234"}, [item["id"]]), timeout=20)
 
     assert res["ok"] is True, res
     # 本机与接收方是同一个临时库：同名一定进收件箱，内容必须完整到达
@@ -49,13 +49,13 @@ def test_push_roundtrip_with_long_chinese_name(tmp_store):
 
 def test_push_combo_roundtrip(tmp_store):
     W.G.user_name = "本机"
-    W.G.share_pin = ""
+    W.G.share_pin = "1234"                # S3：无 PIN 会被 409 拒收，先设好口令
     combo, _ = W.upsert_combo("通勤组合", [
         {"key": "wifi", "minutes": 1, "seconds": 0},
         {"key": "4g", "minutes": 0, "seconds": 30},
     ], loop=True)
 
-    res = run_async(push_to_local({"pin": ""}, [], [combo["id"]]), timeout=20)
+    res = run_async(push_to_local({"pin": "1234"}, [], [combo["id"]]), timeout=20)
 
     assert res["ok"] is True, res
     assert [p["name"] for p in res["pending"]] == ["通勤组合"]

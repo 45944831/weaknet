@@ -61,9 +61,10 @@ METRICS = {
                             "warn": 0.10, "fail": 0.20},
 }
 
-LEVELS = ("ok", "warn", "fail", "no-baseline", "different-machine")
+LEVELS = ("ok", "warn", "fail", "no-baseline", "different-machine",
+          "stale-baseline")
 
-# 共享 runner 的噪声可达 15%~30%（方案 §2.5 / P0-4）。CI 基线把 warn 放宽到
+# 共享 runner 的噪声可达 15%~30%（方案 §2.5）。CI 基线把 warn 放宽到
 # 10%，fail 仍守 15%：正常波动只提示，真正的退化仍然红。
 CI_WARN_FLOOR = 0.10
 
@@ -143,12 +144,47 @@ def version_info():
     ver, build = "unknown", 0
     try:
         sys.path.insert(0, str(ROOT))
-        import version as v          # noqa: WPS433（延迟导入，避免测试收集期副作用）
+        # 延迟导入：避免测试收集期副作用
+        import version as v          # noqa: F401
         ver = getattr(v, "VERSION", "unknown")
         build = getattr(v, "BUILD", 0)
     except Exception:
         pass
     return {"version": ver, "build": build}
+
+
+def stale_fields(base):
+    """基线与当前构建是否同代。返回 (是否陈旧, 说明)。
+
+    为什么必须查这一项
+    ------------------
+    只有「同机指纹」是不够的：同一台机器上，spec 参数改了、版本升了，历史
+    中位数就不再是同一个被测对象。实测里仓库基线曾停在 build 126 / spec
+    `6a95fc73`，而代码已经是 build 130 / `9990e03d` —— 比较照跑、结论照出，
+    门禁实际上在拿两个不同产品互相打分（2026-11-27 审查发现）。
+
+    `save()` 通过 `context()` 把 version / build / spec_hash 写进 json，所以
+    真实基线一定带这三项；单元测试里手工构造的 base 往往没有，缺字段时**不判**
+    陈旧（按旧格式兼容），避免把「没写」误报成「过期」。
+    """
+    if not isinstance(base, dict):
+        return False, ""
+    ver = version_info()
+    cur = {"version": ver["version"], "build": ver["build"],
+           "spec_hash": spec_hash()}
+    diff = []
+    for key in ("version", "build", "spec_hash"):
+        if key not in base or base.get(key) in (None, "", 0):
+            continue
+        if str(base.get(key)) != str(cur[key]):
+            diff.append("%s %s → %s" % (key, base.get(key), cur[key]))
+    if not diff:
+        return False, ""
+    msg = ("基线来自 v%s/build %s，当前 v%s/build %s（%s）；请用 "
+           "WN_PERF_UPDATE_BASELINE=1 python -m pytest -m perf 重刷"
+           % (base.get("version", "?"), base.get("build", "?"),
+              cur["version"], cur["build"], "，".join(diff)))
+    return True, msg
 
 
 def dependencies():
@@ -320,14 +356,22 @@ def compare(name, value, base=None):
     """当前值 vs 基线中位数。
 
     返回 {"level", "msg", "delta"}：
-      level ∈ ok / warn / fail / no-baseline / different-machine
+      level ∈ ok / warn / fail / no-baseline / different-machine / stale-baseline
       delta > 0 表示比基线「更好」，< 0 表示更差（已按 direction 归一）。
+
+    `stale-baseline` 不参与 ok/fail 判定：基线自带的 version / build / spec_hash
+    与当前构建不一致时，中位数比较的不是同一个被测对象，此时报失败会让人去调
+    阈值，报 ok 则是假绿。唯一的出路是显式重刷基线。
     """
     base = load() if base is None else base
     metric = (base.get("metrics") or {}).get(name)
     if not metric or metric.get("median") in (None, 0):
         return {"level": "no-baseline", "delta": None,
                 "msg": "%s 无基线（首次运行，先记录不下结论）" % name}
+    stale, why = stale_fields(base)
+    if stale:
+        return {"level": "stale-baseline", "delta": None,
+                "msg": "%s 基线已过期：%s" % (name, why)}
     if not same_machine(base.get("fingerprint"), ci=base.get("ci")):
         return {"level": "different-machine", "delta": None,
                 "msg": "%s 基线与本机指纹不同，只记录不判定" % name}

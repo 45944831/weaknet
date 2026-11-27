@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""生成 onedir 形态的 PyInstaller spec（P2-2 冷启动专项）。
+"""生成 onedir 形态的 PyInstaller spec（冷启动优化专项）。
 
 背景：`--onefile` 每次启动都要把 21.4 MB 的 `_MEIxxxx` 解包到 %TEMP%，实测冷启动
 中位 2.15 s，`≤2.0 s` 的目标只差这一步。onedir 把文件常驻在目录里，启动时不再解包。
@@ -32,7 +32,7 @@ SPEC_TEMPLATE = '''# -*- mode: python ; coding: utf-8 -*-
 #
 # 与 _build_gui/WeakNet.spec 的唯一区别：不把依赖塞进单个 EXE，而是
 # EXE(exclude_binaries=True) + COLLECT 输出目录。启动时不再解包 21.4 MB 的 _MEI，
-# 这是冷启动 2.15 s 降不下去的主因（P2-2）。
+# 这是冷启动 2.15 s 降不下去的主因。
 import os
 
 _here = os.path.dirname(os.path.abspath(SPEC))

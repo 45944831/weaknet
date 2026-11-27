@@ -3,7 +3,7 @@ package com.weaknet.app;
 import java.util.Arrays;
 
 /**
- * P1-3 四档 MTU/MSS 联动 + P1-2 缓冲池化安全性（纯 JDK 可跑）。
+ * 四档 MTU/MSS 联动 + 缓冲池化安全性（纯 JDK 可跑）。
  *
  * 四档吞吐 A/B 必须在真机上测（改 setMtu 会影响分片与 PMTUD，默认仍 1500）；
  * 这里锁住的是「实验一旦开跑，三处参数必然一起变」和「复用缓冲不会串包」——

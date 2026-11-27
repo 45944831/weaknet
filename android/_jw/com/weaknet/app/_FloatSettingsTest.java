@@ -91,14 +91,14 @@ public class _FloatSettingsTest {
         ck("C5 外部改动时回填勾选框（带抑制标志防误触发）",
                 sheet.contains("syncFloatFields()") && sheet.contains("syncingFloatFields"));
 
-        // ---- D 自定义文本只从设置界面移除，底层能力保留（用户确认的范围）----
-        ck("D1 设置界面跳过 custom 勾选项",
+        // ---- 自定义文本只从设置界面移除，底层能力保留（用户确认的范围）----
+        ck("设置界面跳过 custom 勾选项",
                 sheet.contains("\"custom\".equals(id)") && sheet.contains("continue;"));
-        ck("D2 提示文案不再提自定义文本",
+        ck("提示文案不再提自定义文本",
                 !sheet.contains("「自定义文本」需先在控制台写好内容"));
-        ck("D3 底层 selectable(custom) 仍为真（API/脚本照常可用）",
+        ck("底层 selectable(custom) 仍为真（API/脚本照常可用）",
                 FloatSettings.selectable("custom"));
-        ck("D4 orderedLines 仍保留 custom（底层未删）",
+        ck("orderedLines 仍保留 custom（底层未删）",
                 FloatSettings.orderedLines(L("custom", "rate")).contains("custom"));
 
         System.out.println();

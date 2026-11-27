@@ -17,14 +17,21 @@
 | **环境共享** | 同一局域网互推场景与组合，对方不用手抄参数 |
 | **新版本提示** | 后台查 GitHub 最新 Release，有新版时顶栏版本号变红，点击直达下载页 |
 
-两端共用同一套场景、参数与接口契约（`spec/spec.json` 为唯一真源），Windows ↔ Android 结果可直接对照。
+两端共用同一套场景、参数与文案规格（`spec/spec.json` 是**数据规格**唯一真源；API 路由/状态码由两端控制层实现并通过 `tests/_t_api_parity.py` 校验一致性），Windows ↔ Android 结果可直接对照。
 
 ## 下载
 
-| 文件 | 平台 | 大小 | SHA-256（前 16 位） |
+> 源码仓库不含 EXE / APK 产物：二者由本机构建 / 发布流程生成，已加入 `.gitignore` 不入库。
+> 请从下方 Releases 链接下载，不要指望 clone 仓库后直接拿到二进制。
+
+| 文件 | 平台 | 大小 | SHA-256（前 16 位，发布资产） |
 |---|---|---|---|
 | [`WeakNet.exe`](https://github.com/45944831/weaknet/releases/latest/download/WeakNet.exe) | Windows GUI，免装 Python，无 DOS 黑框 | 10.37 MB | `9d80713c6761e6d4` |
 | [`WeakNet.apk`](https://github.com/45944831/weaknet/releases/latest/download/WeakNet.apk) | Android 7.0+ | 217 KB | `04e00ff5c3d4526f` |
+
+> 上表是 **Releases v1.1.20 现有资产**的发布指纹。本机重打的产物与发布资产不是同一份文件，
+> 指纹必然不同（每次重打都会变，记录见 [验证记录](docs/verification.md) 文首「第六轮」的
+> 「本机重打产物」）。校验下载完整性时请只与 Release 页公布的值比对，不要拿本机重打值套发布资产。
 
 发布页：<https://github.com/45944831/weaknet/releases/latest>
 
@@ -49,6 +56,8 @@
 9d80713c6761e6d46317bd1863bb17191e254ef87d90fdcb9cc4bf550ae00d04  WeakNet.exe
 04e00ff5c3d4526fbf9ae77dcd1333e6c3bd42d2eb4dbbe89e85104b6558a08c  WeakNet.apk
 ```
+
+以上两项是 Releases v1.1.20 **发布资产**的完整指纹，与本机重打产物（见验证记录）不同。
 
 </details>
 
@@ -106,16 +115,25 @@ python weaknet.py         # 无界面引擎：代理 8888 / 控制接口 8899
 
 ## 构建与测试
 
+Python 依赖见 [`requirements.txt`](requirements.txt)：运行时只用标准库（该文件不含任何要装的包）；
+测试与静态检查的依赖在 [`requirements-dev.txt`](requirements-dev.txt)（pytest / pytest-cov / ruff），
+py-spy / PyInstaller / Pillow 是按需安装的可选工具。
+
 ```bash
 # Android（JDK 8+、Android SDK）
 cd android && bash build.sh
 
 # Windows EXE（Python 3.8+、PyInstaller）
+# --add-data 必须带上 spec/spec.json，否则打出的 EXE 启动即报「规格文件读取失败」。
+# 分隔符按平台写：Windows 用分号 "spec/spec.json;spec"，Linux/macOS 用冒号 "spec/spec.json:spec"。
 python -m PyInstaller --onefile --windowed --clean --noconfirm --name WeakNet \
-  --icon /abs/path/to/assets/weaknet.ico \
-  --distpath . --workpath _build_gui --specpath _build_gui weaknet_gui.py
+  --icon assets/weaknet.ico --add-data "spec/spec.json;spec" \
+  --distpath . --workpath _build_gui --specpath . weaknet_gui.py
 
-# 回归
+# 正式发版请用 _build_gui/WeakNet.spec（已含 spec 收集与版本资源），见 docs/build.md
+python -m PyInstaller --clean --noconfirm --distpath . --workpath _build_gui _build_gui/WeakNet.spec
+
+# 回归（先 pip install -r requirements-dev.txt）
 python -m pytest
 python -m pytest -m perf              # 性能门禁：同机指纹 + 相对基线（见下）
 python -m pytest -m device     # 需先设置 ANDROID_SERIAL
@@ -145,7 +163,6 @@ python tools/perf_iperf.py --curve                       # 带宽偏差曲线（
 python tools/perf_iperf.py --curve-latency --curve-loss  # 高延迟×低带宽 + 丢包×带宽曲线
 python tools/perf_coldstart.py                           # -X importtime 冷启动导入归因
 python tools/perf_exe_measure.py --exe <exe> --runs 5    # EXE 冷启动就绪时间 + 进程树 RSS
-python -m pytest tests/perf/test_drain_ab.py -m perf -q -o addopts=""   # 写路径 A/B 证据
 python -m pytest tests/perf/test_slow_callbacks.py -m perf -q -o addopts=""  # 慢回调清单
 ```
 
@@ -162,7 +179,7 @@ python -m pytest tests/perf/test_slow_callbacks.py -m perf -q -o addopts=""  # �
 > **`cv_pct > 5` 时禁止引用中位数**——「稳定 7946」与「双峰 2459/7946」的中位数
 > 与 p95 完全相同，只有变异系数能区分。详见 [精度声明 §4.5](docs/precision.md)。
 
-慢回调清单（P0-2 的另一半产物）把「事件循环里堵了超过 50 ms 的同步回调」列成表：
+慢回调清单（性能分析的另一半产物）把「事件循环里堵了超过 50 ms 的同步回调」列成表：
 py-spy 只看得到 CPU 热点，看不到谁把一段阻塞塞进了事件循环。排查「切场景不即时 /
 界面卡顿」时先跑它：
 
@@ -172,7 +189,9 @@ WN_SLOW_CB_MS=50 python tools/perf_profile.py record --source --slow-cb 50 -d 30
 
 基线与所有结果统一口径：产品 `1 kbps = 1024 bit/s`；iperf3 原始
 `bits_per_second` 是 SI（1000 进制），归档同时保留原始值。默认基线为
-`SCHEMA=2`，含机器指纹、依赖版本、固定输入、预热、重复次数与单位口径；
+`SCHEMA=2`，含机器指纹、依赖版本、固定输入、预热、重复次数与单位口径，以及
+`version` / `build` / `spec_hash` —— 后三项与当前构建不一致时判定为 `stale-baseline`
+（不参与 ok/fail，只提示重刷），避免拿两个不同版本的被测对象互相比较。
 换基线必须显式 `WN_PERF_UPDATE_BASELINE=1`，避免「跑一次就自动改写门禁」。
 
 依赖、版本号约束、签名口令与测试夹具说明见[构建与测试](docs/build.md)，
@@ -183,21 +202,57 @@ WN_SLOW_CB_MS=50 python tools/perf_profile.py record --source --slow-cb 50 -d 30
 
 ```text
 weaknet/
-├── weaknet.py          核心引擎（asyncio 代理 + HTTP 控制接口）
-├── weaknet_gui.py      Windows GUI（tkinter）
-├── usb_phone.py        USB 手机弱网（adb reverse / 全局代理 / 守护）
-├── version.py          版本号唯一真值
-├── spec/spec.json      场景 / 参数 / 文案 / 组合规则唯一真源
+├── weaknet.py          核心引擎（asyncio 本地 HTTP/HTTPS 代理 + 8899 控制接口）
+├── weaknet_gui.py      Windows GUI 主窗口（tkinter；多继承组装下列 gui_* 面板）
+├── gui_notes.py        场景/参数说明二级窗口（NotesMixin）
+├── gui_perf.py         桌面刷新帧统计（纯逻辑，不依赖 tkinter，可单测）
+├── gui_scope.py        接管范围面板：按进程名过滤哪些程序进弱网（ScopeMixin）
+├── gui_share.py        环境共享二级窗口：局域网互推场景/组合（ShareMixin）
+├── gui_state.py        GUI 视图模型：状态→文本/色调，只在变化时刷新控件（纯逻辑）
+├── gui_text.py         GUI 纯文本与排版：参数摘要、带宽格式化、名字限长（纯逻辑）
+├── text_layout.py     说明文案的中文折行排版（从 weaknet.py 抽出，行为不变）
+├── gui_theme.py        配色、字体与 ttk 主题层（各面板公共底座）
+├── gui_usb.py          USB 手机弱网面板（UsbMixin）
+├── usb_phone.py        USB 手机弱网（adb reverse / 系统代理 / 拔线守护）
+├── report_gen.py       测试报告生成（纯函数：状态快照 → Markdown）
+├── update_check.py     GitHub 新版本检查（后台线程 + 跳转域名白名单）
+├── logserver.py        限速校验用的简易速率记录服务端（测试辅助）
+├── gen_icon.py         统一图标生成：EXE/APK 共用（需 Pillow）
+├── version.py          版本号唯一真值（VERSION / BUILD）
+├── requirements.txt    运行时依赖声明（零第三方包，只留说明；测试依赖见下）
+├── requirements-dev.txt 开发/CI 依赖声明（pytest / pytest-cov / ruff；普通用户无需安装）
+├── ruff.toml           ruff 静态检查配置（只开 E/F，不做风格强制）
+├── spec/spec.json      数据规格（参数 / 场景 / 组合规则）唯一真源；界面文案不在此列（API 契约见 tests/_t_api_parity.py）
 ├── tests/              pytest 用例 + 历史回归脚本
+├── tools/              性能采样、iperf3 真值、冷启动等工具脚本
 ├── assets/             Windows 图标
-├── WeakNet.exe         Windows 产物
-└── android/            Java 源码、资源、build.sh、WeakNet.apk
+├── LICENSE             MIT 许可证文本
+├── WeakNet.exe         Windows 产物（源码仓库不含，由本机构建/发布流程生成）
+└── android/            Java 源码、资源、build.sh、WeakNet.apk（产物同上）
 ```
 
 ## 验证与已知限制
 
-v1.1.20 为可解读报告 + 悬浮窗交互修复版：版本一致性 **16/16**、pytest 全量通过、Java 纯 JDK **23** 套件全过；真机逐项验证三项功能（报告解读总结 / 悬浮窗多选 / 暂停态按钮同步），并修复暂停标志残留、暂停中切场景静默限速、组合线程竞态三个缺陷；产物 EXE 10,871,576 B / `9d80713c…`、APK 222,244 B / `04e00ff5…`。规格 hash 未变，仍 `9990e03d`。
-v1.1.19 为参数采集修复版：版本一致性 **16/16**、pytest **241** 通过、Java 纯 JDK **20** 套件、跨端一致性 **22/22**、数据全量复检 **0 错误 / 0 遗漏 / 0 重复**（24 条提示）；真机七相位（SM-G9730 / Android 12）**44/47 → delay 口径修正后全部通过**，限速稳态偏差 **−0.97% ~ −2.75%**（阈值 ±8%）、MTU/MSS 四档全对（1280/1500/9000/16384，MSS=MTU−40）、8 MB 定长下载直连与 4000 kbps 限速 sha 完全一致；产物 EXE 10,862,736 B / `8b23f552…`、APK 214,052 B / `56220dca…`。v1.1.17 为两端限速对齐版：版本一致性 **16/16**（新增 C5/C6 产物新鲜度检查）、pytest **228** 通过、Java 纯 JDK **19** 套件、跨端一致性 **22/22**、真机契约 **13**、TUN 数据面 **11/11**（透明转发逐字节一致、限速 4,223 kbps、800 ms RTT 首字节 2,070 ms、5% 丢包正文完整、100% 拒连 80 ms、100% 黑洞 17.8 s 挂住、撤掉后 400 ms 恢复）、真机 10 并发限速 8000 聚合 **7,995 kbps**（一份全局桶）、1–10 Mbps 限速精度 **±0.3%**；产物 EXE 10,862,443 B / `9c223357…`、APK 214,052 B / `dd506aa4…`。v1.1.16 为采集数据修复版（产品功能无变化）：版本一致性 14/14、pytest 138 通过、EXE 冒烟与 APK 真机版本校验通过、数据复检 0 错误；产物 EXE 10,839,282 B / `c9948caa…`、APK 205,860 B / `6c268eb8…`。v1.1.15 真机回归 **68/68**（深度 34 + 组合 11 + 默认项 12 + UI 11），EXE 冒烟 7/7，pytest 138 通过，版本一致性 14/14、规格 hash 一致。另做了关闭残留检测：Windows 正常关窗后进程 / 端口 / 系统代理全部清空，Android 强停后进程、服务与 tun 全清。v1.1.13 的 250/250 全量数据与更早版本见[验证记录](docs/verification.md)。
+**哪些判定已可自动化**（`python -m pytest`，不需要真机 / iperf3）：纯逻辑层单测（参数夹取、
+spec 规则、场景与组合、名字限长、更新检查的版本比较与静默失败）；从 GUI 抽出的可注入层
+`gui_text` / `gui_state` / `gui_perf` 不创建 Tk 窗口、不需要显示器，可直接喂构造状态
+（`gui_text` 只 `from tkinter import font` 做字体测量）；`report_gen.build()`
+只读快照、不碰 GUI、不写文件，报告结构与解读结论由单测覆盖；跨端规格 / 算法常量
+（`_t_spec_parity.py`）与版本一致性（`_t_version.py`）通过 `tests/test_golden_scripts.py`
+登记后在离线环境执行，API 契约脚本 `_t_api_parity.py` 默认只校验 Windows 侧。
+`integration` 用例起本机真实 socket，但仍在单机内。
+
+> **API 契约的覆盖范围**：`python tests/_t_api_parity.py` 默认只跑 Windows 侧（进程内隔离服务，
+> 无需设备）；Android-only 6 项（`/api/float` 读取、旧路径 `/api/share*` 别名等）只在传
+> `--android` 时执行。Android 侧契约需在真机连接后先 `adb forward tcp:18899 tcp:8899`，
+> 再本地运行 `python tests/_t_api_parity.py --android http://127.0.0.1:18899`；CI 不覆盖 Android-only 项。
+
+**仍需真机 / 外部工具**（默认不跑，`pytest -m device`）：TUN 逐字节转发、限速精度
+（iperf3 外部真值）、adb 写全局代理与部分 ROM 的拒绝路径。这些没有可注入替身，CI 绿灯
+不能替代真机回归，也不代表限速精度已达标。
+
+v1.1.20 为可解读报告 + 悬浮窗交互修复版：版本一致性 **16/16**、pytest 全量通过、Java 纯 JDK **26** 套件全过；真机逐项验证三项功能（报告解读总结 / 悬浮窗多选 / 暂停态按钮同步），并修复暂停标志残留、暂停中切场景静默限速、组合线程竞态三个缺陷；产物（**发布资产**，非本机重打）EXE 10,871,576 B / `9d80713c…`、APK 222,244 B / `04e00ff5…`；本机重打产物的指纹与大小见验证记录「第六轮」，两者不同属正常。规格 hash 未变，仍 `9990e03d`。
+v1.1.19 为参数采集修复版：版本一致性 **16/16**、pytest **241** 通过、Java 纯 JDK **20** 套件、跨端一致性 **22/22**、数据全量复检 **0 错误 / 0 遗漏 / 0 重复**（24 条提示）；真机七相位（某国产 Android 12 机型）**44/47 → delay 口径修正后全部通过**，限速稳态偏差 **−0.97% ~ −2.75%**（阈值 ±8%）、MTU/MSS 四档全对（1280/1500/9000/16384，MSS=MTU−40）、8 MB 定长下载直连与 4000 kbps 限速 sha 完全一致；产物 EXE 10,862,736 B / `8b23f552…`、APK 214,052 B / `56220dca…`。v1.1.17 为两端限速对齐版：版本一致性 **16/16**（新增 C5/C6 产物新鲜度检查）、pytest **228** 通过、Java 纯 JDK **19** 套件、跨端一致性 **22/22**、真机契约 **13**、TUN 数据面 **11/11**（透明转发逐字节一致、限速 4,223 kbps、800 ms RTT 首字节 2,070 ms、5% 丢包正文完整、100% 拒连 80 ms、100% 黑洞 17.8 s 挂住、撤掉后 400 ms 恢复）、真机 10 并发限速 8000 聚合 **7,995 kbps**（一份全局桶）、1–10 Mbps 限速精度 **±0.3%**；产物 EXE 10,862,443 B / `9c223357…`、APK 214,052 B / `dd506aa4…`。v1.1.16 为采集数据修复版（产品功能无变化）：版本一致性 14/14、pytest 138 通过、EXE 冒烟与 APK 真机版本校验通过、数据复检 0 错误；产物 EXE 10,839,282 B / `c9948caa…`、APK 205,860 B / `6c268eb8…`。v1.1.15 真机回归 **68/68**（深度 34 + 组合 11 + 默认项 12 + UI 11），EXE 冒烟 7/7，pytest 138 通过，版本一致性 14/14、规格 hash 一致。另做了关闭残留检测：Windows 正常关窗后进程 / 端口 / 系统代理全部清空，Android 强停后进程、服务与 tun 全清。v1.1.13 的 250/250 全量数据与更早版本见[验证记录](docs/verification.md)。
 
 已知限制：
 
@@ -207,6 +262,17 @@ v1.1.19 为参数采集修复版：版本一致性 **16/16**、pytest **241** �
 - Android 仅接管 IPv4，IPv6 流量走真实网络；分片的 IP 包会被丢弃
 - 低带宽 + 高延迟档位的实测吞吐可能高于设定值，判读时请比较「开场景前后」而不是「实测 vs 设定」
 - EXE 为 PyInstaller 单文件，首次启动需解压临时文件，稍慢属正常
+- APK 声明 `QUERY_ALL_PACKAGES` 是为了列出可接管的 App（Android 11+ 包可见性限制）。若计划上架 Google Play，需改用 `<queries>` 精确声明并申报用途；自发布 APK 不受影响
+
+## 平台要求
+
+- **Windows**：**Windows 10 及以上（64 位）**。EXE 由 PyInstaller 打包并内置 Python 3.10 运行时；Windows 7 / 8 不在支持范围（Python 3.9+ 与打包运行时均已停止支持）。
+- **Android**：**Android 7.0（API 24）及以上**。APK 为纯 Java 实现、不含原生 `.so`，arm64-v8a / armeabi-v7a / x86_64 设备均可直接安装。
+- **EXE 未做代码签名**：首次运行可能被 SmartScreen 提示「Windows 已保护你的电脑」，点「更多信息 → 仍要运行」即可；请用 Release 页公布的 SHA-256 校验完整性。
+
+## 许可证
+
+[MIT](LICENSE)
 
 ## 文档
 
@@ -214,5 +280,6 @@ v1.1.19 为参数采集修复版：版本一致性 **16/16**、pytest **241** �
 - [构建与测试](docs/build.md)：两端构建、版本号约束、pytest 回归
 - [精度声明](docs/precision.md)：模拟层次、各参数真实语义、已知偏差与校准方法
 - [验证记录](docs/verification.md)：v1.1.0 – v1.1.20 实测与已修缺陷
+- [测试入口](docs/testing.md)：四层测试怎么跑、真机脚本选哪个、历史脚本约定
 
 问题与建议请提 [Issue](https://github.com/45944831/weaknet/issues)。

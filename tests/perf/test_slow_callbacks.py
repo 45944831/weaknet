@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""P0-2 的另一半产物：慢回调清单。
+"""性能采样入口的另一半产物：慢回调清单。
 
 py-spy 只能看到 CPU 热点，看不到「谁把一段同步阻塞塞进了事件循环」——
 后者正是「切场景不即时 / 界面卡顿」的根因。asyncio 自己会在 debug 模式下
@@ -107,7 +107,7 @@ def test_slow_callback_list(slow_cb_env, engine, http_origin, caplog):
     out = {
         "schema": 1,
         "date": time.strftime("%Y-%m-%d %H:%M:%S"),
-        "purpose": "P0-2 慢回调清单：事件循环里超过阈值的同步阻塞回调",
+        "purpose": "慢回调清单：事件循环里超过阈值的同步阻塞回调",
         "threshold_ms": THRESHOLD_MS,
         "workload": {"kb": KB, "rounds": 3, "rate_kbps": 8000,
                      "bytes_moved": bytes_moved},

@@ -22,6 +22,9 @@ SCRIPTS = [
     ("combo_notes", "_t_combo_notes.py"),
     ("spec_parity", "_t_spec_parity.py"),
     ("version", "_t_version.py"),
+    # Windows 侧 API 契约脚本：无外部依赖、毫秒级，默认 pytest 必须跑到；
+    # Android-only 项需真机 --android 本地验证，CI 不覆盖
+    ("api_parity", "_t_api_parity.py"),
 ]
 
 

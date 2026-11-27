@@ -15,7 +15,7 @@ import java.io.BufferedReader;
  * 而且暂停时 limitOn 仍为真，文案里没有「已暂停」分支，即便刷了也显示「进行中」。
  *
  * 本测试用源码结构断言守住这条接线：注册 / 注销 / 回调内容 / 暂停态文案 /
- * 以及 pause、resume 确实 fireUiChange。
+ * 以及 pause、resume 确实经 PauseState 存取现场并 fireUiChange。
  */
 public class _MainStatusSyncTest {
     static int pass = 0, fail = 0;
@@ -58,9 +58,13 @@ public class _MainStatusSyncTest {
     public static void main(String[] args) {
         String act = src("src/com/weaknet/app/MainActivity.java");
         String wn = src("src/com/weaknet/app/WeakNet.java");
+        // 暂停状态存取已抽到纯 JDK 的 PauseState：WeakNet 与 _PauseResumeTest
+        // 共用同一份逻辑，这里同时校验接线和真实实现。
+        String ps = src("src/com/weaknet/app/PauseState.java");
 
         ck("A1 MainActivity 源码可读", act.length() > 0);
         ck("A2 WeakNet 源码可读", wn.length() > 0);
+        ck("A3 PauseState 源码可读", ps.length() > 0);
 
         // ---- B 主界面把 updateStatus 挂到 fireUiChange ----
         ck("B1 注册 uiWatcher", act.contains("addUiWatcher(uiWatcher)"));
@@ -78,27 +82,29 @@ public class _MainStatusSyncTest {
         ck("C2 暂停态给出恢复提示", act.contains("点悬浮窗"));
 
         // ---- D 悬浮窗操作确实触发即时通知 ----
-        ck("D1 pause 会 fireUiChange",
-                wn.contains("public synchronized boolean pause()")
-                        && wn.contains("paused = true;")
-                        && wn.indexOf("fireUiChange()", wn.indexOf("boolean pause()")) > 0);
-        ck("D2 resume 会 fireUiChange",
-                wn.indexOf("fireUiChange()", wn.indexOf("boolean resume()")) > 0);
+        int iPause = wn.indexOf("public synchronized boolean pause()");
+        int iResume = wn.indexOf("public synchronized boolean resume()");
+        ck("D1 pause 会记现场并 fireUiChange",
+                iPause > 0 && wn.indexOf("pauseState.enter(", iPause) > 0
+                        && wn.indexOf("fireUiChange()", iPause) > 0);
+        ck("D2 resume 会取现场并 fireUiChange",
+                iResume > 0 && wn.indexOf("pauseState.take(", iResume) > 0
+                        && wn.indexOf("fireUiChange()", iResume) > 0);
 
         // ---- F 暂停标志不能残留（暂停→停止→再开始，界面会误报「已暂停」）----
         int iSetLimit = wn.indexOf("public synchronized void setLimitOn(");
-        int iClear = wn.indexOf("private void clearPauseLocked()");
-        int iClearCall = iSetLimit > 0 ? wn.indexOf("clearPauseLocked()", iSetLimit) : -1;
+        int iClearCall = iSetLimit > 0 ? wn.indexOf("pauseState.clear()", iSetLimit) : -1;
         int iIfOn = iSetLimit > 0 ? wn.indexOf("if (on)", iSetLimit) : -1;
         ck("F1 setLimitOn 开头就清暂停快照",
-                iSetLimit > 0 && iClear > 0
-                        && iClearCall > 0 && iIfOn > 0 && iClearCall < iIfOn,
+                iSetLimit > 0 && iClearCall > 0 && iIfOn > 0 && iClearCall < iIfOn,
                 "call@" + iClearCall + " ifOn@" + iIfOn);
-        ck("F2 clearPauseLocked 把 paused 置回 false",
-                iClear > 0 && wn.indexOf("paused = false;", iClear) > 0
-                        && wn.indexOf("pausedProfile = null;", iClear) > 0);
+        int iClearBody = ps.indexOf("private void clearLocked()");
+        ck("F2 PauseState.clear 把标志与现场都清掉",
+                iClearBody > 0 && ps.indexOf("paused = false;", iClearBody) > 0
+                        && ps.indexOf("snapshot = null;", iClearBody) > 0
+                        && wn.contains("syncPaused()"));
         ck("F3 setProfile 落地新参数时也清暂停（防 /api/profile 路径残留）",
-                wn.indexOf("if (paused) clearPauseLocked();",
+                wn.indexOf("pauseState.clear()",
                         wn.indexOf("public synchronized void setProfile(")) > 0);
 
         // ---- G 暂停中换场景/组合：保持暂停，不能静默开始限速 ----
@@ -106,18 +112,24 @@ public class _MainStatusSyncTest {
         int iSelCombo = wn.indexOf("public synchronized boolean selectCombo(");
         ck("G1 selectScene 有暂停分支且不调用 setProfile",
                 iSelScene > 0
-                        && wn.indexOf("if (paused)", iSelScene) > 0
-                        && wn.indexOf("if (paused)", iSelScene) < wn.indexOf("setProfile(p, key)", iSelScene));
-        ck("G2 暂停中换场景只更新恢复目标（pausedProfile）",
-                iSelScene > 0 && wn.indexOf("pausedProfile = p != null", iSelScene) > 0);
+                        && wn.indexOf("if (pauseState.paused())", iSelScene) > 0
+                        && wn.indexOf("if (pauseState.paused())", iSelScene)
+                                < wn.indexOf("setProfile(p, key)", iSelScene));
+        ck("G2 暂停中换场景只更新恢复目标（whilePaused 快照）",
+                iSelScene > 0 && wn.indexOf("pauseState.whilePaused(p != null", iSelScene) > 0);
         ck("G3 selectCombo 有暂停分支，只记住从第 1 段播",
                 iSelCombo > 0
-                        && wn.indexOf("if (paused)", iSelCombo) > 0
-                        && wn.indexOf("pausedComboStep = 0;", iSelCombo) > 0
-                        && wn.indexOf("if (paused)", iSelCombo) < wn.indexOf("startComboLocked(c.copy())", iSelCombo));
-        ck("G4 组合循环在暂停时不再推进（sleepOwning / runCombo 双保险）",
-                wn.contains("if (paused) return false;")
-                        && wn.contains("!limitOn || paused"));
+                        && wn.indexOf("if (pauseState.paused())", iSelCombo) > 0
+                        && wn.indexOf("pauseState.whilePaused(c.id, 0, 0L)", iSelCombo) > 0
+                        && wn.indexOf("if (pauseState.paused())", iSelCombo)
+                                < wn.indexOf("startComboLocked(c.copy())", iSelCombo));
+        int iAllowed = ps.indexOf("boolean comboAllowed(");
+        ck("G4 组合循环两处准入都走 comboAllowed（含 paused/key/limitOn）",
+                wn.contains("pauseState.comboAllowed(key, presetKey, limitOn)")
+                        && iAllowed > 0
+                        && ps.indexOf("!paused", iAllowed) > 0
+                        && ps.indexOf("limitOn", iAllowed) > 0
+                        && ps.indexOf("key.equals(presetKey)", iAllowed) > 0);
 
         // ---- E 总开关按钮的暂停态（真机反馈：状态卡已显示已暂停，红按钮却没变）----
         ck("E1 syncTestBtn 取 paused 分支",

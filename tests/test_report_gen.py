@@ -316,3 +316,251 @@ def test_default_filename_has_timestamp():
     from datetime import datetime
     name = R.default_filename(at=datetime(2026, 11, 19, 18, 40, 5))
     assert name == "WeakNet测试报告_20261119_184005.md"
+
+
+# ---------------------------------------------------------------- C4 回归
+
+def test_fault_counts_full_recovers_early_faults():
+    """前 240 条有故障、后 60 条只有连接事件：全量计数不能漏报早期故障。"""
+    full = ([{"type": "disconnect", "msg": "模拟断连：早期"} for _ in range(3)] +
+            [{"type": "connect", "msg": "建连"} for _ in range(240)])
+    recent = list(full[-60:])               # status_payload 给事件时间窗口的口径
+    recent.reverse()
+    p = base_payload(
+        limit_on=True,
+        profile={"name": "4G 弱网", "down_kbps": 8000},
+        events=recent,
+        fault_counts_full={"disconnect": 3, "dns": 2, "timeout": 0,
+                           "reject": 0, "flap": 1},
+        stats={"total": 20, "active": 0, "up": 100, "down": 200,
+               "bypass": 0, "uptime": 60})
+    counts = R.merge_fault_counts(p, R.summarize_events(p["events"]))
+    assert counts["disconnect"] == 3
+    assert counts["dns"] == 2 and counts["flap"] == 1
+    assert "模拟断连" in R.conclusion(p, counts)
+    lines = "\n".join(R.interpretation(p, counts))
+    assert "模拟断连×3" in lines and "DNS 故障×2" in lines
+    text = R.build(p, SPECS, NOTES, generated_at="t")
+    assert "| 模拟断连 | 3 |" in text       # 事件汇总也用全量故障计数
+
+
+def test_fault_counts_falls_back_when_field_missing():
+    """老版本 payload 没有 fault_counts_full：行为必须与改动前一致。"""
+    p = base_payload(events=[{"type": "dns", "msg": "模拟 DNS 故障"}])
+    counts = R.summarize_events(p["events"])
+    assert R.merge_fault_counts(p, counts) == counts
+    assert R.merge_fault_counts({}, counts) == counts
+
+
+def test_selection_prefix_is_not_a_tested_scene():
+    """API 未开限速时记「选择场景：X」，报告不能把它当成已落地场景。"""
+    assert R.scene_name("选择场景：4G LTE") == ""
+    assert R.scene_sequence([{"msg": "选择场景：4G LTE"}]) == []
+    text = R.build(base_payload(events=[{"type": "config", "msg": "选择场景：4G LTE"}]),
+                   SPECS, NOTES, generated_at="t")
+    assert "(仅直连，未施加弱网)" in text
+
+
+# ---------------------------------------------------------------- 脱敏（S2）
+
+def test_redact_masks_last_two_octets_and_keeps_prefix():
+    """保留前两段：还能看出网段/服务商，但还原不到具体主机。"""
+    assert R.redact_text("10.8.0.2 → 64.233.188.188:5228") == \
+        "10.8.x.x → 64.233.x.x:5228"
+
+
+def test_redact_does_not_touch_versions_or_times():
+    """误伤版本号/时间比不脱敏更糟——开发会以为报告被改坏了。"""
+    assert R.redact_text("v1.1.20 build 130 at 14:44:18") == "v1.1.20 build 130 at 14:44:18"
+
+
+def test_redact_handles_ipv6():
+    got = R.redact_text("隧道 [2001:db8::1]:443")
+    assert "2001:****" in got and "db8::1" not in got
+
+
+def test_build_redacts_by_default_and_marks_raw_when_off():
+    ev = [{"type": "connect", "msg": "建立隧道 64.233.188.188:443"}]
+    masked = R.build(base_payload(events=ev), SPECS, NOTES, generated_at="t")
+    assert "64.233.x.x" in masked and "64.233.188.188" not in masked
+    assert "报告已脱敏" in masked
+
+    raw = R.build(base_payload(events=ev), SPECS, NOTES,
+                  generated_at="t", redact=False)
+    assert "64.233.188.188" in raw
+    assert "未脱敏" in raw
+
+
+def test_redact_keeps_listen_and_loopback_addresses():
+    """0.0.0.0 / 127.0.0.1 不是隐私，掩码后反而像数据坏了。"""
+    assert R.redact_text("监听地址 0.0.0.0:8888 → 127.0.0.1:8899") == \
+        "监听地址 0.0.0.0:8888 → 127.0.0.1:8899"
+
+
+@pytest.mark.parametrize("raw, want", [
+    # 第三轮审查实测的两处绕过 + 版本号误伤
+    ("host 10.0.0.1.", "host 10.0.x.x."),
+    ("ip 1111:2222:3333:4444:5555:6666:7777:8888", "ip 1111:****"),
+    ("v 1.2.3.4", "v 1.2.3.4"),
+    # 正常地址 / 非地址串不得误伤
+    ("192.168.1.100", "192.168.x.x"),
+    ("127.0.0.1", "127.0.0.1"),
+    ("0.0.0.0", "0.0.0.0"),
+    ("14:44:18", "14:44:18"),
+    ("mirrors.tuna.tsinghua.edu.cn", "mirrors.tuna.tsinghua.edu.cn"),
+    ("v1.1.20 build 130 at 14:44:18", "v1.1.20 build 130 at 14:44:18"),
+    ("10.8.0.2 → 64.233.188.188:5228", "10.8.x.x → 64.233.x.x:5228"),
+])
+def test_redact_text_ten_reviewed_samples(raw, want):
+    """脱敏是外发报告的隐私红线：审查列出的 10 个样例逐个实测。"""
+    assert R.redact_text(raw) == want
+
+
+def test_redact_version_prefix_forms():
+    """版本前缀的三种写法都要原样保留，且不能顺手放过真实 IP。"""
+    assert R.redact_text("version 1.2.3.4") == "version 1.2.3.4"
+    assert R.redact_text("版本1.2.3.4") == "版本1.2.3.4"
+    assert R.redact_text("版本：1.2.3.4") == "版本：1.2.3.4"
+    assert R.redact_text("V1.2.3.4.") == "V1.2.3.4."
+    assert R.redact_text("v1.2.3.4.5") == "v1.2.3.4.5"  # 版本号占位保护，不被 IPv4 规则误伤
+
+
+# ---------------------------------------------------------------- 第四次审查回归
+
+@pytest.mark.parametrize("raw, want", [
+    ("10.0.0.1.2", "10.0.x.x.2"),              # 五段数字串：前四段必须脱敏
+    ("10.0.0.1.5.6", "10.0.x.x.5.6"),          # 六段数字串：同样不能整串漏过
+    ("host 10.0.0.1.", "host 10.0.x.x."),      # 句尾句号不是 IP 的一部分
+    ("192.168.1.100", "192.168.x.x"),          # 正常 IP 口径不变
+    ("v 1.2.3.4", "v 1.2.3.4"),                # 版本号不受影响
+    ("version 1.2.3.4.5.6", "version 1.2.3.4.5.6"),
+])
+def test_redact_long_number_chains_without_leaking_host(raw, want):
+    assert R.redact_text(raw) == want
+
+
+def test_redact_literal_sentinel_is_not_restored():
+    """原文自带旧哨兵串时不得被误当成占位符改写（随机 token 消除碰撞）。"""
+    raw = "v 1.2.3.4 \x00VER_0\x00"
+    assert R.redact_text(raw) == raw
+    raw2 = "v 1.2.3.4 \x00VER_0\x00 version 5.6.7.8 \x00VER_1\x00"
+    assert R.redact_text(raw2) == raw2
+
+
+def test_full_fault_counts_replace_all_types_not_only_five():
+    """全量快照整体覆盖最近 60 条：connect/config/error 也用全量值（对齐 Android）。"""
+    p = base_payload(
+        events=([{"type": "connect"} for _ in range(4)] +
+                [{"type": "config"}]),
+        fault_counts_full={
+            "connect": 41, "config": 7, "error": 2,
+            "disconnect": 3, "dns": 1, "timeout": 0, "reject": 2, "flap": 0,
+        })
+    counts = R.merge_fault_counts(p, R.summarize_events(p["events"]))
+    assert counts == {"connect": 41, "config": 7, "error": 2,
+                      "disconnect": 3, "dns": 1, "timeout": 0,
+                      "reject": 2, "flap": 0}
+    text = R.build(p, SPECS, NOTES, generated_at="t")
+    assert "| 建连 | 41 |" in text
+    assert "| 配置变更 | 7 |" in text
+    assert "| 错误 | 2 |" in text
+    assert "| 模拟断连 | 3 |" in text
+    assert "| 建连 | 4 |" not in text
+
+
+# ---------------------------------------------------------------- 第五次审查回归（N1）
+
+@pytest.mark.parametrize("raw, want", [
+    # 版本前缀紧贴真实 IP：一律脱敏，不能因「前缀保护」整串放过
+    ("v 10.0.0.1", "v 10.0.x.x"),
+    ("V 10.0.0.1", "V 10.0.x.x"),
+    ("version 10.0.0.1", "version 10.0.x.x"),
+    ("版本 10.0.0.1", "版本 10.0.x.x"),
+    ("版本：10.0.0.1", "版本：10.0.x.x"),
+    ("v 192.168.1.100", "v 192.168.x.x"),
+    ("version 172.16.0.1", "version 172.16.x.x"),
+    ("version 10.0.0.1.2", "version 10.0.x.x.2"),  # 五段串也要脱敏前四段
+    # 首段 1~9 的小数字是版本号，不是主机地址：原样保留
+    ("v 1.2.3.4", "v 1.2.3.4"),
+    ("v1.2.3.4", "v1.2.3.4"),
+    ("version 2.3.4.5", "version 2.3.4.5"),
+    ("V1.2.3.4.", "V1.2.3.4."),
+    ("v1.1.20", "v1.1.20"),                       # 三段版本号
+    # 非合法 IP 形态（五段 / 某段 >255）占位保护，不产出半截掩码
+    ("v 10.0.0.1234", "v 10.0.0.1234"),
+    ("version 65535.65535.65535.65535", "version 65535.65535.65535.65535"),
+    # host. 点号紧贴：后顾只排数字，点号不能挡住 IP
+    ("host.10.0.0.1", "host.10.0.x.x"),
+    ("host.10.0.0.1.", "host.10.0.x.x."),
+    # 长数字串 / 尾随句点 / 正常地址 / 监听 / 回环 / 全数字 IPv6 / 时间
+    ("10.0.0.1.2", "10.0.x.x.2"),
+    ("1.2.3.4.5", "1.2.x.x.5"),
+    ("10.0.0.1", "10.0.x.x"),
+    ("host 10.0.0.1.", "host 10.0.x.x."),
+    ("0.0.0.0", "0.0.0.0"),
+    ("127.0.0.1", "127.0.0.1"),
+    ("监听地址 0.0.0.0:8888 → 127.0.0.1:8899",
+     "监听地址 0.0.0.0:8888 → 127.0.0.1:8899"),
+    ("ip 1111:2222:3333:4444:5555:6666:7777:8888", "ip 1111:****"),
+    ("14:44:18", "14:44:18"),
+])
+def test_redact_n1_version_prefix_does_not_leak_real_ip(raw, want):
+    assert R.redact_text(raw) == want
+
+
+def test_redact_n1_leak_samples_never_contain_full_host():
+    """隐私断言独立于掩码格式：完整末两段不得出现在外发文本里。"""
+    for raw in ("v 10.0.0.1", "V 10.0.0.1", "version 10.0.0.1.2",
+                "版本 10.0.0.1", "v 192.168.1.100", "version 172.16.0.1",
+                "host.10.0.0.1", "host 10.0.0.1."):
+        out = R.redact_text(raw)
+        assert ".0.1" not in out and ".1.100" not in out and ".0.0.1" not in out, (raw, out)
+
+
+def test_redact_n1_sentinel_with_real_ip_prefix():
+    """原文自带旧哨兵串时既要防碰撞，也不能顺手放过前缀后面的真实 IP。"""
+    raw = "v 10.0.0.1 \x00VER_0\x00"
+    assert R.redact_text(raw) == "v 10.0.x.x \x00VER_0\x00"
+
+
+# ---------------------------------------------------------------- 事件汇总过滤
+
+ALL_TYPES = ("disconnect", "dns", "timeout", "reject", "flap",
+             "config", "connect", "error", "idle", "share")
+
+
+def _summary_section(text):
+    return text.split("## 事件汇总", 1)[1].split("\n## ", 1)[0]
+
+
+def test_empty_run_summary_has_no_zero_rows():
+    """引擎给的是稠密快照（10 类全 0），报告不能把十行 0 值印出来。"""
+    p = base_payload(fault_counts_full=dict.fromkeys(ALL_TYPES, 0))
+    text = R.build(p, SPECS, NOTES, generated_at="t")
+    section = _summary_section(text)
+    assert "本次运行没有记录到事件" in section
+    assert "| 0 |" not in section
+
+
+def test_summary_only_lists_types_that_happened():
+    full = dict.fromkeys(ALL_TYPES, 0)
+    full["disconnect"] = 3
+    p = base_payload(fault_counts_full=full)
+    section = _summary_section(R.build(p, SPECS, NOTES, generated_at="t"))
+    assert "| 模拟断连 | 3 |" in section
+    assert "DNS 故障" not in section
+    assert "| 0 |" not in section
+
+
+# ---------------------------------------------------------------- 全角脱敏
+
+def test_redact_fullwidth_period_and_digits():
+    """全角句点 / 全角数字写法的地址也必须脱敏（实测曾原样外发）。"""
+    assert R.redact_text("host 10．0．0．1") == "host 10.0.x.x"
+    assert R.redact_text("host １０．０．０．１") == "host 10.0.x.x"
+    assert R.redact_text("host １０.0．0.1:8080") == "host 10.0.x.x:8080"
+
+
+def test_redact_fullwidth_normal_text_untouched():
+    assert R.redact_text("正常文本，没有地址") == "正常文本，没有地址"
+    assert R.redact_text("v1.2.3.4 与 14:44:18") == "v1.2.3.4 与 14:44:18"

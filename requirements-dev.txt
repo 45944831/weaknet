@@ -1,0 +1,7 @@
+# 开发/CI 依赖（运行时零第三方依赖，这份文件只服务于测试与静态检查）
+#
+# 本地装：py -3 -m pip install -r requirements-dev.txt
+# 国内网络可用镜像：-i https://pypi.tuna.tsinghua.edu.cn/simple
+pytest>=8,<9
+pytest-cov>=5
+ruff>=0.6

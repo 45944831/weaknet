@@ -15,7 +15,7 @@
 # 结果是工作流全绿却永远返回 different-machine。这一步用**真实基线文件**
 # 注入 -50% 退化，断言判定为 fail；门禁形同虚设时会直接让本步骤失败。
 #
-# 2026-11-13 补齐（P2-4 剩余两项）：
+# 2026-11-13 补齐（剩余两项）：
 #   * PR 只跑快速子集（单个带宽指标、3 次重复），不拦合并；
 #   * 基线 JSON 随 Release 归档（挂到 Release 附件 + workflow artifact）。
 name: perf
@@ -30,16 +30,105 @@ on:
   workflow_dispatch:
   schedule:
     - cron: "0 18 * * *"        # UTC 18:00 = 北京时间 02:00
+  # 不再按 paths 过滤：GUI 面板（gui_*.py）、report_gen.py、usb_phone.py、
+  # android/src/**、spec/spec.json 等改动同样可能让性能/功能回归失效；
+  # 路径清单会随代码布局漂移，漏一项就等于门禁被悄悄绕过。
+  # PR  job 本身是快速子集且 continue-on-error，多跑几次的成本可接受。
   pull_request:
-    paths:
-      - "weaknet.py"
-      - "tests/**"
-      - "tests/perf/**"
-      - ".github/workflows/perf.yml"
   release:
     types: [published]
 
 jobs:
+  # ---- 静态检查 + Java 纯 JDK 套件 ----
+  # 这两项过去只靠本机记得跑：ruff 是 2026-11-26 审查后新增的门禁，
+  # Java 20 套单测则一直停留在 android/_jw/run.sh。放进 CI 的成本很低
+  # （无设备、无模拟器），却能拦住「改了 Android 侧忘了跑测试」。
+  lint-and-java:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      # _jw/run.sh 找不到 android.jar 会 exit 2（见脚本头部定位逻辑）。
+      # 过去这个 job 只装 JDK 17、不装 SDK，仓库又 .gitignore 了 android/sdk/，
+      # 于是 Java job 必然失败、PR 一直红 —— 「Java 单测进 CI」实际从未跑过。
+      - name: 安装 Android SDK（platform 34，供 android.jar）
+        uses: android-actions/setup-android@v3
+
+      - name: 安装 Android platform 34
+        run: sdkmanager "platforms;android-34"
+
+      - name: 安装 ruff
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements-dev.txt
+
+      - name: 静态检查（ruff E/F）
+        run: python -m ruff check .
+
+      - name: 版本 / 规格与 Windows API 契约一致性（_t_* 脚本不由 pytest 收集）
+        # pytest.ini 的 python_files = test_*.py 不会收集 tests/_t_version.py、
+        # _t_spec_parity.py、_t_api_parity.py；不显式跑的话 README 的「16/16」
+        # 只是本机手工快照，改坏版本号/契约 CI 也不报错。
+        # 注意：_t_api_parity.py 不带 --android 时只跑 Windows 侧（COMMON + WIN_ONLY），
+        # Android-only 6 项需真机本地验证，CI 不覆盖；_t_spec_parity.py 是源码级
+        # 跨端规格 / 算法常量比对，不需要设备。
+        run: |
+          python tests/_t_version.py
+          python tests/_t_spec_parity.py
+          python tests/_t_api_parity.py
+
+      - name: Java 纯 JDK 单测
+        # setup-android@v3 已导出 ANDROID_HOME / ANDROID_SDK_ROOT，run.sh 直接读即可
+        run: |
+          cd android
+          bash _jw/run.sh
+
+  # ---- Python 3.8 语法兼容（README 声明 3.8+，但所有 job 都跑 3.10）----
+  # 只校验语法：feature_version 不管「3.9 才有的 API」（如 dict | dict、
+  # str.removeprefix），那类问题要靠真跑 3.8 才能发现，成本高、先不做。
+  # 拦住的是 3.10+ 才合法的语法（match、括号化上下文管理器等）被悄悄写进来。
+  py38-syntax:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: 全仓 *.py 语法兼容 3.8
+        shell: bash
+        run: |
+          python - <<'PY'
+          import ast, pathlib
+          # 构建中间产物 / 归档 / 本地 SDK 不参与（体积大且不是仓库源码）
+          SKIP = ("_build", "_archive", "_tmp", "_joblog_extract",
+                  "android/sdk", "__pycache__", ".git/", "site-packages")
+          bad = []
+          for p in pathlib.Path(".").rglob("*.py"):
+              s = p.as_posix()
+              if any(k in s for k in SKIP):
+                  continue
+              try:
+                  ast.parse(p.read_text(encoding="utf-8"), filename=s,
+                            feature_version=(3, 8))
+              except (SyntaxError, UnicodeDecodeError) as e:
+                  bad.append("%s: %s" % (s, e))
+          print("\n".join(bad) if bad else "Python 3.8 语法校验通过")
+          raise SystemExit(1 if bad else 0)
+          PY
+
   # ---- PR 快速子集：只跑一项、只跑 3 次，标红但不拦合并 ----
   perf-quick:
     if: github.event_name == 'pull_request'
@@ -56,10 +145,12 @@ jobs:
       - name: 安装依赖
         run: |
           python -m pip install --upgrade pip
-          python -m pip install pytest
+          python -m pip install -r requirements-dev.txt
 
-      - name: 功能回归（不含性能）
-        run: python -m pytest -q
+      - name: 功能回归 + 覆盖率（仅报告，不设门槛）
+        # 先只把数字亮出来：没有基线时设 --cov-fail-under 只会逼大家
+        # 「把门槛调低」，反而失去意义。稳定几版后再收紧。
+        run: python -m pytest -q --cov=. --cov-report=term-missing
 
       - name: 性能快速子集（单项 × 3 次，仅提示）
         env:
@@ -85,7 +176,7 @@ jobs:
       - name: 安装依赖
         run: |
           python -m pip install --upgrade pip
-          python -m pip install pytest
+          python -m pip install -r requirements-dev.txt
 
       - name: 功能回归（不含性能）
         run: python -m pytest -q
@@ -95,7 +186,10 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ${{ runner.temp }}/weaknet-perf-baseline.json
-          key: weaknet-perf-${{ runner.os }}-py310-v2
+          # key 里的 v3 对应「基线含 version/build/spec_hash 的陈旧检测」：
+          # 旧缓存是 build 126 时代生成的，continue 复用只会一直 stale-baseline。
+          # 版本或 spec 变更后，改这里的 vN 即可强制重刷（首次运行会重新生成）。
+          key: weaknet-perf-${{ runner.os }}-py310-v3
 
       # 缓存未命中时生成基线。此时 load() 返回空基线（no-baseline，不判定），
       # 跑完后由 tests/test_perf.py 的 session fixture 用 WN_PERF_UPDATE_BASELINE=1 落盘。
@@ -109,15 +203,20 @@ jobs:
         run: python -m pytest -m perf -q
 
       - name: 门禁自检（注入退化必须判 fail）
+        # 两条 python -c 里带中文打印，powershell 默认编码下可能乱码/编码失败；
+        # 显式 bash 与本文件末尾 Release 归档步骤保持一致。
+        shell: bash
         env:
           WN_PERF_CI: "1"
           WN_PERF_BASELINE: ${{ runner.temp }}/weaknet-perf-baseline.json
         run: |
-          python -c "import sys; sys.path.insert(0,'tests'); from perf import baseline as B; d=B.load(); m=d['metrics']['bw_8000_kbps']['median']; r=B.compare('bw_8000_kbps', m*0.5); print('注入 -50%:', r['level'], r['msg']); sys.exit(0 if r['level']=='fail' else 1)"
-          # 方案 §4 P0-4 的验收原文是「故意注入 10% 退化能被检出，正常波动不误报」：
+          # 自检只验阈值判定，故先摘掉 version/build/spec_hash：否则基线一旦
+          # 与当前构建不同代，compare() 会返回 stale-baseline 让本步骤误红。
+          python -c "import sys; sys.path.insert(0,'tests'); from perf import baseline as B; d=B.load(); [d.pop(k,None) for k in ('version','build','spec_hash')]; m=d['metrics']['bw_8000_kbps']['median']; r=B.compare('bw_8000_kbps', m*0.5, base=d); print('注入 -50%:', r['level'], r['msg']); sys.exit(0 if r['level']=='fail' else 1)"
+          # 验收原文是「故意注入 10% 退化能被检出，正常波动不误报」：
           # -10% 落在 warn(5%)~fail(15%) 区间，必须被判为「有变化」而不是 ok；
           # -50% 必须升级成 fail。两档都过，门禁才算真的开着。
-          python -c "import sys; sys.path.insert(0,'tests'); from perf import baseline as B; d=B.load(); m=d['metrics']['bw_8000_kbps']['median']; r=B.compare('bw_8000_kbps', m*0.9); print('注入 -10%:', r['level'], r['msg']); sys.exit(0 if r['level'] in ('warn','fail') else 1)"
+          python -c "import sys; sys.path.insert(0,'tests'); from perf import baseline as B; d=B.load(); [d.pop(k,None) for k in ('version','build','spec_hash')]; m=d['metrics']['bw_8000_kbps']['median']; r=B.compare('bw_8000_kbps', m*0.9, base=d); print('注入 -10%:', r['level'], r['msg']); sys.exit(0 if r['level'] in ('warn','fail') else 1)"
 
       - name: 性能门禁（相对 runner 基线）
         env:
@@ -143,7 +242,7 @@ jobs:
       - name: 安装依赖
         run: |
           python -m pip install --upgrade pip
-          python -m pip install pytest
+          python -m pip install -r requirements-dev.txt
 
       - name: 生成 Release 基线（7 次 × 4 项）
         env:

@@ -2,10 +2,294 @@
 
 各版本的实测结果与已修缺陷。当前版本 v1.1.20 的汇总在最前面，更早的记录按时间倒序排列。
 
+## v1.1.20 后续（第七轮）· 2026-11-27 第六次从零审查修复（未发版）
+
+对「第六次从零审查」发现的 21 项问题（高 4 / 中 9 / 低 8）全量修复。
+**用户红线不变：弱网开启不加访问码 / 鉴权 / token，不增加任何测试门槛**。仍沿用 v1.1.20 / 130。
+
+### 高危 4 项
+
+- **H1 代理回环绕过**：新增 `_target_forbidden` / `_proxy_target_blocked`，CONNECT 与普通 HTTP 分支
+  拒绝回环目标（localhost / 127.* / ::1 / 0.0.0.0 / ::）与控制口/共享口（8899/8900）。运行时仅在
+  代理绑非回环地址（`--proxy-host 0.0.0.0`）时拦回环目标，绑 127.0.0.1 时保留「用弱网测本机服务」
+  的常用路径——攻击面（局域网可达）已封，且未加任何鉴权。
+- **H2 打包命令**：README / docs/build.md 的 PyInstaller 命令补 `--add-data "spec/spec.json;spec"`，
+  并注明正式发版走 `_build_gui/WeakNet.spec`（已断言收集 spec.json）。按文档打包不再启动即崩。
+- **H3 组合暂停恢复**：`PauseState.remainWait(remain, full)` 统一「剩余」语义；`runCombo` 的
+  `waitMs = remainWait(remain, full)`；段尾暂停（remain=0）直接跳到下一段，不重等整段。
+  `_PauseResumeTest` 删除影子 `PauseMark/remainMs`，改为直调生产纯函数并断言 12s→18s、29s→1s。
+- **H4 性能基线**：`baseline.compare()` 新增 `stale_fields()` 校验 version/build/spec_hash，不一致
+  返回 `stale-baseline`（不参与 ok/fail），提示用 `WN_PERF_UPDATE_BASELINE=1` 重刷；补 3 条单测。
+
+### 中危 9 项
+
+- **M1 Android 报告脱敏**：`ReportGen.redactText()` 在 `build()` 末尾统一脱敏（IPv4 前两段、
+  IPv6 首组、版本号豁免、回环/监听保留、全角归一），补 11 组 Java 单测。
+- **M2 `/api/stop` CSRF**：GET 写操作若带 `Sec-Fetch-Site` 且非 `none` 返回 403；curl/adb 无该头照常。
+- **M3 `/api/profile` 语义**：Android 仅在 `/api/profile` 分支按 `hasLimits` 落 `limitOn`，与 Windows
+  对齐；`setProfile` / `selectScene` 仍保持「选中不生效」。
+- **M4 `has_limits`**：Python 排除 `stall_ms` / `flap_blackout_sec`，与 Java 一致。
+- **M5 事件汇总 0 值**：`report_gen.build` 只渲染 `c > 0`，空运行输出「本次运行没有记录到事件。」
+- **M6 `stats.active`**：`TcpSession` / `UdpSession` 构造/close 成对增减 `connActive`（幂等），
+  VPN 模式活跃连接不再恒 0。
+- **M7 读头上限**：代理读头复用 16KB/100 行上限，超限回 431 并记日志。
+- **M8 VPN 线程池**：`newCachedThreadPool` 改固定 32 + 有界队列 256 + AbortPolicy，拒绝时 RST 并记日志。
+- **M9 系统代理残留**：启动时 `release_stale_sysproxy()` 检测本端口残留并还原（非 Windows 跳过）。
+
+### 低危 8 项
+
+工单编号残留（weaknet.py 18 处 / Manifest / _FloatSettingsTest）改自解释；主转发路径异常加日志；
+控制口抽 `_json_ok/_json_err/_parse_json` 助手（语义逐字节不变）；默认端口提常量；脱敏全角句点/数字
+归一；README 口径（26 套件、gui_text 仅 import font、删不存在的 test_drain_ab 引用、产物由本机构建）；
+`requirements.txt` 去 pytest（CI 读 dev 文件）；CI 新增 Python 3.8 语法校验 job。
+
+### 验证
+
+- Python `py -m pytest`：**402 passed / 18 deselected**；版本一致性 **16/16**（含 EXE/APK 产物新鲜度
+  C5/C6）；API 契约 **12/12**；规格契约 **23/23**；Java 纯 JDK **26 套件全过**。
+- 实测：`_target_forbidden` 10 组（回环/控制口拒、正常域名放行）；`has_limits` stall/flap 单独设不开启；
+  全角 `10．0．0．1` → `10.0.x.x`；空 payload 事件汇总无 0 行；脱敏 12 组绕过尝试全拦（五段数字、
+  `v 10.0.0.1`、`host.10.0.0.1`、全角数字）。
+- 重打产物（本地，未上传 Release）：EXE 10,883,116 B /
+  `9229043b12d93705675a1634c1985acaf0e26620ba3d35be9faefbe931dd5511`；
+  APK 230,436 B / `2a9901b698aebf8634e2f2417d7637d07c558bf4d7e088d9e4ef0df9c874720e`
+  （内容指纹 `9631320e297dbe013b4478278cd19252a62389a50e73d26ebe7b0c108b45f98a`）。
+  APK 的 SHA-256 随签名块时间戳变化，对外核对以内容指纹为准。
+  文档中的发布指纹仍指向 Releases 现有资产，待正式发版时再统一更新。
+
+## v1.1.20 后续（第六轮）· 2026-11-27 第五次审查补充修复（未发版）
+
+对「第五次审查」新发现的 7 项问题（中危 1 / 低危 6）全量修复。
+**用户红线不变：弱网开启不加访问码 / 鉴权 / token，不增加任何测试门槛**。仍沿用 v1.1.20 / 130。
+
+### 修复清单
+
+- **中危 N1（隐私红线）**：版本前缀紧贴真实 IP 被当版本号放过（`v 10.0.0.1` 完整外发）。
+  `_hold_version` 增加 `_looks_like_host_ip` 判定（四段各 0-255、首段为私网/回环/公网段），疑似 IP
+  不占位、直接交给 `_IPV4_RE` 脱敏；`_IPV4_RE` 后顾改 `(?<!\d)`，修 `host.10.0.0.1` 点号紧贴绕过。
+  真版本号 `v 1.2.3.4` / `v1.1.20` 仍原样保留。补 27 条单测。
+- **低危 N2**：Java 端 CAVEATS 第 4 条补齐"故障计数取全量缓冲（fault_counts_full）"，双端口径说明逐字一致。
+- **低危 N3**：Android `conclusion`/`interpretation` 的故障判定由 `containsKey` 改真值 `v > 0`，
+  防 0 值键误报"注入了故障"。
+- **低危 L1 续**：README 与 tools/perf_* 的 12 处工单编号改自解释描述，全仓源码零残留。
+- **低危 git 暂存**：全部改动（含新测试、text_layout.py、LICENSE、docs/testing.md）`git add -A`，
+  消除"部分暂存 + 关键新文件未跟踪"，无未跟踪文件残留。
+- **低危 CI**：ruff 安装改读 `requirements-dev.txt`，与其余 job 依赖口径一致。
+- **低危文档**：docs/testing.md Java 套件数据实际 26 套修正。
+
+### 验证
+
+- Python `py -m pytest`：**366 passed / 18 deselected**；版本一致性 **16/16**；API 契约 **12/12**；
+  Java 纯 JDK 套件全过。
+- 隐私脱敏实测：`v 10.0.0.1→v 10.0.x.x`、`version 10.0.0.1.2→version 10.0.x.x.2`、
+  `V 192.168.1.100→V 192.168.x.x`、`版本 172.16.0.1→版本 172.16.x.x`、`host.10.0.0.1→host.10.0.x.x`、
+  `10.0.0.1.2→10.0.x.x.2`；真版本号 `v 1.2.3.4`、`version 2.3.4.5` 与原文哨兵串原样保留。
+  说明：首段 1~9 的地址（如 `v 8.8.8.8`）按版本号放过——该段多为知名公共服务无隐私画像，
+  扩展会误伤四段式版本号，故保留此权衡。
+- 重打产物（本地，未上传 Release）：EXE 10,880,570 B /
+  `f64f3a2998014771fbdbb338a42c1a142e4e6e506c479728af8e2d2f618b574b`；
+  APK 226,340 B / `1ec35c43bef5f660bc99e7871ff7455c57c1190244da70469496a3c1cfa09fdc`
+  （内容指纹 `d354eecdb437c1025990acb542c22d34198f7ab8743c290865c575dc700b8295`）。
+  文档中的发布指纹仍指向 Releases 现有资产，待正式发版时再统一更新。
+
+## v1.1.20 后续（第五轮）· 2026-11-27 第四次独立审查修复（未发版）
+
+对「第四次独立审查」发现的 8 项问题（中危 3 / 低危 5）全量修复。
+**用户红线不变：弱网开启不加访问码 / 鉴权 / token，不增加任何测试门槛**。仍沿用 v1.1.20 / 130。
+
+### 修复清单
+
+- **中危 M1**：`run_tunnel` 的失败判定改为直接调用纯函数 `task_failed(t)`，消除"测试测影子实现"——
+  日后改内联逻辑会同步触发回归；新增 monkeypatch spy 断言生产路径确实调用它。
+- **中危 M2**：`report_gen._IPV4_RE` 去掉 `(?!\.\d)` 仅留 `(?!\d)`，修五段数字串完整泄露；
+  实测 `10.0.0.1.2 → 10.0.x.x.2`、句尾 IP 与正常 IP 仍正确，长数字 `10.0.0.1234` 不被拆。
+- **中危 M3**：CI 引用的 `ruff.toml` / `requirements.txt` / `requirements-dev.txt` / `docs/testing.md`
+  已加入 git 暂存（`git add`，未 commit），避免 push 后 CI 因缺文件失败。
+- **低危 L1**：GUI / tools / weaknet_gui 里 17 处审查工单编号改自解释描述。
+- **低危 L2**：3 个新单测补 `pytestmark = pytest.mark.unit`，`pytest -m unit` 不再漏跑。
+- **低危 L3**：Python `merge_fault_counts` 改为用全量 `fault_counts_full` 整体覆盖，与 Android
+  `summarizeEvents` 对齐；connect/config/error 也取全量值。
+- **低危 L4**：版本占位哨兵改每次调用随机前缀（uuid4）+ 正则单遍还原，消除固定哨兵碰撞与 O(n·m)。
+- **低危 L5**：`tmp_store` 进入与 finally 中一并复位 `share_fail`。
+
+### 验证
+
+- Python `py -m pytest`：**338 passed / 18 deselected**；版本一致性 **16/16**；API 契约 **12/12**；
+  Java 纯 JDK 套件全过。
+- 脱敏边界实测：`10.0.0.1.2→10.0.x.x.2`、`10.0.0.1.5.6→10.0.x.x.5.6`、`host 10.0.0.1.→host 10.0.x.x.`、
+  `192.168.1.100→192.168.x.x`、`v 1.2.3.4` 与原文哨兵串原样保留。
+- 重打产物（本地，未上传 Release）：EXE 10,880,272 B /
+  `e81de2629357f254005c62a3a82419553e4b95e55d906dc1225a5f943f35791a`；
+  APK 226,340 B / `5d9007a9514acfaa1b3f0db797248c56bdaffd7aa0e9c99c31ee2e3440312b60`
+  （内容指纹 `cf0722ecf4f8f62400ef7df33baa9a2b39e7f9cd13368f0967f85abed2605cff`，与上一轮相同——
+  本轮 Android 端未改代码，仅重打更新时间戳）。
+  文档中的发布指纹仍指向 Releases 现有资产，待正式发版时再统一更新。
+
+## v1.1.20 后续（第四轮）· 2026-11-27 第三次从零审查修复（未发版）
+
+对「第三次从零审查」发现的 13 项问题（P1×3 / P2×4 / P3×5 + 1 项合并）全量修复。
+**用户红线不变：弱网开启不加访问码 / 鉴权 / token，不增加任何测试门槛**。仍沿用 v1.1.20 / 130。
+
+### 修复清单
+
+- **P1-1 正确性**：`run_tunnel` 的 hard_stop 判定改用 `Task.exception()` 返回值（抽出纯函数
+  `task_failed(t)`，先判 `cancelled()`）。旧逻辑把「pipe 抛 Abort/ConnectionError」误当正常 EOF，
+  挂起 keep-alive 客户端要多活 60–120s；现在异常立即 hard_stop，且不对已 abort 的 writer 做无效
+  `write_eof()`。新增 `tests/test_unit_tunnel_hard_stop.py` 覆盖异常/正常/取消三态与隧道集成路径。
+- **P1-2 安全（脱敏）**：`report_gen.redact_text` 修两处绕过——IPv4 负向前瞻改 `(?!\d)(?!\.\d)`，
+  句尾 IP（`host 10.0.0.1.`）不再原样外发；全 8 组纯数字 IPv6 不再被保守跳过。新增
+  `_VERSION_TOKEN_RE` 占位保护 `v/version/版本` 前缀版本号，消除 `v 1.2.3.4` 误脱敏。
+- **P1-3 CI 门禁名副其实**：CI 步骤更名「版本 / 规格与 Windows API 契约一致性」，不再宣称双端；
+  README / docs/testing.md 明确 Android-only 6 项需真机 `--android` + adb forward 本地验证。
+- **P2-1 安全**：`update_check.safe_page_url` 拒 userinfo（`https://user@github.com/`）、空主机与
+  畸形端口，与 Android `SafePageUrl` 行为对齐。
+- **P2-2/4 可测试性**：`tmp_store` 进出统一复位 `share_pin`/`allow_legacy`，用例改用 `monkeypatch`；
+  `_t_api_parity.py` 加入 golden SCRIPTS，默认 pytest 覆盖 Windows 契约。
+- **P2-3 / P3 文档与规范**：`docs/build.md` 唯一真源措辞与 README 同步；docstring 如实描述、
+  审查工单编号改自解释描述；re-export 完整性加 `hasattr` 单测；两套字节格式化经比对确有输出差异
+  （GUI KB 取整 / 报告 KB 一位、MB 两位），保留并加注释说明，**未强行合并**以免破坏 GUI 显示。
+
+### 验证
+
+- Python `py -m pytest`：**328 passed / 1 skipped / 18 deselected**；`tests/_t_api_parity.py` 12 通过 0 失败。
+- Java 纯 JDK 套件全过（Android 端本轮未改代码）。版本一致性 `tests/_t_version.py` **16/16**。
+- 脱敏 10 组实测：尾随句点 IP、全数字 IPv6、版本号、正常 IP、回环、监听地址、时间、域名、
+  版本串、多 IP 均符合预期。
+- 重打产物（本地，未上传 Release）：EXE 10,879,165 B /
+  `3ea29024e895195aa861dcc8e94b8e6e82d35e31fa5453f1903e8d5583353c12`；
+  APK 226,340 B / `e98c6a9a2d78c40aebfeed6930ffed51868458bb365f1bcbbffac91a8c0a2200`
+  （内容指纹 `cf0722ecf4f8f62400ef7df33baa9a2b39e7f9cd13368f0967f85abed2605cff`）。
+  文档中的发布指纹仍指向 Releases 现有资产，待正式发版时再统一更新。
+
+## v1.1.20 后续（第三轮）· 2026-11-26 二次审查残留修复（未发版）
+
+对「二次审查」发现的 17 项问题再次全量修复。**用户红线：本项目是弱网测试工具，弱网开启不加访问码 /
+鉴权 / token，不增加任何测试门槛**；安全修复只在「不增加用户门槛」前提下进行。仍沿用 v1.1.20 / 130。
+
+### 修复清单
+
+- **安全**：S1 Android 控制口删掉 `Origin: null` 放行，对齐 Windows `ctrl_host_ok`——任何非空 Origin
+  一律拒绝；无 Origin 的 curl/adb 照常通行，**不加 token、不要求 Content-Type**（不增加门槛）。
+  S2 新增纯 JDK `SafePageUrl`，更新页 `html_url` 只允许 https + `github.com`/`www.github.com` + 443，
+  非法回退 `PAGE_LATEST`。S3 拒绝请求的日志只记脱敏摘要，不写原始 Host/Origin。
+- **正确性**：C1 `set_profile` 把代数检查提到 `flap_task=None` 之前，堵住双 flap 竞态；
+  C2 `ConnCtx` 出生即标记 `bypass_pending`，flap 跳过未判定连接，堵住 await 窗口误掐直通；
+  C2-Android `selectScene` 不再写 `lastProfile`（只由 `setProfile` 真正落地时写），报告不再谎报测过；
+  C4 双端 `fault_counts_full` 统一为全类型全量统计；C5 暂停中切场景记「选择场景：」而非「切换场景：」；
+  C6 `/api/preset` 单场景返回 `applied` 字段，与 combo 语义对齐。
+- **性能**：P1 Android 控制池/推送池拒绝策略由 CallerRuns 改为直接回 503，避免 accept 线程停摆；
+  P2 VPN 会话表 `clear`/遍历/`remove` 统一加同步块，cleanup 双重代次校验，堵住 CME 窗口。
+- **可维护性/依赖**：README 目录树补全 4 项新增文件；`requirements.txt` 与 `requirements-dev.txt`
+  的 pytest 约束统一为 `>=8,<9`，CI 三个 pytest job 改读 `requirements-dev.txt`；
+  测试脚本与文档中的真实内网 IP / 设备型号脱敏为占位符。
+
+**按用户红线保留现状**（不加门槛优先于这些安全加固）：局域网共享 `allow_legacy` 旧版降级仍为显式开关、
+PIN 仍随 UDP 广播下发（去掉需用户手动录入，增加门槛）——风险已在二次审查报告记录，不改。
+
+### 验证
+
+- Python `py -m pytest -q` 全绿；`py -c "import weaknet, report_gen"` 通过。
+- Java 纯 JDK 套件 **25 套 / 429 断言全过**（新增 `_SafePageUrlTest`），`_CtrlHostCheckTest` 的
+  `Origin: null` 断言已改为「拒绝」。
+- 版本一致性 `tests/_t_version.py` **16/16**（C5/C6 产物新鲜度通过）。
+- 当时的重打产物（本地，未上传 Release）：EXE 10,877,977 B /
+  `537d9608c40bad1d21dca95bcfeff63db94d921afa9b5d1676a4956e2863d0c8`；
+  APK 226,340 B / `7e3709c88d4c4a0cf6ffd03b618c2ffc74bd46b9e9640e4f270c48307d6d8351`
+  （内容指纹 `b8a8131ddcfeab52f726d76789e1e056ee4d65d7484890baaa2d3a17b4709929`）。
+  **此为本轮历史值**；因后续第四轮改动又重打过，磁盘当前产物指纹见上一节。
+  文档中的发布指纹仍指向 Releases 现有资产，待正式发版时再统一更新。
+
+## v1.1.20 后续（第二轮）· 2026-11-26 二次审查问题全量修复（未发版）
+
+上一节修完 25 项后，又按同样的六个维度做了一轮独立审查，新增 2 项 P1、
+7 项 P2、4 项 P3。本节记录修复结果。仍沿用 v1.1.20 / build 130，**未发版**。
+
+### P1（安全，2 项）
+
+| 编号 | 问题 | 修复 |
+|---|---|---|
+| S1 | Windows 局域网代理绑定 `0.0.0.0` 后无鉴权、无提示，等于开放代理 | **已评估并撤销鉴权方案**：Android 原生 Wi-Fi 代理设置只有主机名 / 端口 / 绕过列表，没有凭据输入口，任何 `Proxy-Authorization` 都会让「手机 Wi-Fi 直连」这条主路径返回 407、客户端侧无法补救。改为：开启前二次确认并明确提示「同网段设备可访问」，顶栏常驻显示地址；不做代理层鉴权，把是否开启的决定权交给用户（仅建议在可信任网络使用）。Python 与 Android 两端的 token 生成、407 校验、`/api/listen` 的 `require_token` 已全部移除 |
+| S2 | 导出报告含完整对端 IP，无脱敏开关 | `report_gen.build(redact=True)` 默认脱敏：IPv4 保留前两段（`64.233.x.x`）、IPv6 保留首组；版本号/时间不误伤。GUI 导出前询问一次，报告「口径说明」显式标注脱敏状态；选「否」时标注「未脱敏，仅限内部」 |
+
+### P2（7 项）
+
+| 编号 | 问题 | 修复 |
+|---|---|---|
+| S3 | 共享 PIN 明文 + 无失败限制；Android 侧本机无 PIN 时 fail-open | 双端加失败退避：按来源 IP 计数，前 5 次不锁，之后 60s 起翻倍、上限 15 分钟；锁定期内即使 PIN 正确也拒绝；成功即清零；表超 512 条清过期项。Android `authError` 同时修掉 `mine.length()>0 &&` 的 fail-open，与 Windows 的 409 对齐 |
+| C1/M4 | `except Exception: pass` 静默吞异常 | 存储层（自定义场景/组合/设置读写、落盘）与日志轮转改为记日志；日志系统自身的失败不能递归走 `log()`，改 `_warn_stderr()` 打 stderr。UI 事件回调等「失败即无意义」的兜底保留静默 |
+| M1 | 单文件 4565 行，260 行中文文案排版与引擎混杂 | 抽出 `text_layout.py`（277 行纯函数），`weaknet.py` 用 re-export 保持 `W.wrap_note_lines` 等旧路径可用；新增 `tests/test_unit_text_layout.py` 6 项直测 |
+| M3 | 无 lint / 类型检查 | 引入 `ruff.toml`（只开 E/F，忽略 E501/E402）；`tests/_*.py` 探针脚本豁免排版类规则但保留 F821。核心源码与 `test_*.py` 全绿 |
+| T1 | Java 24 套件未进 CI | `perf.yml` 新增 `lint-and-java` job：ubuntu + JDK 17 + `bash _jw/run.sh`，同时跑 `ruff check .`；`run.sh` 的 `ANDROID_HOME` 分支补 android-33 兜底 |
+| D1 | targetSdk 29 明显落后 | 升到 **33**：Manifest 与 `build.sh` 同步；补 `POST_NOTIFICATIONS` 权限与 `MainActivity.requestNotificationPermission()`。已核对 30+ 分区存储（只写 `getExternalFilesDir`）、31+ `exported` 与 `FLAG_IMMUTABLE` 均已满足。APK 构建通过，`aapt2 dump badging` 确认 `targetSdkVersion:'33'` |
+| D2 | 无 LICENSE | 补 MIT |
+
+### P3（4 项）
+
+| 编号 | 问题 | 修复 |
+|---|---|---|
+| T2 | 无覆盖率 | 新增 `requirements-dev.txt`（pytest / pytest-cov / ruff）；PR job 跑 `pytest --cov=. --cov-report=term-missing`，只报告不设门槛 |
+| T4 | 73 个手工 `_t_*.py` 入口分散 | 新增 `docs/testing.md`：四层测试入口、真机脚本选型表、历史脚本约定（新增测试写 `test_*.py`，旧脚本按前缀成组归档，不逐个删） |
+| D3/D4/D5 | EXE 未签名、Windows 最低版本、ABI 未声明 | README 新增「平台要求」：Windows 10+（64 位）、Android 7.0+、APK 无原生库故全 ABI 通用、SmartScreen 提示与 SHA-256 校验说明 |
+| S4/S5 | `QUERY_ALL_PACKAGES`、口令明文文件 | README 说明用途与上架前改 `<queries>` 的条件；`build.sh` 本就优先读 `KS_PASS` 环境变量，`docs/build.md` 补充「CI/共享构建机只用环境变量，不要把口令文件拷进去」 |
+
+### 验证
+
+- `py -3 -m pytest tests/ -q` → **304 项全过**
+- `py -3 -m ruff check .` → **All checks passed**
+- `sh android/_jw/run.sh` → **24 套件全过**
+- `py -3 tests/_t_version.py` → **16/16**（重建 EXE/APK 后产物新鲜度 C5/C6 通过）
+- APK：`versionCode=130 / versionName=1.1.20 / targetSdk=33`，签名 `CN=WeakNet`
+- **真机冒烟（PEYM00 / Android 13 / SDK 33）**：覆盖安装成功、启动无 crash；
+  `/api/vpn {enable:true}` 后 `tun0 = 10.8.0.2/24`、`vpn_active=true`、
+  `mtu_ready=true`、`effective_mtu=1500`；`/api/status` 200；关闭后 `tun0` 消失。
+  过程中修掉一处上一轮引入的回归：Android 控制口 Host 校验要求端口一致，
+  导致 `adb forward 18899→8899` 全部 403；已改为只校验回环主机名
+  （与 Windows 端 `ctrl_host_ok` 一致），Origin 校验仍要求端口一致。
+- 新增测试：`test_integration_proxy_auth.py` 13 项、`test_unit_text_layout.py` 6 项、报告脱敏 4 项、PIN 退避 3 项
+
+> 本轮只改源码与测试，**未发布**：Release 资产仍是 11-20 的 v1.1.20 旧包；
+> EXE/APK 已按「源码改了必须重打」的项目规则在本地重新构建，未上传。
+
+## v1.1.20 后续 · 2026-11-26 六维审查问题修复（未发版）
+
+基于六维代码审查（正确性 / 可维护性 / 安全性 / 性能与资源 / 可测试性 / 依赖与兼容性）
+修复 25 项发现，仍沿用版本号 v1.1.20 / build 130（**未发版**，Release 资产仍是 11-20 的旧包）。
+
+### 修复清单（按维度）
+
+- **正确性**：C1 仅选中场景不记「切换场景：」落地事件；C2 未生效选中不写 `last_profile`；
+  C3 周期断网只掐被接管连接、bypass 直通连接豁免；C4 报告故障计数改用全量 300 条
+  （双端同名字段 `fault_counts_full`），不再被 60 条展示窗口截断；C5 `/api/sysproxy` 只认真布尔；
+  C6 `set_profile` 加 `G.profile_gen` 代数校验防并发覆盖。
+- **可维护性**：M1 文档版本号改动态表述；M2 README 补全目录结构；M4 系统代理异常记日志；
+  M6 EXE/APK 从 git 索引移除（本地保留），改由 Releases 分发。M3 轻量收敛三个模块级状态进 `G`。
+- **安全性**：S1 Android 控制接口加 Host/Origin 校验（新 `CtrlHostCheck`）；S2 token 仅校验通过才返回；
+  S3 共享无 PIN 改默认拒收（去掉 fail-open）；S4 更新 URL 域名白名单 + `update_api` 仅 debuggable 允许；
+  S5 错误响应泛化、`allowBackup=false`。
+- **性能与资源**：P1 Android 控制池/推送池改有界队列 + 背压；P2 VPN 清理线程换代次 + `interrupt()`/`join()`；
+  P3 半开连接 30 秒超时。
+- **可测试性**：T1 抽 `PauseState` 纯逻辑类，暂停/恢复/组合竞态补真实回归（不依赖 org.json Stub）；
+  T2 新增 C1/C2 端到端与 C4/C5/S3/C6 回归。
+- **依赖与兼容性**：D1 新增 `requirements.txt`；D2 构建命令改 `python -m` + 相对图标；
+  D3 CI 中文步骤加 `shell: bash`；D4 Manifest 显式 `uses-sdk 24/29`；M5 CI 去掉 PR paths 过滤。
+
+### 验证结果
+
+- Python：`py -m pytest -q` 全绿（排除产物新鲜度用例时 285 passed；全量仅 `test_golden_script[version]`
+  的 C5/C6 因源码改动早于重打产物而失败，重打后已消除）。
+- Java：纯 JDK **24 套件**全过（`WN_JW_OUT=_jw/out_final sh _jw/run.sh`），含新增 `_CtrlHostCheckTest`。
+- 版本一致性：`tests/_t_version.py` **16/16**，C5/C6 产物新鲜度通过。
+- 重打产物（本地，未上传 Release）：EXE 10,872,822 B /
+  `93f9de7d3d764eafcb476ea26e32d2572fe2f50eb28037d3899d60a655c272b9`；
+  APK 226,340 B / `89e503c56396c7979850e0dcafaf1c186270043a21ba3da0af431414fd4f2821`。
+  文档中的发布指纹仍指向 Releases 现有资产，待正式发版时再统一更新。
+
 ## v1.1.20 · 2026-11-20 可解读报告 + 悬浮窗交互修复版
 
 发布页：<https://github.com/45944831/weaknet/releases/tag/v1.1.20>（tag `v1.1.20`）。
-产物 EXE 10,871,576 B / `9d80713c6761e6d4…`、APK 222,244 B / `04e00ff5c3d4526f…`。
+产物 EXE 10,871,576 B / `9d80713c6761e6d4…`、APK 222,244 B / `04e00ff5c3d4526f…`
+（**发布指纹 = Releases v1.1.20 现有资产**，不是本机重打产物；本机重打产物的指纹与大小见
+文首「第六轮」，每次重打都会变，两者不同属正常）。
 规格 hash 未变（`9990e03d`），版本 v1.1.20 / build 130。
 
 ### 新增：两端测试报告与「解读总结（给开发）」
@@ -90,7 +374,7 @@ TCP 握手 + TLS 握手 + 请求-响应多段往返，而延迟是**逐包注入
 HTTP 响应头算进正文；数据源从可变 `ls-lR.gz` 换成固定版本 TUNA ISO，
 避免 Range 超过文件大小造成假限速不足。
 
-### 实测（2026-11-17，SM-G9730 / Android 12 / SDK 31 / arm64）
+### 实测（2026-11-17，某国产 Android 12 机型 / SDK 31 / arm64）
 
 | 项 | 结果 |
 |---|---|

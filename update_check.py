@@ -7,6 +7,8 @@
 - 绝不打扰用户：断网 / API 限流 / 解析失败一律返回 None，界面保持默认灰色。
 - 直连优先：WeakNet 自己会把系统代理指向本地 8888，urllib 默认读系统代理时
   请求会打回自己的代理端口；所以先用 ProxyHandler({}) 直连，失败再退回系统代理。
+- 跳转地址不可信：API 响应的 html_url 会被 GUI 直接交给 webbrowser.open，
+  必须先过域名白名单，否则假 API / 被污染的响应能把用户导到钓鱼站。
 
 可用环境变量 WEAKNET_UPDATE_API 覆盖 API 地址，供本地测试起假服务器用。
 """
@@ -15,12 +17,44 @@ import json
 import os
 import re
 import urllib.request
+from urllib.parse import urlparse
 
 OWNER = "45944831"
 REPO = "weaknet"
 API_LATEST = "https://api.github.com/repos/%s/%s/releases/latest" % (OWNER, REPO)
 PAGE_LATEST = "https://github.com/%s/%s/releases/latest" % (OWNER, REPO)
+# 只有这两个官方域名下的 https 链接才允许作为「点击下载」的跳转目标。
+ALLOWED_PAGE_HOSTS = ("github.com", "www.github.com")
 TIMEOUT = 6.0
+
+
+def safe_page_url(url):
+    """校验 API 给出的跳转链接，非法时回退到硬编码的发布页 PAGE_LATEST。
+
+    校验 hostname 用精确匹配而不是 endswith：后者会把 evilgithub.com、
+    github.com.attacker.example 这类域名误放行。scheme 必须是 https，端口
+    只允许 443，避免把用户带到非官方服务上。
+    还要拒绝 userinfo（`https://user@github.com/a`）：Android 端
+    SafePageUrl.java 明确拒绝带用户名/密码的 URL，两端必须同口径；
+    空主机名、0 或越界端口同样拒绝（畸形端口解析异常由 try 兜住）。
+    """
+    try:
+        p = urlparse(str(url or ""))
+        host = (p.hostname or "").lower().rstrip(".")
+        port = p.port
+        user = p.username
+        pwd = p.password
+    except (TypeError, ValueError):
+        return PAGE_LATEST
+    if user or pwd:
+        return PAGE_LATEST
+    if not host:
+        return PAGE_LATEST
+    if port is not None and not (0 < port <= 65535):
+        return PAGE_LATEST
+    if p.scheme == "https" and host in ALLOWED_PAGE_HOSTS and port in (None, 443):
+        return url
+    return PAGE_LATEST
 
 
 def api_url():
@@ -68,7 +102,7 @@ def fetch_latest(timeout=TIMEOUT, url=None):
         raise ValueError("bad release payload")
     return {
         "tag": d.get("tag_name") or "",
-        "page": d.get("html_url") or PAGE_LATEST,
+        "page": safe_page_url(d.get("html_url")),
         "name": d.get("name") or d.get("tag_name") or "",
         "draft": bool(d.get("draft")),
         "prerelease": bool(d.get("prerelease")),

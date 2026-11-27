@@ -19,7 +19,10 @@ import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 
 /**
@@ -43,10 +46,10 @@ public class VpnNetService extends VpnService {
     static final int DEFAULT_TUN_MTU = 1500;
 
     /**
-     * 允许的 MTU 档位（P1-2 / P1-3 的实验档）。
+     * 允许的 MTU 档位（含真机实验档）。
      *
      * 1280 是 IPv6 要求的最小链路 MTU；16384 让 TcpSession 的下游读缓冲与
-     * MSS 一起落到 16 KB 级（16344 B），也就是方案 P1-2 说的「对齐到 16 KB 级」——
+     * MSS 一起落到 16 KB 级（16344 B），也就是方案里说的「对齐到 16 KB 级」——
      * 只有把 MTU 抬上来才谈得上对齐，默认 1500 时上限就是 1460。
      *
      * 只允许取这几档：任意值会让「MSS / 缓冲 / setMtu 三处同源」失去可验证性，
@@ -102,7 +105,7 @@ public class VpnNetService extends VpnService {
     }
 
     /**
-     * MTU↔MSS 联动的**参数化纯函数**：P1-3 四档 A/B（1500/4096/8192/16384）
+     * MTU↔MSS 联动的**参数化纯函数**：四档 A/B（1500/4096/8192/16384）
      * 只要换 mtu 就能算出该档的 MSS 与下游读缓冲，不必改四处硬编码。
      * 真机吞吐实验仍需打包后进行；这里锁住的是「三处必然一起变」的正确性。
      */
@@ -154,6 +157,12 @@ public class VpnNetService extends VpnService {
      * 1024 × ~1.5KB ≈ 1.5MB 上限。
      */
     private static final int OUTQ_CAP = 1024;
+    /**
+     * 下游读循环线程池：固定 32 + 有界队列 256（权衡见 {@link #runOnPool}）。
+     * 常量放在这里，改上限时不必翻到 startVpn 里找。
+     */
+    private static final int DOWN_POOL_SIZE = 32;
+    private static final int DOWN_QUEUE_CAP = 256;
     /** 抽成纯 JDK 类是为了让「有界 / FIFO / 停止清空」能被单测覆盖，见 _TunWriteQueueTest */
     private final TunWriteQueue outQ = new TunWriteQueue(OUTQ_CAP);
     private volatile boolean writerRunning = false;
@@ -176,6 +185,9 @@ public class VpnNetService extends VpnService {
     /** 定时任务（延迟清理）：用调度器而不是「池线程里 sleep」。见 scheduleRemove */
     private ScheduledExecutorService sched;
     private Thread cleanThread;
+    /** 清理线程代次：stopVpn 会 +1。rebuild 后旧线程最迟 30s 才醒，
+     *  仅靠 running 标志不够（新实例可能已把 running 置回 true），靠代次拦住它。 */
+    private volatile int cleanGeneration = 0;
 
     /** 会话关闭时清槽。身份校验：槽位可能已被同端口对的新流占用，不能误清。 */
     void clearTcpFast(int idx, TcpSession s) {
@@ -193,19 +205,47 @@ public class VpnNetService extends VpnService {
     /**
      * 把任务投到共享线程池（下游读循环用：省每连接建线程，顺序天然保持）。
      *
-     * 这里**必须**保持 cached 语义、不能换成固定大小的池：下游读循环是阻塞式
-     * `sin.read()`，每条活跃连接会长期占住一个线程直到 EOF。固定池在连接数超过
-     * 池大小时会让新连接的上行直接没有线程可用（数据面停摆），而 cached 池的
-     * 线程数与「活跃连接数」同阶，正是阻塞 IO 的固有代价。
-     * 真正能压缩的线程在别处：延迟清理不再 sleep、UDP 不再每包派发。
+     * 下游读循环是阻塞式 `sin.read()`：一条连接会长期占住一个线程直到 EOF，
+     * 所以线程数天然≈活跃连接数。历史上这里是 cached 池（线程数无上限），
+     * 几百条 keep-alive 连接就能把线程堆到几百个，每个默认 1MB 栈 —— 内存与
+     * 调度开销都失控。现在改成固定 32 + 有界队列 256：
+     *
+     *   - 32：单机弱网测试的典型并发远低于此；再多线程只会互相抢 CPU，
+     *     真正的瓶颈是阻塞 IO 而不是线程数。
+     *   - 256：超出的连接先排队（数据暂不流动），给短连接突发留缓冲；
+     *     排满即拒绝 —— 拒绝时关掉那条会话，绝不无限排队。
+     *   - 不用 CallerRunsPolicy：那会让阻塞的读循环跑在 TUN 分发线程上，
+     *     整条数据面会卡死到 EOF 为止，比拒绝连接严重得多。
+     *
+     * @param onReject 池与队列都满时的收尾动作（关闭该会话）；可为 null
      */
-    public void runOnPool(Runnable r, String name) {
+    public void runOnPool(Runnable r, String name, Runnable onReject) {
         ExecutorService e = exec;
         if (e == null || e.isShutdown()) {
             r.run();
             return;
         }
-        e.execute(r);
+        try {
+            e.execute(r);
+        } catch (RejectedExecutionException ex) {
+            WeakNet.I.log("error", "并发连接超限（" + name + "），已关闭该会话");
+            rejectSession(onReject);
+        }
+    }
+
+    /** 拒绝路径的收尾放到调度器上跑：绝不能让关闭动作阻塞 TUN 分发线程 */
+    private void rejectSession(Runnable onReject) {
+        if (onReject == null) return;
+        ScheduledExecutorService sc = sched;
+        if (sc != null && !sc.isShutdown()) {
+            try {
+                sc.execute(onReject);
+                return;
+            } catch (Exception ignore) {
+                // 调度器刚停：退回当前线程
+            }
+        }
+        onReject.run();
     }
 
     public void onCreate() {
@@ -291,7 +331,7 @@ public class VpnNetService extends VpnService {
     }
 
     public int onStartCommand(Intent intent, int flags, int startId) {
-        // 实验档入口（P1-2 / P1-3 的真机 A/B 用）：
+        // 实验档入口（真机 A/B 用）：
         //   POST /api/vpn {"enable":true,"mtu":16384}
         // 只接受 MTU_TIERS 里的值；非法值保持原档并记一条日志。
         // 注意不能从 adb 直接起服务：清单里本服务声明了 BIND_VPN_SERVICE 权限，
@@ -474,7 +514,14 @@ public class VpnNetService extends VpnService {
         active = true;
         effectiveTunMtu = tunMtu;   // 采集/脚本的就绪判据（见 effectiveTunMtu 注释）
         userStopped = false;
-        exec = Executors.newCachedThreadPool();
+        ThreadPoolExecutor pool = new ThreadPoolExecutor(DOWN_POOL_SIZE, DOWN_POOL_SIZE,
+                30L, TimeUnit.SECONDS,
+                new LinkedBlockingQueue<Runnable>(DOWN_QUEUE_CAP),
+                new ThreadPoolExecutor.AbortPolicy());
+        // 空闲连接不读数据时线程照样阻塞着，这里让核心线程也能超时回收：
+        // 池大小是上限，不是常驻 32 个线程（手机上空闲线程也是成本）。
+        pool.allowCoreThreadTimeOut(true);
+        exec = pool;
         sched = Executors.newSingleThreadScheduledExecutor();
         // 写线程必须早于 readLoop 起来：readLoop 处理完第一个包就会开始回写
         startWriter();
@@ -482,11 +529,17 @@ public class VpnNetService extends VpnService {
             public void run() {
                 // 恢复直连 / 停止模拟时不要掐断：连接会自然按新参数继续（限速桶已归零）
                 if ("direct".equals(WeakNet.I.presetKey)) return;
-                // 切到弱网场景：让已有连接按新参数重建
-                for (TcpSession s : tcpSessions.values()) s.abort();
-                tcpSessions.clear();
-                for (UdpSession s : udpSessions.values()) s.close();
-                udpSessions.clear();
+                // 切到弱网场景：让已有连接按新参数重建。
+                // 与清理线程的「遍历 + remove」互斥，避免 stop→restart 时
+                // 旧代次的 cleanup() 把新会话误清（详见 cleanup 注释）。
+                synchronized (tcpSessions) {
+                    for (TcpSession s : tcpSessions.values()) s.abort();
+                    tcpSessions.clear();
+                }
+                synchronized (udpSessions) {
+                    for (UdpSession s : udpSessions.values()) s.close();
+                    udpSessions.clear();
+                }
             }
         };
         // 前台通知已经在 startVpnGuarded() 里发过了（必须在建 tun 之前，
@@ -513,15 +566,18 @@ public class VpnNetService extends VpnService {
         readThread.start();
         dlog("readLoop thread started, tunIn=" + tunIn);
 
+        final int gen = ++cleanGeneration;
         cleanThread = new Thread(new Runnable() {
             public void run() {
-                while (running) {
+                while (running && gen == cleanGeneration) {
                     try {
                         Thread.sleep(30000);
                     } catch (InterruptedException e) {
                         break;
                     }
-                    cleanup();
+                    // 睡着的这 30s 里可能已经 stop+rebuild；旧线程绝不能清掉新会话
+                    if (!running || gen != cleanGeneration) break;
+                    cleanup(gen);
                 }
             }
         }, "tun-clean");
@@ -530,13 +586,31 @@ public class VpnNetService extends VpnService {
     }
 
     private void stopVpn() {
+        // 先换代次再停标志：旧线程醒来时两道关卡都过不了。
+        cleanGeneration++;
         running = false;
+        Thread oldClean = cleanThread;
+        cleanThread = null;
+        if (oldClean != null) {
+            oldClean.interrupt();
+            try {
+                oldClean.join(2000);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+        }
         active = false;
         effectiveTunMtu = 0;   // tun 已不存在：就绪判据立即失效（先于一切清理）
-        for (TcpSession s : tcpSessions.values()) s.close();
-        tcpSessions.clear();
-        for (UdpSession s : udpSessions.values()) s.close();
-        udpSessions.clear();
+        // join 被中断时旧 cleanup 线程可能还活着；用同一把锁把这里的 clear
+        // 与对方的「遍历 + remove」串起来，避免 CME 窗口与竞态。
+        synchronized (tcpSessions) {
+            for (TcpSession s : tcpSessions.values()) s.close();
+            tcpSessions.clear();
+        }
+        synchronized (udpSessions) {
+            for (UdpSession s : udpSessions.values()) s.close();
+            udpSessions.clear();
+        }
         stopWriter();          // 先停写线程再关 fd：否则它可能阻塞在已失效的 fd 上
         try {
             if (tunIn != null) tunIn.close();
@@ -621,8 +695,10 @@ public class VpnNetService extends VpnService {
 
     /** 从会话表摘除（仅当表里还是它自己，避免把同 4 元组的新会话误删） */
     private void removeTcp(TcpSession s) {
-        TcpSession cur = tcpSessions.get(s.key);
-        if (cur == s) tcpSessions.remove(s.key);
+        synchronized (tcpSessions) {
+            TcpSession cur = tcpSessions.get(s.key);
+            if (cur == s) tcpSessions.remove(s.key);
+        }
     }
 
     private void handlePacket(final byte[] pkt, int len) {
@@ -745,8 +821,15 @@ public class VpnNetService extends VpnService {
                     if (us == null) {
                         UdpSession nus = new UdpSession(this, src, srcPort, dst, dstPort, key);
                         UdpSession exist = udpSessions.putIfAbsent(key, nus);
-                        us = exist != null ? exist : nus;
-                        if (exist == null) WeakNet.I.connTotal.incrementAndGet();
+                        if (exist != null) {
+                            // 竞争失败的这条从未参与转发：立即关掉，否则它的
+                            // 活跃计数与串行队列会永远挂着（同 key 并发首包才会撞上）
+                            nus.close();
+                            us = exist;
+                        } else {
+                            us = nus;
+                            WeakNet.I.connTotal.incrementAndGet();
+                        }
                     }
                     udpFastSet(idx, us);
                 }
@@ -910,7 +993,7 @@ public class VpnNetService extends VpnService {
             sc.schedule(new Runnable() {
                 public void run() {
                     s.close();
-                    tcpSessions.remove(key);
+                    synchronized (tcpSessions) { tcpSessions.remove(key); }
                 }
             }, Math.max(0, delayMs), TimeUnit.MILLISECONDS);
         } catch (Exception e) {
@@ -918,23 +1001,38 @@ public class VpnNetService extends VpnService {
         }
     }
 
-    /** 清理长时间无流量的会话 */
-    private void cleanup() {
+    /** 清理长时间无流量的会话。
+     *
+     *  gen 是调用线程创建时所属的代次，作为最后一道防线：stopVpn 的
+     *  oldClean.join(2000) 在自身被中断时会直接返回，此时旧线程可能刚过完 run()
+     *  里的校验、正要进入本方法。这里再比一次代次，不符立即退出，绝不碰
+     *  stop→restart 后的新会话表；遍历/remove 也与 clear 共用同一把锁，
+     *  消除普通迭代器与 clear 之间的 CME 窗口。
+     */
+    private void cleanup(int gen) {
+        if (!running || gen != cleanGeneration) return;
         long now = System.currentTimeMillis();
-        Iterator<Map.Entry<String, TcpSession>> it = tcpSessions.entrySet().iterator();
-        while (it.hasNext()) {
-            Map.Entry<String, TcpSession> e = it.next();
-            if (now - e.getValue().lastActive() > 300000 || e.getValue().isClosed()) {
-                e.getValue().close();
-                it.remove();
+        synchronized (tcpSessions) {
+            // 拿锁后再比一次：stop 可能在上面校验与此处之间换代
+            if (!running || gen != cleanGeneration) return;
+            Iterator<Map.Entry<String, TcpSession>> it = tcpSessions.entrySet().iterator();
+            while (it.hasNext()) {
+                Map.Entry<String, TcpSession> e = it.next();
+                if (now - e.getValue().lastActive() > 300000 || e.getValue().isClosed()) {
+                    e.getValue().close();
+                    it.remove();
+                }
             }
         }
-        Iterator<Map.Entry<String, UdpSession>> iu = udpSessions.entrySet().iterator();
-        while (iu.hasNext()) {
-            Map.Entry<String, UdpSession> e = iu.next();
-            if (now - e.getValue().lastActive() > 120000 || e.getValue().isClosed()) {
-                e.getValue().close();
-                iu.remove();
+        synchronized (udpSessions) {
+            if (!running || gen != cleanGeneration) return;
+            Iterator<Map.Entry<String, UdpSession>> iu = udpSessions.entrySet().iterator();
+            while (iu.hasNext()) {
+                Map.Entry<String, UdpSession> e = iu.next();
+                if (now - e.getValue().lastActive() > 120000 || e.getValue().isClosed()) {
+                    e.getValue().close();
+                    iu.remove();
+                }
             }
         }
     }

@@ -68,6 +68,19 @@ public class _RunToggleRestoreTest {
         r = WeakNet.resolveEnable(null, "custom", null, null);
         ck("无任何历史：直连兜底", r.downKbps == 0, "" + r.downKbps);
 
+        // ---- /api/profile 的 limit_on 契约（与 Windows set_profile 对齐）----
+        // setProfile 刻意不动开关（selectScene 也走它，「选中不生效」），
+        // 所以 API handler 用 limitOnForApply 显式补齐「应用即生效」。
+        ck("应用带限制的参数 → limit_on=true",
+           WeakNet.limitOnForApply(custom(100)), "false");
+        ck("应用全零参数 → limit_on=false",
+           !WeakNet.limitOnForApply(new Profile()), "true");
+        ck("null 参数按不限速处理", !WeakNet.limitOnForApply(null), "true");
+        Profile onlyLatency = new Profile();
+        onlyLatency.latencyUpMs = 200;
+        ck("只改延迟也算有极限（hasLimits 口径）",
+           WeakNet.limitOnForApply(onlyLatency), "false");
+
         System.out.println("_RunToggleRestoreTest: " + pass + " passed, " + fail + " failed");
         if (fail > 0) System.exit(1);
     }

@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""P0-3 外部真值：iperf3 标准化测量（Windows 侧直连 / 经 WeakNet 代理）。
+"""外部真值：iperf3 标准化测量（Windows 侧直连 / 经 WeakNet 代理）。
 
 为什么要这个脚本
 ----------------
@@ -43,7 +43,7 @@ bps 与换算后的 kbps(1024)，避免把 2.4% 的单位差当成产品偏差�
 ----
     py -3.10-64 tools/perf_iperf.py --quick                 # 链路自检（2 次 × 3s）
     py -3.10-64 tools/perf_iperf.py                        # 正式：7 次 × 20s，全档
-    py -3.10-64 tools/perf_iperf.py --curve                # 带宽偏差曲线（P2-1）
+    py -3.10-64 tools/perf_iperf.py --curve                # 带宽偏差曲线
     py -3.10-64 tools/perf_iperf.py --scenarios direct_p1,weaknet_p1
 
 iperf3.exe 的定位顺序：`--iperf3` > `WN_IPERF3` > PATH > 项目外
@@ -619,7 +619,7 @@ UDP_VIA_PROXY = "不支持：Windows 侧为 TCP 应用层代理，UDP 数据报�
 
 CURVE_KBPS = [500, 1000, 4000, 8000, 20000, 50000]
 
-# P2-1 要求偏差曲线覆盖「延迟 / 丢包 / 带宽」三个维度，而不只是带宽。
+# 偏差曲线覆盖「延迟 / 丢包 / 带宽」三个维度，而不只是带宽。
 # 下面两张表分别是「高延迟 + 低带宽」组合与丢包（停顿）组合。
 # 每项 = (标签, 剖面增量, 设定带宽 kbps)；剖面增量会并入 up/down 双向。
 CURVE_LATENCY = [
@@ -660,11 +660,11 @@ def main():
                     help="轮间冷却秒数：让 TIME_WAIT / 内核缓冲 / 令牌桶余量散掉，"
                          "降低样本自相关（0 = 背靠背，不建议）")
     ap.add_argument("--quick", action="store_true", help="链路自检：2 次 × 3s")
-    ap.add_argument("--curve", action="store_true", help="带宽偏差曲线（P2-1）")
+    ap.add_argument("--curve", action="store_true", help="带宽偏差曲线")
     ap.add_argument("--curve-latency", action="store_true",
-                    help="高延迟 + 低带宽组合偏差曲线（P2-1）")
+                    help="高延迟 + 低带宽组合偏差曲线")
     ap.add_argument("--curve-loss", action="store_true",
-                    help="丢包（停顿）组合偏差曲线（P2-1）")
+                    help="丢包（停顿）组合偏差曲线")
     ap.add_argument("--scenarios", default="", help="逗号分隔，覆盖默认档位")
     ap.add_argument("--json", default="", help="结果归档路径")
     ap.add_argument("--block-kb", type=int, default=0,

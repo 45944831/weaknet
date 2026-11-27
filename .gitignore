@@ -60,7 +60,12 @@ assets/_icon_preview.png
 # 真机回归脚本的截图输出目录（跑测试时自动生成，随机器而异）
 _shots/
 
-# ===== PyInstaller 产物（EXE 本身入库，构建中间产物不入库）=====
+# ===== 发布产物（由本机构建/发布流程生成，不入库）=====
+# EXE / APK 只随 GitHub Releases 分发，源码仓库不含二进制；
+# 已入库的历史产物由主工程师在验证阶段统一 git rm --cached，这里只加忽略规则。
+WeakNet.exe
+android/WeakNet.apk
+# PyInstaller 构建中间产物
 build/
 dist/
 

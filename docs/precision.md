@@ -115,14 +115,14 @@ if ((pkt[0] >> 4) != 4) { dlog("hp: not ipv4"); return; }
 
 ```bash
 # 1) 链路自检（2 次 × 3s，先确认服务端/隧道/引擎都通）
-py -3.10-64 tools/perf_iperf.py --quick
+python tools/perf_iperf.py --quick
 
 # 2) 正式外部真值：7 次 × 20s，直连 P1/P4/P8/UDP + 经 WeakNet P1/P4/P8/-R
-py -3.10-64 tools/perf_iperf.py
+python tools/perf_iperf.py
 
-# 3) 偏差曲线（P2-1）：带宽 6 档 + 高延迟×低带宽 4 档 + 丢包×带宽 3 档
-py -3.10-64 tools/perf_iperf.py --curve
-py -3.10-64 tools/perf_iperf.py --curve-latency --curve-loss
+# 3) 偏差曲线：带宽 6 档 + 高延迟×低带宽 4 档 + 丢包×带宽 3 档
+python tools/perf_iperf.py --curve
+python tools/perf_iperf.py --curve-latency --curve-loss
 
 # 等价的手工命令矩阵（脚本内部就是这些）
 iperf3 -c <host> -J -t 20 -O 3 -P 1 > direct_p1.json
@@ -178,7 +178,7 @@ tc qdisc add dev eth0 root netem delay 200ms 50ms loss 5%
 > `weaknet_p8` 的「发送端中位 4,660 kbps」是**测量工具的统计假象**，不是产品行为 ——
 > 见 §4.2。该档真实有效吞吐是接收端的 7,939 kbps。
 
-**表 2 · 带宽偏差曲线（P2-1，单流 P1，7×20 s）**
+**表 2 · 带宽偏差曲线（单流 P1，7×20 s）**
 
 | 设定 kbps | 实测中位 | p95 | 偏差 |
 |---:|---:|---:|---:|
@@ -189,7 +189,7 @@ tc qdisc add dev eth0 root netem delay 200ms 50ms loss 5%
 | 20000 | 20,003 | 20,021 | +0.0% |
 | 50000 | 49,990 | 50,018 | −0.0% |
 
-**表 3 · 高延迟 + 低带宽组合（P2-1，7×20 s）**
+**表 3 · 高延迟 + 低带宽组合（7×20 s）**
 
 | 组合 | 实测中位 | p95 | 偏差 |
 |---|---:|---:|---:|
@@ -198,7 +198,7 @@ tc qdisc add dev eth0 root netem delay 200ms 50ms loss 5%
 | 延迟 200 ms + 4000 kbps | 3,967 | 4,013 | −0.8% |
 | 延迟 400 ms + 1000 kbps | 984 | 985 | −1.6% |
 
-**表 4 · 丢包（停顿）组合（P2-1，7×20 s）**
+**表 4 · 丢包（停顿）组合（7×20 s）**
 
 | 组合 | 实测中位 | p95 | 偏差 |
 |---|---:|---:|---:|

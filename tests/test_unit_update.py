@@ -45,6 +45,25 @@ def test_is_newer(latest, current, want):
     assert UC.is_newer(latest, current) is want
 
 
+# ---------------------------------------------------------------- 跳转链接白名单
+
+@pytest.mark.parametrize("url, allowed", [
+    ("https://user@github.com/a", False),
+    ("https://user:pass@github.com/", False),
+    ("https://github.com.evil.com/", False),
+    ("http://github.com/", False),
+    ("https://github.com:8443/", False),
+    ("https://github.com:0/a", False),
+    ("https://github.com/", True),
+    ("https://github.com/a", True),
+])
+def test_safe_page_url_matches_android_whitelist(url, allowed):
+    """Python 侧必须与 Android SafePageUrl 同口径：只认无 userinfo 的官方 https。"""
+    assert (UC.safe_page_url(url) == url) is allowed
+    if not allowed:
+        assert UC.safe_page_url(url) == UC.PAGE_LATEST
+
+
 # ---------------------------------------------------------------- 假 GitHub API
 
 class _Handler(BaseHTTPRequestHandler):
@@ -137,7 +156,13 @@ def test_apply_update_state_really_changes_tk_label():
     """把结果真的落到 tkinter 控件上，确认红色不是只停在返回值里。"""
     tk = pytest.importorskip("tkinter")
     from weaknet_gui import App, ERR, MUTED
-    root = tk.Tk()
+    try:
+        root = tk.Tk()
+    except tk.TclError as e:
+        # 无显示/无桌面会话（CI、服务账户）或上一次 Tk 实例未完全释放时，
+        # 创建窗口本身就会抛 TclError。这属于环境限制，不是产品缺陷：
+        # 真正要验的是「结果有没有落到控件上」，没有控件就跳过。
+        pytest.skip("当前环境无法创建 Tk 窗口：%r" % (e,))
     root.geometry("+3000+3000")
     try:
         lab = tk.Label(root, text="v1.1.13", fg=MUTED)

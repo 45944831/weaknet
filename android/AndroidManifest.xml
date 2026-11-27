@@ -4,10 +4,22 @@
     android:versionCode="130"
     android:versionName="1.1.20">
 
+    <!-- 与 build.sh 的 aapt2 link 参数保持一致（24/33）；显式声明后
+         脱离 build.sh 直接用 aapt2 也不会退化成隐式默认值。
+         targetSdk 29 → 33（2026-11-26，为对齐分区存储 / 组件导出 / 通知权限三项新约束）：
+           * 30+ 的分区存储：本项目只写 getExternalFilesDir，不受影响；
+           * 31+ 的 android:exported 强制：四个组件都已显式声明；
+           * 31+ 的 PendingIntent 可变性：已带 FLAG_IMMUTABLE；
+           * 33+ 的通知权限：见 MainActivity.requestNotificationPermission()。 -->
+    <uses-sdk android:minSdkVersion="24" android:targetSdkVersion="33" />
+
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <!-- Android 13(API 33) 起前台服务通知也要用户授权；不请求则服务照跑，
+         但通知栏看不到「正在模拟弱网」，用户会以为没生效。 -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
     <!-- Android 11(API 30) 起有「包可见性」限制：不加声明时 getInstalledApplications()
          只能看到自己，应用列表会是空的，用户就没法选择要接管哪个 App。
@@ -30,7 +42,7 @@
     </queries>
 
     <application
-        android:allowBackup="true"
+        android:allowBackup="false"
         android:usesCleartextTraffic="true"
         android:label="WeakNet"
         android:icon="@mipmap/ic_launcher"

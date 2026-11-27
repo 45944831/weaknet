@@ -1,9 +1,9 @@
 # -*- coding: utf-8 -*-
-"""P2-2 冷启动归因（非侵入部分）：把 2.66s 拆成「导入」与「其余」。
+"""冷启动归因（非侵入部分）：把 2.66s 拆成「导入」与「其余」。
 
 背景
 ----
-方案把 EXE 冷启动中位 2.66s / MEI 解包 21.4MB 列为 P2-2，要求用 WPR/WPA
+方案把 EXE 冷启动中位 2.66s / MEI 解包 21.4MB 列为冷启动专项，要求用 WPR/WPA
 （ETW）归因，重点看「解包」与「导入」各占多少，目标 ≤2.0s。
 
 边界（务必如实记录）
@@ -96,7 +96,7 @@ def med(xs):
 
 
 def main():
-    ap = argparse.ArgumentParser(description="P2-2 冷启动导入耗时归因")
+    ap = argparse.ArgumentParser(description="冷启动导入耗时归因")
     ap.add_argument("--repeats", type=int, default=5)
     ap.add_argument("--json", default="")
     args = ap.parse_args()
@@ -123,7 +123,7 @@ def main():
     out = {
         "schema": 1,
         "date": time.strftime("%Y-%m-%d %H:%M:%S"),
-        "purpose": "P2-2 冷启动归因：源码导入耗时 + 与历史 EXE 冷启动的差值分解",
+        "purpose": "冷启动归因：源码导入耗时 + 与历史 EXE 冷启动的差值分解",
         "python": sys.version.split()[0],
         "repeats": args.repeats,
         "import_median_ms": round(import_med, 1) if import_med else None,
@@ -150,7 +150,7 @@ def main():
         "conclusion": (
             "源码导入仅占冷启动约 7.6%，其中 site 初始化就占了一半以上；"
             "把全部模块导入优化到 0 也最多省 0.2s，无法达成 ≤2.0s。"
-            "因此 P2-2 的「精简 hiddenimports / 延迟导入」不是有效路径，"
+            "因此「精简 hiddenimports / 延迟导入」不是有效路径，"
             "应优先评估 onefile → onedir（去掉每次 21.4MB 解包）与"
             "Tk 根窗口/引擎启动的延后初始化。真正的 I/O vs CPU 归因仍需"
             "提权后的 WPR/WPA。"
@@ -176,10 +176,10 @@ def main():
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(json.dumps(out, ensure_ascii=False, indent=2) + "\n",
                  encoding="utf-8")
-    print("\n[P2-2] 导入中位 %.1f ms ｜ EXE 冷启动中位 %s s ｜ 其余 %.1f ms"
+    print("\n[冷启动归因] 导入中位 %.1f ms ｜ EXE 冷启动中位 %s s ｜ 其余 %.1f ms"
           % (import_med or -1, cold, residual or -1))
-    print("[P2-2] 完整 WPR/WPA 归因未执行（需管理员），见 JSON 中命令清单")
-    print("[P2-2] 已归档：%s" % p)
+    print("[冷启动归因] 完整 WPR/WPA 归因未执行（需管理员），见 JSON 中命令清单")
+    print("[冷启动归因] 已归档：%s" % p)
     return 0
 
 

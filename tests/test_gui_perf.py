@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""P2-3 桌面侧帧统计 gui_perf.py 的回归：与 Android FrameStats.java 同口径。
+"""桌面侧帧统计 gui_perf.py 的回归：与 Android FrameStats.java 同口径。
 
 这些断言故意对齐 Java 单测（android/_jw/.../_FrameStatsTest.java）里的几条：
 窗口丢弃、p95 取位、超一帧/超 100ms 计数。双端同一套算法，数字才有可比性。

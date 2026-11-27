@@ -26,6 +26,10 @@ public class TcpSession {
 
     private volatile boolean ready = false;    // 上游已连接且已发 SYN-ACK
     private volatile boolean closed = false;
+    /** close() 只允许真正执行一次：它从下行循环 / cleanup / stopVpn / RST 多处
+     *  并发进来，若两个线程都过了 closed 判断，connActive 会被减两次。 */
+    private final java.util.concurrent.atomic.AtomicBoolean closeOnce =
+            new java.util.concurrent.atomic.AtomicBoolean(false);
     private volatile long lastActive = System.currentTimeMillis();
 
     private Socket socket;
@@ -56,7 +60,7 @@ public class TcpSession {
     private final ThreadPoolExecutor serial;
 
     /**
-     * 下行读缓冲池（P1-2 缓冲复用）。
+     * 下行读缓冲池（缓冲复用）。
      *
      * 旧实现每块 `new byte[n]` + `arraycopy`：按 MSS 1460 算，1.4KB 就要一次分配、
      * 一次复制、一次跨线程投递。方案 §4.4(e) 指出池化的前提是「归还协议」——
@@ -109,6 +113,10 @@ public class TcpSession {
         e.allowCoreThreadTimeOut(true);
         this.serial = e;
         this.delay = new DelayLine("tcp-delay", 1 << 20);   // 积压超过 1MB 就回压
+        // 活跃连接计数：VPN 模式以前只加 connTotal 不减也不加 active，
+        // 于是 /api/status 的 stats.active 恒 0、报告里的「当前活跃」失真。
+        // 构造即活跃，close() 里成对递减（close 幂等，见 closed 守卫）。
+        WeakNet.I.connActive.incrementAndGet();
     }
 
     /**
@@ -289,11 +297,18 @@ public class TcpSession {
         // 放共享池不破坏每连接顺序，还能省掉每连接一次的线程创建（短连接密集时差距明显）。
         // 空闲 keep-alive 连接仍会占住一个池线程（阻塞在读上），这是阻塞式 IO 的固有代价，
         // 由 cleanup() 的 300s 空闲回收兜底。
+        //
+        // 池与队列都满时（并发连接超限）：这条连接的下行永远没机会跑，留着只会
+        // 让客户端挂死等数据。直接 RST + close，让对端立刻知道连不上。
         vpn.runOnPool(new Runnable() {
             public void run() {
                 downstreamLoop();
             }
-        }, "tcp-down");
+        }, "tcp-down", new Runnable() {
+            public void run() {
+                abort();
+            }
+        });
     }
 
     private void downstreamLoop() {
@@ -394,8 +409,9 @@ public class TcpSession {
     }
 
     void close() {
-        if (closed) return;
+        if (!closeOnce.compareAndSet(false, true)) return;
         closed = true;
+        WeakNet.I.connActive.decrementAndGet();
         vpn.clearTcpFast(fastIdx, this);   // 清掉端口对快路径槽位（身份校验，不会误清后来者）
         closeSocket();
         // 停掉串行队列：丢弃排队的上行包，并唤醒正在等令牌/延迟的线程

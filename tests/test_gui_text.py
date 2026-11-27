@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""P2-3 拆分产物 gui_text.py 的回归：纯文本层不需要 Tk 窗口也能验证。
+"""gui_text.py 的回归：纯文本层不需要 Tk 窗口也能验证。
 
 这些断言以前只能靠 `_t_gui_notes.py` / `_t_gui_params.py` 这类需要 EXE 或
 Tk 的脚本覆盖，拆分后进了默认 pytest 套件。任何格式化/文案改动都会立刻

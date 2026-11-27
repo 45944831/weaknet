@@ -66,7 +66,11 @@ public final class UpdateCheck {
             this.ok = ok;
             this.hasNew = hasNew;
             this.latest = latest == null ? "" : latest;
-            this.page = page == null || page.length() == 0 ? PAGE_LATEST : page;
+            // html_url 来自不可信的 API 响应，统一在这里过白名单：
+            // 只有 https + github.com / www.github.com + 443 才允许交给 ACTION_VIEW，
+            // 其余（含空串）回退到硬编码发布页。与 Windows safe_page_url 同构。
+            String safePage = SafePageUrl.safe(page);
+            this.page = safePage != null ? safePage : PAGE_LATEST;
         }
     }
 
@@ -192,7 +196,7 @@ public final class UpdateCheck {
 
             String tag = d.optString("tag_name", "");
             if (tag.length() == 0) return null;
-            String page = d.optString("html_url", "");
+            String page = d.optString("html_url", "");   // 不可信输入，由 State 构造器过白名单
             // 草稿 / 预发布不算正式新版，别拿它去提示用户升级
             if (d.optBoolean("draft") || d.optBoolean("prerelease")) {
                 return new State(true, false, tag, PAGE_LATEST);

@@ -162,3 +162,85 @@ def test_stop_releases_inflight_download(engine, http_origin):
         if th.is_alive():
             engine.api.get("/api/stop")
             th.join(timeout=5)
+
+
+# ---------------------------------------------------------------- 目标过滤
+
+def _read_head(sock, timeout=10.0):
+    sock.settimeout(timeout)
+    buf = b""
+    while b"\r\n\r\n" not in buf:
+        part = sock.recv(4096)
+        if not part:
+            break
+        buf += part
+    return buf
+
+
+def test_connect_to_control_port_is_refused(engine):
+    """绑 0.0.0.0 时局域网可用 `CONNECT 127.0.0.1:8899` 隧道进控制口 —— 必须拒。"""
+    sock = socket.create_connection(engine.proxy, timeout=10)
+    try:
+        sock.sendall(b"CONNECT 127.0.0.1:8899 HTTP/1.1\r\n"
+                     b"Host: 127.0.0.1:8899\r\n\r\n")
+        head = _read_head(sock)
+        assert b" 403" in head.split(b"\r\n")[0], head[:120]
+    finally:
+        sock.close()
+
+
+def test_connect_to_share_port_is_refused(engine):
+    sock = socket.create_connection(engine.proxy, timeout=10)
+    try:
+        sock.sendall(b"CONNECT example.com:8900 HTTP/1.1\r\n"
+                     b"Host: example.com:8900\r\n\r\n")
+        assert b" 403" in _read_head(sock).split(b"\r\n")[0]
+    finally:
+        sock.close()
+
+
+def test_plain_http_to_control_port_is_refused(engine):
+    """普通 HTTP 绝对地址同样能打到本机端口，判据与 CONNECT 一致。"""
+    sock = socket.create_connection(engine.proxy, timeout=10)
+    try:
+        sock.sendall(b"GET http://127.0.0.1:8899/api/stop HTTP/1.1\r\n"
+                     b"Host: 127.0.0.1:8899\r\nConnection: close\r\n\r\n")
+        assert b" 403" in _read_head(sock).split(b"\r\n")[0]
+    finally:
+        sock.close()
+
+
+def test_normal_target_still_forwards(engine, http_origin):
+    """正常目标照旧放行（回环目标在代理只绑 127.0.0.1 时不拦）。"""
+    status, _h, body, _el = fetch(engine, http_origin, "/small")
+    assert status == 200
+    assert body == b"weaknet-origin-small"
+
+
+def test_proxy_exposed_only_for_non_loopback_bind(monkeypatch):
+    """只有绑非回环地址时才算「对局域网开放」，回环/空值都不算。"""
+    import weaknet as W
+
+    for host, want in (("127.0.0.1", False), ("localhost", False),
+                       ("::1", False), ("[::1]", False), ("", False),
+                       ("0.0.0.0", True), ("::", True), ("192.168.1.10", True)):
+        monkeypatch.setattr(W.G, "proxy_host", host)
+        assert W._proxy_exposed() is want, host
+
+
+def test_browser_get_write_blocked_only_blocks_cross_site():
+    """浏览器跨站 GET 写操作被拒；curl/adb 无该头、直接导航 none 都放行。"""
+    import weaknet as W
+
+    assert W._browser_get_write_blocked("GET", "/api/stop", {}) is False
+    assert W._browser_get_write_blocked(
+        "GET", "/api/stop", {"sec-fetch-site": "none"}) is False
+    assert W._browser_get_write_blocked(
+        "GET", "/api/stop", {"sec-fetch-site": "cross-site"}) is True
+    assert W._browser_get_write_blocked(
+        "GET", "/api/stop", {"sec-fetch-site": "same-origin"}) is True
+    # 非写操作 / 非 GET 不受影响
+    assert W._browser_get_write_blocked(
+        "GET", "/api/status", {"sec-fetch-site": "cross-site"}) is False
+    assert W._browser_get_write_blocked(
+        "POST", "/api/stop", {"sec-fetch-site": "cross-site"}) is False

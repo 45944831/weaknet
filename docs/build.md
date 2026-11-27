@@ -29,7 +29,8 @@ bash build.sh
 > 覆盖 `--version-code` / `--version-name`**，不加 `--replace-version` 时脚本里的版本号等于白写
 > （现象：内容明明变了，`aapt2 dump badging` 出来的版本号一直是旧值）。脚本已带上该参数，
 > 并在构建末尾自动断言，验证方式：`aapt2 dump badging WeakNet.apk | head -1` 应显示
-> 与 `version.py` 一致的 `versionCode` / `versionName`（当前为 `129` / `1.1.19`）。
+> 与 `version.py` 的 `VERSION` / `BUILD` 一致的 `versionName` / `versionCode`
+> （当前为 `1.1.20` / `130`；版本号只认 `version.py`，此处数值仅作参考，升级后以真值为准）。
 
 构建脚本对 javac / d8 / aapt2 的失败一律「日志落盘 + 明确报错 + 退出」：不接 `tail` 管道，
 避免管道的退出码掩盖真实失败；d8 之后还会确认 `classes.dex` 真的存在。
@@ -39,20 +40,32 @@ bash build.sh
 若 keystore 已存在却拿不到口令，会直接报错而不是猜。口令写在仓库里等于把签名私钥的访问方式公开出去，
 哪怕 keystore 本身没提交。想让发布包与旧版签名一致（用户可直接覆盖安装），就保住原来的 keystore 与口令。
 
+> **CI / 共享构建机**：只用 `KS_PASS` 环境变量，别把 `weaknet.keystore.pass` 拷进去。
+> 口令文件一旦进了构建缓存或备份，等于私钥可被直接使用；环境变量进程结束即消失。
+> `android/AndroidManifest.xml` 与 `build.sh` 的 `--target-sdk-version` 必须保持一致
+> （当前 24 / 33），两边不一致时以 Manifest 为准会让运行时行为与构建参数对不上。
+
 > 注：`android/sdk/` 与 `cmdline.zip` 是本地下载的 SDK，体积数百 MB，未纳入仓库，请自行通过 Android Studio 或 sdkmanager 安装。
 
 ## Windows EXE
 
-需要 Python 3.8+（GUI 版需 tkinter）与 PyInstaller。仓库只发布 GUI 版包体，CLI 形态直接用源码运行即可：
+需要 Python 3.8+（GUI 版需 tkinter）与 PyInstaller。Python 依赖声明见仓库根目录
+`requirements.txt`（运行时仅标准库，该文件里没有任何要装的包）；测试依赖在
+`requirements-dev.txt`，PyInstaller / py-spy / Pillow 按需安装。
+仓库只发布 GUI 版包体，CLI 形态直接用源码运行即可：
 
 ```bash
+# --add-data 不可省：缺 spec/spec.json 时 EXE 启动即抛「规格文件读取失败」。
+# 分隔符按平台写：Windows 分号，Linux/macOS 冒号（spec/spec.json:spec）。
 python -m PyInstaller --onefile --windowed --clean --noconfirm --name WeakNet \
-  --icon /abs/path/to/assets/weaknet.ico \
-  --distpath . --workpath _build_gui --specpath _build_gui weaknet_gui.py
+  --icon assets/weaknet.ico --add-data "spec/spec.json;spec" \
+  --distpath . --workpath _build_gui --specpath . weaknet_gui.py
 ```
 
-> 坑：PyInstaller 的 `--icon` 相对路径是相对 `--specpath` 解析的，建议直接用绝对路径。
-> 网页控制台已下线，打包时不再需要 `--add-data dashboard.html`。
+> 坑：PyInstaller 的 `--icon` 相对路径是相对 spec 所在目录（`--specpath`）解析的。
+> 这里让 spec 生成在仓库根目录（`--specpath .`），图标就能写 `assets/weaknet.ico`；
+> 不要写死绝对路径，否则换盘符 / 换机器就打包失败。
+> 网页控制台已下线，`--add-data` 现在只用于把 `spec/spec.json` 打进包。
 
 正式产物用本机维护的 `_build_gui/WeakNet.spec` 构建（该目录在 `.gitignore` 内，不随仓库分发）。
 这份 spec 是在上面参数生成的版本上手工补了两处：把 `spec/spec.json` 打进包、引用
@@ -60,14 +73,14 @@ python -m PyInstaller --onefile --windowed --clean --noconfirm --name WeakNet \
 绝对路径，否则项目换盘符 / 换机器后打包会找不到图标：
 
 ```bash
-py -3.10-64 tools/gen_exe_version.py          # 升版本后先刷新版本资源
-py -3.10-64 -m PyInstaller --clean --noconfirm --distpath . --workpath _build_gui \
+python tools/gen_exe_version.py          # 升版本后先刷新版本资源
+python -m PyInstaller --clean --noconfirm --distpath . --workpath _build_gui \
   _build_gui/WeakNet.spec
 ```
 
 > 传 `.spec` 时不能再加 `--specpath`（PyInstaller 会报 `makespec options not valid`）。
 
-### onedir 形态（冷启动专项，P2-2）
+### onedir 形态（冷启动专项）
 
 `--onefile` 每次启动都要把约 21.4 MB 的 `_MEIxxxx` 解包到 `%TEMP%`，这是冷启动
 中位 2.15 s、够不到 `≤2.0 s` 目标的主因（`tools/perf_coldstart.py` 的归因：
@@ -78,12 +91,12 @@ spec 由生成器产出（`_build_gui/` 在 `.gitignore` 内，仓库存不下 s
 所以把生成逻辑放进版本管理）：
 
 ```bash
-py -3.10-64 tools/gen_exe_version.py                      # 升版本后先刷新版本资源
-py -3.10-64 tools/gen_spec_onedir.py                      # 写 _build_gui/WeakNet_onedir.spec
-py -3.10-64 -m PyInstaller --clean --noconfirm \
+python tools/gen_exe_version.py                      # 升版本后先刷新版本资源
+python tools/gen_spec_onedir.py                      # 写 _build_gui/WeakNet_onedir.spec
+python -m PyInstaller --clean --noconfirm \
   --distpath _build_gui/dist_onedir --workpath _build_gui/_work_onedir \
   _build_gui/WeakNet_onedir.spec
-py -3.10-64 tools/perf_exe_measure.py \
+python tools/perf_exe_measure.py \
   --exe _build_gui/dist_onedir/WeakNet/WeakNet.exe --runs 5
 ```
 
@@ -113,8 +126,22 @@ python -m pytest -m device    # 真机契约：先 set ANDROID_SERIAL=<adb devic
   `http_origin` 提供大文件与慢速吐出的源站，用例只通过 HTTP / 代理端口访问 —— 测的是真实管道。
 - 存量 `_t_*.py` 里逻辑更细的部分（源码逐字比对等）由 `tests/test_golden_scripts.py` 统一登记，
   新用例请写在 `test_*.py`。
-- `spec/spec.json` 是参数 / 场景 / 文案 / 组合规则的唯一真源：Python 运行时直接读，
-  Android 侧由 `tools/gen_spec.py` 生成 `SpecGen.java`（`--check` 用于漂移检查）。
+- `spec/spec.json` 是**数据规格**（参数 / 场景 / 组合规则）唯一真源：Python 运行时直接读，
+  Android 侧由 `tools/gen_spec.py` 生成 `SpecGen.java`（`--check` 用于漂移检查）；
+  界面文案不在其中（按钮文字如「开启限速」在 `weaknet_gui.py` / Android 布局里硬编码）。
+  API 契约另由 `tests/_t_api_parity.py` 校验，跨端算法常量由 `tests/_t_spec_parity.py` 校验。
 - CI：`.github/workflows/perf.yml` 每晚（UTC 18:00）与手动触发跑一次性能门禁；
   共享 runner 上设 `WN_PERF_SAME_MACHINE=1` 忽略主机名，但仍校验平台 / Python / 核数 / 架构。
   性能不做 PR 阻断 —— 噪声可达 15%~30%，阻断只会训练大家「重跑一次就绿了」。
+
+### 能离线判定什么，什么仍需真机
+
+- **默认 `pytest -q` 可判定**：`unit` 层纯逻辑（参数 / spec / 组合 / 版本一致性 / 更新检查），
+  `integration` 层本机真实 socket；`gui_text` / `gui_state` / `gui_perf` 是从 GUI 抽出的
+  可注入层（不创建 Tk 窗口、不需要显示器，喂构造状态即可断言；`gui_text` 只 import
+  `tkinter.font` 做字体测量），`report_gen` 报告结构同样用构造快照单测；
+  `test_golden_scripts.py` 还把 `_t_spec_parity.py` / `_t_version.py` 等双端逐字比对脚本
+  纳入默认回归，spec 或版本号漂移会直接失败。
+- **必须真机 / 外部工具**：`-m device` 的 adb 全局代理与 TUN 逐字节转发；限速精度须用
+  iperf3 外部真值（`tools/perf_iperf.py`）。这两类没有可注入替身，CI 只跑前者，
+  绿灯不替代真机回归，也不代表限速精度达标。

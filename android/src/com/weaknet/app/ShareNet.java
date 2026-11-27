@@ -167,7 +167,10 @@ public class ShareNet {
     }
 
     private static String newPin() {
-        return String.format(java.util.Locale.US, "%04d", (int) (Math.random() * 10000));
+        // PIN 是局域网共享的唯一凭据，必须用密码学随机源（Math.random 的
+        // LCG 状态可被反推，4 位 PIN 尤其容易被预测）。不改协议、不改位数。
+        return String.format(java.util.Locale.US, "%04d",
+                new java.security.SecureRandom().nextInt(10000));
     }
 
     public static synchronized String getPin() {
@@ -1139,7 +1142,9 @@ public class ShareNet {
                 if (d == null) {
                     res = errorJson("JSON 解析失败");
                 } else {
-                    JSONObject bad = authError(d);
+                    JSONObject bad = authError(d,
+                            s.getInetAddress() == null ? null
+                                    : s.getInetAddress().getHostAddress());
                     if (bad != null) {
                         WeakNet.I.log("share", "拒收 " + cleanName(d.optString("from", ""), "未知设备")
                                 + " 的推送（HTTP " + bad.optInt("code", 403) + "）："
@@ -1164,25 +1169,87 @@ public class ShareNet {
         }
     }
 
+    // PIN 退避：4 位 PIN 只有 1 万种组合，不限速同网段几分钟就能穷举。
+    // 与 Windows 侧同参数（前 5 次不锁、60s 起翻倍、上限 15 分钟）。
+    private static final int FAIL_FREE = 5;
+    private static final long LOCK_MIN_MS = 60000L;
+    private static final long LOCK_MAX_MS = 900000L;
+    private static final java.util.concurrent.ConcurrentHashMap<String, long[]> FAILS =
+            new java.util.concurrent.ConcurrentHashMap<String, long[]>();   // ip -> {次数, 解锁时刻}
+
+    private static long throttleLeftMs(String ip) {
+        if (ip == null) return 0;
+        long[] st = FAILS.get(ip);
+        if (st == null) return 0;
+        // 退避必须用单调时钟：系统时间被用户/NTP 调整时，墙上时钟会让
+        // 解锁时刻提前或延后，与 Windows 侧 time.monotonic() 的口径不一致。
+        long left = st[1] - android.os.SystemClock.elapsedRealtime();
+        return left > 0 ? left : 0;
+    }
+
+    private static void noteFail(String ip) {
+        if (ip == null) return;
+        if (FAILS.size() > 512) {          // 伪造源地址可以刷表，清掉已过期的
+            long now = android.os.SystemClock.elapsedRealtime();
+            for (java.util.Map.Entry<String, long[]> e : FAILS.entrySet()) {
+                if (e.getValue()[1] <= now) FAILS.remove(e.getKey(), e.getValue());
+            }
+        }
+        long[] st = FAILS.get(ip);
+        if (st == null) {
+            st = new long[]{0, 0};
+            FAILS.put(ip, st);
+        }
+        synchronized (st) {
+            st[0]++;
+            if (st[0] >= FAIL_FREE) {
+                int over = (int) Math.min(st[0] - FAIL_FREE, 4);
+                long lock = Math.min(LOCK_MAX_MS, LOCK_MIN_MS * (1L << over));
+                st[1] = android.os.SystemClock.elapsedRealtime() + lock;
+                WeakNet.I.log("share", "PIN 连续错误 " + st[0] + " 次，锁定 "
+                        + (lock / 1000) + " 秒（" + ip + "）");
+            }
+        }
+    }
+
+    private static void noteOk(String ip) {
+        if (ip != null) FAILS.remove(ip);
+    }
+
     /** 推送鉴权：null = 放行；否则带 code/error 的响应体 */
-    private static JSONObject authError(JSONObject d) {
+    private static JSONObject authError(JSONObject d, String ip) {
         JSONObject o = new JSONObject();
         try {
-            if (d.optInt("ver", 1) < SHARE_VER) {
-                if (!isAllowLegacy()) {
-                    o.put("code", 409);
-                    o.put("error", "对方是旧版 WeakNet（无 PIN），已拒收；可在共享面板允许旧版设备");
-                    return o;
-                }
-                return null;
-            }
-            String mine = getPin();
-            if (mine.length() > 0 && !mine.equals(normPin(d.optString("pin", "")))) {
-                o.put("code", 403);
-                o.put("error", "PIN 不正确");
+            long left = throttleLeftMs(ip);
+            if (left > 0) {
+                o.put("code", 429);
+                o.put("error", "PIN 连续错误，请 " + ((left + 999) / 1000) + " 秒后再试");
                 return o;
             }
-            return null;
+            // 状态读取（依赖 Context）与纯判定分离：authVerdict 不碰 Context，
+            // 可在纯 JDK 单测里覆盖 409/403/放行三档，避免两端规则漂移。
+            int ver = d.optInt("ver", 1);
+            boolean legacy = ver < SHARE_VER;
+            Integer code = authVerdict(ver, d.optString("pin", ""),
+                    getPin(), isAllowLegacy());
+            if (code == null) {
+                // 旧版放行不 noteOk（与 Windows 侧一致：旧版只进收件箱，
+                // 不算一次成功鉴权）；仅正常 PIN 通过时清除失败计数。
+                if (!legacy) noteOk(ip);
+                return null;
+            }
+            if (code.intValue() == 403) {
+                noteFail(ip);
+                long l2 = throttleLeftMs(ip);
+                if (l2 > 0) {
+                    o.put("code", 429);
+                    o.put("error", "PIN 连续错误，已锁定 " + ((l2 + 999) / 1000) + " 秒");
+                    return o;
+                }
+            }
+            o.put("code", code.intValue());
+            o.put("error", authErrorText(code.intValue()));
+            return o;
         } catch (Exception e) {
             try {
                 o.put("code", 403);
@@ -1191,6 +1258,31 @@ public class ShareNet {
             }
             return o;
         }
+    }
+
+    /**
+     * 纯鉴权判定（无 Context / 无时间依赖，供纯 JDK 单测直接调用）。
+     * 返回 null = 放行；409 = 旧版被拒 / 本机未设 PIN；403 = PIN 不正确。
+     * 与 Windows 侧 share_auth_error 的规则逐条对齐。
+     */
+    static Integer authVerdict(int ver, String suppliedPin, String mine, boolean allowLegacy) {
+        if (ver < SHARE_VER) {
+            return allowLegacy ? null : Integer.valueOf(409);
+        }
+        if (mine == null || mine.length() == 0) {
+            // fail-closed：本机没设 PIN 时拒收，不能让任何人往收件箱推内容
+            return Integer.valueOf(409);
+        }
+        if (!mine.equals(normPin(suppliedPin))) {
+            return Integer.valueOf(403);
+        }
+        return null;
+    }
+
+    static String authErrorText(int code) {
+        if (code == 409) return "对方是旧版 WeakNet（无 PIN），已拒收；可在共享面板允许旧版设备";
+        if (code == 403) return "PIN 不正确";
+        return "鉴权失败";
     }
 
     private static JSONObject errorJson(String msg) {

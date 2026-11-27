@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""GUI 视图模型层（P1-6 / P2-3）。
+"""GUI 视图模型层：把引擎状态映射为界面该显示的文案与样式。
 
 把 refresh() 里「该显示什么」与「怎么改控件」拆开：
 
@@ -43,11 +43,16 @@ def rate_of(prev_t, prev_down, prev_up, now, down, up, min_dt=0.4):
 
 
 def header_view(proxy_host, proxy_port, lan_ip, ctrl_port, sysproxy_on):
-    """顶栏四行文本：代理地址、控制接口、局域网按钮、系统代理按钮。"""
+    """顶栏四行文本：代理地址、控制接口、局域网按钮、系统代理按钮。
+
+    局域网模式下直接给局域网 IP——手机把它填进 Wi-Fi 代理即可，
+    不需要任何凭据（Android 原生代理设置也没有凭据输入口）。
+    """
     lan = proxy_host == "0.0.0.0"
     addr = f"{lan_ip}:{proxy_port}" if lan else f"127.0.0.1:{proxy_port}"
+    proxy = f"代理地址：{addr}　（App / 设备把代理指向它）"
     return {
-        "proxy": f"代理地址：{addr}　（App / 设备把代理指向它）",
+        "proxy": proxy,
         "ctrl": f"控制接口：http://127.0.0.1:{ctrl_port}/"
                 f"　局域网 IP：{lan_ip}",
         "lan_text": "关闭局域网访问" if lan else "开启局域网访问",

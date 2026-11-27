@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
-"""P0-2 内存侧：tracemalloc 快照对比（stdlib，无需新依赖，不改正常运行路径）。
+"""内存侧：tracemalloc 快照对比（stdlib，无需新依赖，不改正常运行路径）。
 
-P0-2 要求「内存侧用 tracemalloc 快照对比，盯 DelayLine 4MB 积压、GUI 缓存」。
+内存侧用 tracemalloc 快照对比，盯 DelayLine 4MB 积压、GUI 缓存。
 这里直接跑**产品里的 weaknet.DelayLine**，负载对齐它的背压上限
 （MAX_BLOCKS=64 × 64KB ≈ 4MB），做「预热后稳态快照 → 多轮负载 → 快照 diff」，
 并检测释放后是否回落（持续增长 = 泄漏嫌疑）。

@@ -1,7 +1,8 @@
 # -*- coding: utf-8 -*-
 """真机批次 5：跨端共享 L4（Windows ↔ Android，真实局域网 HTTP）。
 
-环境事实：PC 192.168.1.49 / 手机 172.16.3.82，跨网段路由可达但广播不通。
+环境事实：PC <PC_IP> / 手机 <PHONE_IP>，跨网段路由可达但广播不通。
+真实地址不入库，由环境变量 WEAKNET_PC_IP / WEAKNET_PHONE_IP 注入。
   * PC→手机推送：Windows /api/push 直接接受 ip，不需要发现。
   * 手机→PC推送：手机只认 UDP 登记过的 peer —— 从 PC 向手机 18899 发单播
     presence（与广播同格式，解析端不校验是否广播包），把 PC 注册进去。
@@ -25,8 +26,14 @@ import urllib.request
 sys.path.insert(0, __file__.rsplit("\\", 1)[0])
 import _t_dev_lib as D
 
+# 真机地址只从环境变量取，默认值是占位符；跑真机批次时按需设置：
+#   WEAKNET_PC_IP     PC 的局域网地址（文档/回推登记用）
+#   WEAKNET_PHONE_IP  手机的局域网地址（推送与单播 presence 用）
+PC_IP = os.getenv("WEAKNET_PC_IP", "<PC_IP>")
+PHONE_IP = os.getenv("WEAKNET_PHONE_IP", "<PHONE_IP>")
+
 WIN = "http://127.0.0.1:8899"
-PHONE_SHARE = "172.16.3.82:8900"
+PHONE_SHARE = "%s:8900" % PHONE_IP
 PC_NAME = "PC测试机"
 PC_ID = "pc-xtest-0001"
 
@@ -55,7 +62,7 @@ def announce_pc_to_phone():
     okport = None
     for port in range(18899, 18907):
         try:
-            s.sendto(msg, ("172.16.3.82", port))
+            s.sendto(msg, (PHONE_IP, port))
             okport = port
             break
         except Exception:

@@ -1,0 +1,18 @@
+# WeakNet Python 依赖（Python 3.8+）
+#
+# 运行时零第三方依赖：weaknet.py / weaknet_gui.py / gui_*.py / report_gen.py /
+# update_check.py / usb_phone.py 只用标准库；GUI 需要 tkinter（Windows 安装包自带）。
+# 因此这个文件里没有任何要安装的包 —— `pip install -r requirements.txt` 是空操作，
+# 不会给普通用户顺手装上测试框架。
+#
+# 跑测试 / 静态检查请用 requirements-dev.txt（pytest / pytest-cov / ruff）：
+#   py -3 -m pip install -r requirements-dev.txt
+#
+# 可选：仅图标生成脚本 gen_icon.py 需要 `import PIL`，日常运行/开发不需要。
+# 要用时手动安装：pip install "Pillow>=9.5"
+# Pillow>=9.5
+#
+# 可选工具（命令行调用，不是 import，按需单独安装，不列为普通用户依赖）：
+#   py-spy         —— python tools/perf_profile.py record/top/dump 采样
+#   PyInstaller>=5 —— 打 Windows EXE，命令见 docs/build.md
+# 安装：pip install py-spy "PyInstaller>=5"

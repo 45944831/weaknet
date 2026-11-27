@@ -285,6 +285,10 @@ public class SettingsSheet {
 
     /** 用浏览器打开 GitHub 发布页（含附件下载）；打不开就把链接完整提示出来。 */
     private void openPage(String url) {
+        // ACTION_VIEW 的最后一道闸：即便调用方传进来的不是 State.page，
+        // 也必须过白名单才允许打开，非法地址一律回退到硬编码发布页。
+        String safe = SafePageUrl.safe(url);
+        url = safe != null ? safe : UpdateCheck.PAGE_LATEST;
         try {
             Intent i = new Intent(Intent.ACTION_VIEW, Uri.parse(url));
             i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);

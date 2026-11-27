@@ -41,9 +41,12 @@ def test_auth_requires_matching_pin(tmp_store):
     assert W.share_auth_error({"ver": 2, "pin": "1234"}) is None
 
 
-def test_auth_passes_when_local_pin_missing(tmp_store):
+def test_auth_rejects_when_local_pin_missing(tmp_store):
+    """S3：本机没设 PIN 时不能 fail-open 放行，必须 409 并提示去设置。"""
     W.G.share_pin = ""
-    assert W.share_auth_error({"ver": 2}) is None
+    err = W.share_auth_error({"ver": 2})
+    assert err is not None and err[0] == 409
+    assert "PIN" in err[1]
 
 
 # ---------------------------------------------------------------- 入库规则
@@ -142,3 +145,45 @@ def test_combo_with_no_local_steps_is_dropped(tmp_store):
         {"name": "空组合", "steps": [{"key": "no-such-scene", "minutes": 1}]}]))
     assert res["accepted"] == []
     assert res["dropped"] and res["dropped"][0]["name"] == "空组合"
+
+
+# ---------------------------------------------------------------- PIN 退避（S3）
+
+def test_pin_failures_lock_source_after_threshold(tmp_store):
+    """4 位 PIN 只有 1 万种组合，没有退避等于可以穷举。"""
+    W.G.share_pin = "1234"
+    W.G.share_fail.clear()
+    ip = "192.168.1.50"
+    for _ in range(W.SHARE_FAIL_FREE - 1):
+        err = W.share_auth_error({"ver": 2, "pin": "0000"}, peer_ip=ip)
+        assert err is not None and err[0] == 403
+
+    err = W.share_auth_error({"ver": 2, "pin": "0000"}, peer_ip=ip)
+    assert err is not None and err[0] == 429 and "锁定" in err[1]
+
+    # 锁定期内即使 PIN 正确也拒绝——否则先锁再猜对就能绕过退避
+    err = W.share_auth_error({"ver": 2, "pin": "1234"}, peer_ip=ip)
+    assert err is not None and err[0] == 429
+
+    # 退避只针对来源，别把正常设备一起关在门外
+    assert W.share_auth_error({"ver": 2, "pin": "1234"},
+                              peer_ip="192.168.1.51") is None
+
+
+def test_pin_success_clears_failure_counter(tmp_store):
+    W.G.share_pin = "1234"
+    W.G.share_fail.clear()
+    ip = "10.0.0.9"
+    for _ in range(3):
+        assert W.share_auth_error({"ver": 2, "pin": "0000"}, peer_ip=ip)[0] == 403
+    assert W.share_auth_error({"ver": 2, "pin": "1234"}, peer_ip=ip) is None
+    assert W.share_throttle_left(ip) == 0
+    assert ip not in W.G.share_fail
+
+
+def test_pin_backoff_does_not_break_loopback_without_ip(tmp_store):
+    """没有来源 IP（单测/嵌入式调用）时不能误锁，行为保持原样。"""
+    W.G.share_pin = "1234"
+    W.G.share_fail.clear()
+    for _ in range(10):
+        assert W.share_auth_error({"ver": 2, "pin": "0000"})[0] == 403

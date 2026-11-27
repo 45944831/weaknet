@@ -6,7 +6,7 @@ import java.util.Collections;
 import java.util.List;
 
 /**
- * 浮窗刷新帧率统计（P2-3）。
+ * 浮窗刷新帧率统计。
  *
  * <p>为什么需要它：浮窗靠 {@code Handler.postDelayed(..., 500)} 轮询刷新，
  * 500ms 的粒度会把「一帧卡了多久」完全盖住 —— 用户只看到「数字不动」，

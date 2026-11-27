@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""桌面 GUI 刷新帧统计（P2-3 的 Windows 侧）。
+"""桌面 GUI 刷新帧统计（Windows 侧）。
 
 Android 浮窗有 `FrameStats.java`，桌面侧一直是空白：刷新是 500ms 定时器驱动的，
 「一帧卡了多久」被 500ms 的粒度完全盖住 —— 用户只看到数字不动，分不清是弱网本身

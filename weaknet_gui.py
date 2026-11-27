@@ -2,7 +2,7 @@
 WeakNet —— App 弱网测试工具（桌面 GUI 版）
 
 用 tkinter 写的原生窗口界面，不依赖任何第三方库。
-引擎与 Web 控制台复用 weaknet.py：GUI 线程负责显示，后台线程跑 asyncio 服务。
+GUI 通过 weaknet.py 提供的引擎与 HTTP 控制接口工作：界面线程负责显示，后台线程跑 asyncio 服务（网页控制台已下线，不要找前端代码）。
 
 用法：
     python weaknet_gui.py [--proxy-port 8888] [--ctrl-port 8899]
@@ -25,7 +25,7 @@ import time
 import tkinter as tk
 import weakref
 import webbrowser
-from tkinter import filedialog, font as tkfont, messagebox, simpledialog, ttk
+from tkinter import filedialog, font as tkfont, messagebox, ttk
 
 # 以 --windowed 打包时没有控制台，sys.stdout / sys.stderr 为 None。
 # 必须给它们一个去处，否则任何 print / traceback 输出都会异常导致闪退。
@@ -35,7 +35,6 @@ if sys.stderr is None:
     sys.stderr = open(os.devnull, "w", encoding="utf-8")
 
 import weaknet as W
-import usb_phone as UP
 import update_check as UC
 
 # 由 main() 在解析完参数后置位：无窗口模式下出错不能弹 messagebox（没人点，宿主会一直等）
@@ -135,9 +134,9 @@ def _apply_window_icon(root):
 # ---------------------------------------------------------------- 主题层
 # 配色 / 字体 / 标题栏 / ttk 主题移到 gui_theme.py：面板模块要独立成文件，
 # 不能被主模块反向 import（会循环）。这里显式导入，名字保持不变。
-from gui_theme import (DARK, BG, CARD, LINE, TEXT, MUTED, ACCENT, ACCENT_D,
-                       OK, WARN, ERR, BTN2, BTN2_HOVER, FIELD, CHIP, SELECT,
-                       FONT, FONT_B, FONT_T, _detect_dark, _darken_titlebar,
+from gui_theme import (BG, CARD, LINE, TEXT, MUTED, ACCENT,
+                       OK, WARN, ERR, BTN2, BTN2_HOVER, FIELD, SELECT,
+                       FONT, FONT_B, FONT_T, _darken_titlebar,
                        _scrollbar, _apply_theme)
 from gui_notes import NotesMixin
 from gui_scope import ScopeMixin
@@ -147,13 +146,12 @@ from gui_usb import UsbMixin
 # 说明小窗排版常量 / 参数摘要 / 格式化函数移到 gui_text.py：它们不依赖 App 状态，
 # 单独成模块后可以直接跑单测（tests/test_gui_text.py），也把主文件从 3,616 行
 # 降下来。这里用显式导入而不是 import *，避免把 tk / weaknet 悄悄带进命名空间。
-from gui_text import (NOTE_PAD, NOTE_TEXT_W, NOTE_TIP_INDENT, NOTE_WIN_W,
-                      SHORT, FIELDS, fmt_rate, fmt_bytes, summarize, detail,
-                      _cap_name_var, _note_measure)
-# 视图模型层（P1-6）：refresh 里「该显示什么」是纯函数，这里只负责「怎么改控件」。
+from gui_text import (SHORT, FIELDS, fmt_rate, fmt_bytes, summarize,  # noqa: F401
+                      detail, _cap_name_var)
+# 视图模型层：refresh 里「该显示什么」是纯函数，这里只负责「怎么改控件」。
 # 纯逻辑单独成模块后可以脱离 Tk 单测（tests/test_gui_state.py）。
 import gui_state as S
-# 刷新帧统计（P2-3）：口径与 Android FrameStats 一致，纯逻辑可单测。
+# 刷新帧统计：口径与 Android FrameStats 一致，纯逻辑可单测。
 import gui_perf as P
 # 测试报告：把状态快照渲染成开发可读的 Markdown，纯逻辑可单测。
 import report_gen as R
@@ -878,7 +876,7 @@ class App(NotesMixin, ScopeMixin, ShareMixin, UsbMixin):
     # ---------------- 自定义栏 ----------------
 
     def reload_mine(self):
-        """重画自定义场景按钮。Web 控制台那一端增删的场景，refresh 会自动同步"""
+        """重画自定义场景按钮。其它端经 /api 增删的场景，refresh 会自动同步"""
         self.mine_items = W.get_user_presets()
         self.mine_sig = ",".join(it["id"] for it in self.mine_items)
         for b in self.mine_btns.values():
@@ -1484,14 +1482,24 @@ class App(NotesMixin, ScopeMixin, ShareMixin, UsbMixin):
     def export_report(self):
         """把当前状态快照导出成 Markdown 报告（供开发阅读）。
 
-        取数走 W.status_payload()——与 Web 控制台 / 接口同一份口径，不另起一套。
+        取数走 W.status_payload()——与 /api/status 同一份口径，不另起一套。
         帧统计是 GUI 独有的，单独从 self._frames 取；没有就写 None，不影响报告。
         写盘失败要弹窗说清楚，不能让「点了没反应」看起来像功能不存在。
         """
         payload = W.status_payload()
         frames = self._frames.snapshot() if self._frames is not None else None
+        # 报告会被转发给开发/测试甚至贴进 issue，完整 IP 等于把「被测 App
+        # 访问了哪些服务」一起交出去。默认脱敏，只有明确选「否」才留原始地址。
+        redact = messagebox.askyesnocancel(
+            "导出报告",
+            "是否对报告中的 IP 地址脱敏？\n\n"
+            "「是」（推荐）：末两段显示为 x.x，例如 64.233.x.x，"
+            "仍能看出网段与服务商。\n"
+            "「否」：保留完整 IP，仅限内部排障使用。")
+        if redact is None:          # 取消导出
+            return
         text = R.build(payload, param_specs=W.PARAM_SPECS,
-                       param_notes=W.PARAM_NOTES, frames=frames)
+                       param_notes=W.PARAM_NOTES, frames=frames, redact=redact)
         initial = R.default_filename()
         path = filedialog.asksaveasfilename(
             title="导出弱网测试报告",
@@ -1645,10 +1653,34 @@ class App(NotesMixin, ScopeMixin, ShareMixin, UsbMixin):
         self.refresh_header()
 
     def toggle_lan(self):
-        host = "0.0.0.0" if W.G.proxy_host == "127.0.0.1" else "127.0.0.1"
-        self._run(W.restart_proxy(host))
-        W.log_event("config", "代理监听切换为 " + host)
-        self.refresh_header()
+        """局域网访问开关。
+
+        绑 0.0.0.0 等于把代理端口暴露给整个网段，开启前确认一次。
+        这里刻意不做代理层鉴权：Android 原生 Wi-Fi 代理设置只有主机名、
+        端口、绕过列表，没有凭据输入口，一旦要求 Proxy-Authorization，
+        「手机 Wi-Fi 直连」这条路就彻底不可用。
+        """
+        if W.G.proxy_host == "127.0.0.1":
+            ip = W.G.lan_ip or "本机局域网 IP"
+            port = W.G.proxy_port
+            if not messagebox.askyesno(
+                    "开启局域网访问",
+                    "开启后，本机代理端口会对同一网段的设备开放。\n\n"
+                    "同一网络下的其它设备可直接把 HTTP 代理指向：\n\n"
+                    "    %s:%d\n\n"
+                    "请只在可信任的网络（家里 / 公司内网）使用。\n\n"
+                    "是否继续？" % (ip, port)):
+                return
+            self._run(W.restart_proxy("0.0.0.0"))
+            W.log_event("config", "代理监听切换为 0.0.0.0（同网段可访问）")
+            self.refresh_header()
+            messagebox.showinfo("局域网访问已开启",
+                                "被测设备的 HTTP 代理填：\n\n    %s:%d"
+                                % (ip, port))
+        else:
+            self._run(W.restart_proxy("127.0.0.1"))
+            W.log_event("config", "代理监听切换为 127.0.0.1（仅本机）")
+            self.refresh_header()
 
     def _sync_run_btn(self):
         """限速总开关的按钮态：未开启时是实心主按钮（邀请点开），运行中变成浅底的停止。"""
@@ -1802,7 +1834,7 @@ class App(NotesMixin, ScopeMixin, ShareMixin, UsbMixin):
             self._last = (now, g.bytes_down, g.bytes_up)
 
         self.refresh_header()
-        self._sync_run_btn()      # 另一端（Web 控制台）也可能开关了限速
+        self._sync_run_btn()      # 其它端（控制接口/共享推送）也可能开关了限速
         # 标签跟着选中项走：组合与自定义场景合成一张卡片后，
         # 选中的东西不在当前这一页时用户会以为「没生效」——自动翻到对应的那页
         key = g.preset_key or ""
@@ -1847,7 +1879,7 @@ class App(NotesMixin, ScopeMixin, ShareMixin, UsbMixin):
         except Exception:
             pass
 
-        # 接管范围可能被 Web 控制台那一端改过，提示行同步显示最新的生效值
+        # 接管范围可能被其它端经控制接口改过，提示行同步显示最新的生效值
         try:
             self._scope_tip()
         except Exception:

@@ -98,3 +98,15 @@ def test_norm_user_profile_rejects_bool_and_unknown():
     prof = W._norm_user_profile("x", {"loss_pct": True, "nope": 5})
     assert prof["loss_pct"] == 0
     assert "nope" not in prof
+
+
+def test_has_limits_ignores_dependent_params():
+    """stall_ms / flap_blackout_sec 单独设置不构成限速（与 Java 同口径）。
+
+    这两项只在 loss_pct>0 / flap_sec>0 时才被引擎用到：单独改它们不会
+    改变任何流量，算进 has_limits 会让「限速开关」在什么都没限的情况下
+    显示为开启（Java Profile.hasLimits() 是显式排除的）。
+    """
+    assert W.has_limits({"stall_ms": 2000}) is False
+    assert W.has_limits({"flap_blackout_sec": 2}) is False
+    assert W.has_limits({"loss_pct": 5}) is True

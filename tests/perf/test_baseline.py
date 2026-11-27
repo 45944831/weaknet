@@ -206,8 +206,37 @@ def test_ci_flag_alone_is_not_enough_for_local_baseline(monkeypatch):
     assert B.compare("bw_8000_kbps", 5000, base=base)["level"] == "different-machine"
 
 
+def test_compare_stale_baseline_does_not_judge():
+    """build / spec 变了，中位数比的就不是同一个被测对象：报 stale 而不是 ok/fail。
+
+    仓库基线曾停在 build 126 / spec `6a95fc73`，代码已是 build 130 / `9990e03d`，
+    比较照跑、结论照出 —— 门禁等于在拿两个产品互相打分。
+    """
+    base = _base({"bw_8000_kbps": {"median": 8000}})
+    base.update({"version": "1.1.16", "build": 126, "spec_hash": "6a95fc73"})
+    v = B.compare("bw_8000_kbps", 4000, base)
+    assert v["level"] == "stale-baseline"
+    assert v["delta"] is None
+    assert "WN_PERF_UPDATE_BASELINE=1" in v["msg"]
+
+
+def test_compare_current_build_still_judges():
+    cur = B.version_info()
+    base = _base({"bw_8000_kbps": {"median": 8000}})
+    base.update({"version": cur["version"], "build": cur["build"],
+                 "spec_hash": B.spec_hash()})
+    assert B.compare("bw_8000_kbps", 8000, base)["level"] == "ok"
+    assert B.compare("bw_8000_kbps", 5000, base)["level"] == "fail"
+
+
+def test_compare_legacy_baseline_without_build_fields_is_not_stale():
+    """旧格式基线没有 version/build/spec_hash：缺字段按兼容处理，不误报过期。"""
+    base = _base({"bw_8000_kbps": {"median": 8000}})
+    assert B.compare("bw_8000_kbps", 8000, base)["level"] == "ok"
+
+
 def test_shipped_baseline_carries_full_v2_context():
-    """P0-1：仓库里那份基线必须真的带齐 v2 契约，不能只把契约写在代码里。
+    """仓库里那份基线必须真的带齐 v2 契约，不能只把契约写在代码里。
 
     `baseline.py` 支持 SCHEMA=2 不等于产物升级过 —— 核查时发现默认基线
     仍是 schema 1、context 为空，于是「数字 + 依赖/输入/预热/重复次数/

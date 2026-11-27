@@ -194,6 +194,100 @@ public class _ReportGenTest {
         ck("humanDuration", ReportGen.humanDuration(125).equals("2 分 5 秒"), null);
         ck("cell 转义竖线", ReportGen.cell("a|b").equals("a\\|b"), null);
 
+        // 10) 全量故障计数（C4：events 只给最近 60 条，故障次数不能跟着截断）
+        Map<String, Object> s9 = status();
+        s9.put("fault_counts_full", map("dns", 7, "disconnect", 3, "connect", 120));
+        s9.put("events", events("切换场景：4G LTE", "@error:连接失败"));
+        statsOf(s9).put("total", 5L);
+        String r9 = ReportGen.build(s9);
+        ck("全量故障计数优先于 events", has(r9, "DNS 故障×7", "模拟断连×3", "| DNS 故障 | 7 |"), null);
+        ck("全量计数不被 events 覆盖", ReportGen.summarizeEvents(s9).get("dns").equals(7), null);
+        Map<String, Object> s10 = status();
+        s10.put("events", events("@dns:模拟 DNS 故障", "切换场景：4G LTE"));
+        statsOf(s10).put("total", 3L);   // 0 连接时判「empty」，不会输出故障次数
+        String r10 = ReportGen.build(s10);
+        ck("缺字段时回退 events 统计", r10.contains("DNS 故障×1"), null);
+        ck("选择场景不算落地", ReportGen.sceneName("选择场景：4G LTE").length() == 0
+                && ReportGen.sceneName("切换场景：4G LTE").equals("4G LTE"), null);
+
+        // 11) 口径说明 5 条与桌面版逐字一致（N2 / L4）
+        String[] caveats = {
+            "延迟是**逐包注入**的，不是只在建连时加一次；一次往返约等于上行延迟 + 下行延迟。",
+            "丢包由停顿（`stall_ms`）实现，**不是 TCP 重传语义**——别按重传模型去推断吞吐。",
+            "上下行字节是引擎对**已接管连接**的计数，不含直通（未接管）流量。",
+            "事件日志是内存环形缓冲（上限 300 条），GUI 只展示最近 60 条；"
+                    + "故障计数取全量缓冲（fault_counts_full），本报告导出的是点击那一刻的快照。",
+            "运行时长是**引擎本次启动**至今的时间，不是单个场景的持续时间。"
+        };
+        for (int i = 0; i < caveats.length; i++) {
+            ck("口径说明第 " + (i + 1) + " 条与桌面版逐字一致",
+                    r0.contains("- " + caveats[i]), null);
+        }
+
+        // 12) fault_counts_full 预填 0 值键不得误报「注入了故障」
+        Map<String, Object> s11 = status();
+        s11.put("fault_counts_full", map("connect", 5, "dns", 0, "disconnect", 0,
+                "timeout", 0, "reject", 0, "flap", 0));
+        s11.put("events", events("切换场景：4G LTE"));
+        statsOf(s11).put("total", 5L);
+        String r11 = ReportGen.build(s11);
+        ck("0 值故障键不误报注入", !r11.contains("注入了") && !r11.contains("故障注入")
+                && !r11.contains("模拟断连×"), null);
+
+        Map<String, Object> s12 = status();
+        s12.put("fault_counts_full", map("dns", 2, "disconnect", 0));
+        s12.put("events", events("切换场景：4G LTE"));
+        statsOf(s12).put("total", 5L);
+        String r12 = ReportGen.build(s12);
+        ck("正数故障键照常点名", has(r12, "注入了DNS 故障", "DNS 故障×2")
+                && !r12.contains("模拟断连×"), null);
+
+        // 13) 整份报告脱敏：规则与桌面版 report_gen.redact_text 一致
+        ck("正常 IPv4 掩成前两段",
+                ReportGen.redactText("建连 192.168.1.100:443").equals("建连 192.168.x.x:443"),
+                ReportGen.redactText("建连 192.168.1.100:443"));
+        ck("句尾的 . 不挡掩码",
+                ReportGen.redactText("host 10.0.0.1.").equals("host 10.0.x.x."),
+                ReportGen.redactText("host 10.0.0.1."));
+        ck("五段只掩前四段，第五段按独立串保留",
+                ReportGen.redactText("10.0.0.1.2").equals("10.0.x.x.2"),
+                ReportGen.redactText("10.0.0.1.2"));
+        ck("全数字 IPv6 也脱敏（8 组标准地址）",
+                ReportGen.redactText("1111:2222:3333:4444:5555:6666:7777:8888")
+                        .equals("1111:****"),
+                ReportGen.redactText("1111:2222:3333:4444:5555:6666:7777:8888"));
+        ck("时间戳不被当成 IPv6",
+                ReportGen.redactText("19:00:00").equals("19:00:00"),
+                ReportGen.redactText("19:00:00"));
+        ck("版本号保留（v / 版本 前缀，首段 1~9）",
+                ReportGen.redactText("v1.2.3.4 与 版本 1.2.3").equals("v1.2.3.4 与 版本 1.2.3"),
+                ReportGen.redactText("v1.2.3.4 与 版本 1.2.3"));
+        ck("v10.0.0.1 是真实 IP，不按版本号放过",
+                ReportGen.redactText("v10.0.0.1").equals("v10.0.x.x"),
+                ReportGen.redactText("v10.0.0.1"));
+        ck("回环 127.0.0.1 保留",
+                ReportGen.redactText("监听 127.0.0.1:8888").equals("监听 127.0.0.1:8888"),
+                ReportGen.redactText("监听 127.0.0.1:8888"));
+        ck("监听地址 0.0.0.0 保留",
+                ReportGen.redactText("0.0.0.0").equals("0.0.0.0"),
+                ReportGen.redactText("0.0.0.0"));
+        ck("域名不动",
+                ReportGen.redactText("mirrors.tuna.tsinghua.edu.cn")
+                        .equals("mirrors.tuna.tsinghua.edu.cn"),
+                ReportGen.redactText("mirrors.tuna.tsinghua.edu.cn"));
+        ck("非法段（>255）不动",
+                ReportGen.redactText("999.1.1.1").equals("999.1.1.1"),
+                ReportGen.redactText("999.1.1.1"));
+
+        // 整份报告（不只是工具函数）：事件里的对端 IP 必须已被掩掉
+        Map<String, Object> s13 = status();
+        s13.put("events", events("@connect:TCP 10.1.2.3:5555 → 93.184.216.34:443"));
+        statsOf(s13).put("total", 1L);
+        String r13 = ReportGen.build(s13);
+        ck("build() 输出已脱敏，不含完整对端 IP",
+                !r13.contains("93.184.216.34") && !r13.contains("10.1.2.3")
+                        && has(r13, "10.1.x.x", "93.184.x.x"), null);
+
         System.out.println("\n结果: " + pass + " 通过 / " + fail + " 失败");
         if (fail > 0) System.exit(1);
     }

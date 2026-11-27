@@ -5,13 +5,16 @@
 这里只断言「状态码 + 顶层字段 + 关键语义」，不依赖机器上的具体数据，
 所以能进 CI 反复跑；平台差异（VPN/悬浮窗等）也按 501 明确表达。
 """
+import asyncio
 import socket
 import threading
 import time
 
 import pytest
 
+import report_gen as R
 import weaknet as W
+from support import run_async
 
 pytestmark = pytest.mark.integration
 
@@ -235,7 +238,7 @@ def test_status_stays_responsive_while_pushes_stall(engine):
             t.join(timeout=3)
 
 
-# ---- P0-4：畸形/超限请求必须被明确拒绝，而不是挂着或静默成功 ----
+# ---- 畸形/超限请求必须被明确拒绝，而不是挂着或静默成功 ----
 
 def _raw_http(engine, payload, timeout=5.0):
     """直接发原始字节，绕开 http.client 的规范化（这里要测的正是畸形输入）"""
@@ -289,3 +292,149 @@ def test_too_many_header_lines_rejected(engine):
     raw = _raw_http(engine, b"GET /api/status HTTP/1.1\r\nHost: 127.0.0.1\r\n"
                     + lines + b"\r\n")
     assert _code(raw) == 431
+
+
+# ---------------------------------------------------------------- C1/C2 端到端
+
+def _config_messages(body):
+    return [e.get("msg", "") for e in body.get("events", [])
+            if isinstance(e, dict) and e.get("type") == "config"]
+
+
+def test_preset_selection_without_limit_is_not_reported_as_tested(engine):
+    """未开限速 POST /api/preset：记「选择场景：」，报告不列为测过（C1/C2）。"""
+    name = W.build_preset_profile("wifi")["name"]
+    r = engine.api.post("/api/preset", {"key": "wifi"})
+    assert r.status == 200 and r.body["ok"] is True
+    body = engine.status()
+    assert body["limit_on"] is False
+    assert body["last_profile"] is None, "只是选中却污染了报告兜底"
+    msgs = _config_messages(body)
+    assert ("选择场景：" + name) in msgs
+    assert ("切换场景：" + name) not in msgs
+    text = R.build(body)
+    assert "| 本次测过的场景 | (仅直连，未施加弱网) |" in text
+
+
+def test_preset_switch_while_running_is_reported_as_tested(engine):
+    """已开限速 POST /api/preset：记「切换场景：」，报告列为测过（C1）。"""
+    name = W.build_preset_profile("wifi")["name"]
+    assert engine.api.post("/api/run", {"enable": True}).status == 200
+    r = engine.api.post("/api/preset", {"key": "wifi"})
+    assert r.status == 200 and r.body["ok"] is True
+    body = engine.status()
+    assert body["limit_on"] is True
+    assert body["last_profile"] == W.build_preset_profile("wifi")
+    msgs = _config_messages(body)
+    assert ("切换场景：" + name) in msgs
+    assert ("选择场景：" + name) not in msgs
+    text = R.build(body)
+    row = next(line for line in text.splitlines() if "本次测过的场景" in line)
+    assert name in row and "(仅直连" not in row
+
+
+# ---------------------------------------------------------------- C4/C5/S3 回归
+
+def test_status_has_full_fault_counts(engine):
+    """故障计数来自全量 300 条缓冲，不是最近 60 条（C4）。"""
+    for _ in range(70):
+        W.log_event("disconnect", "早期模拟断连")
+    body = engine.status()
+    assert len(body["events"]) == 60
+    assert body["fault_counts_full"]["disconnect"] == 70
+    assert R.build(body) and "| 模拟断连 | 70 |" in R.build(body)
+
+
+def test_full_fault_counts_covers_all_event_types(engine):
+    """C4：全量快照含所有事件类型，不是只统计五类故障（与 Android 对齐）。"""
+    for etype in ("config", "connect", "error"):
+        W.log_event(etype, "统计口径回归")
+    full = engine.status()["fault_counts_full"]
+    assert full["config"] == 1 and full["connect"] == 1 and full["error"] == 1
+    assert full["disconnect"] == 0 and "flap" in full
+
+
+def test_preset_response_reports_applied(engine):
+    """C6：单场景 preset 也回 applied，ok 仍表示「点选中」本身成功。"""
+    r = engine.api.post("/api/preset", {"key": "wifi"})
+    assert r.status == 200 and r.body["ok"] is True
+    assert r.body["applied"] is False and r.body["kind"] == "preset"
+    assert engine.api.post("/api/run", {"enable": True}).status == 200
+    r = engine.api.post("/api/preset", {"key": "4g"})
+    assert r.status == 200 and r.body["ok"] is True
+    assert r.body["applied"] is True and r.body["kind"] == "preset"
+
+
+def test_rejected_host_origin_are_redacted(engine, tmp_store):
+    """S3：拒绝请求不把攻击者可控的 Host/Origin 原值写进日志或事件环。"""
+    marker = "evil-redact-9a7f.example"
+    payload = (b"GET /api/status HTTP/1.1\r\nHost: " + marker.encode() +
+               b"\r\nOrigin: http://" + marker.encode() + b"\r\n\r\n")
+    assert _code(_raw_http(engine, payload)) == 403
+    body = engine.status()
+    joined = "\n".join(str(e.get("msg", "")) for e in body["events"])
+    assert marker not in joined
+    assert "控制接口拒绝" in joined
+    logfile = tmp_store / "weaknet.log"
+    if logfile.exists():
+        assert marker not in logfile.read_text(encoding="utf-8", errors="replace")
+
+
+def test_sysproxy_rejects_string_false_and_missing_field(engine):
+    """{"enable":"false"} 不能当 True，缺字段也不能静默关闭（C5）。"""
+    for payload in ({"enable": "false"}, {"enable": 0}, {}):
+        r = engine.api.post("/api/sysproxy", payload)
+        assert r.status == 400, (payload, r.body)
+
+
+def test_share_push_without_local_pin_returns_409(tmp_store, monkeypatch):
+    """共享服务无 PIN 时 fail-closed：拒收 409，旧版 allow_legacy 放行保留。"""
+    monkeypatch.setattr(W.G, "share_pin", "")
+    monkeypatch.setattr(W.G, "allow_legacy", True)  # 旧版降级分支不能被一起改掉
+    assert W.share_auth_error({"ver": 1}) is None
+    assert W.share_auth_error({"ver": 2})[0] == 409
+    payload = {"ver": W.SHARE_VER, "pin": "", "from": "同事", "from_id": "peer1",
+               "items": [{"name": "无PIN环境", "profile": {"down_kbps": 300}}],
+               "combos": []}
+
+    async def go():
+        srv = await asyncio.start_server(W.handle_share, "127.0.0.1", 0)
+        try:
+            port = srv.sockets[0].getsockname()[1]
+            return await asyncio.get_running_loop().run_in_executor(
+                None, W._post_share, "127.0.0.1", port, payload)
+        finally:
+            srv.close()
+            await srv.wait_closed()
+
+    res = run_async(go(), timeout=20)
+    assert res["ok"] is False
+    assert res.get("http") == 409, res       # 共享端口真的回 409，不是 fail-open
+    assert "PIN" in res["error"]
+    assert not W.G.inbox, "被拒的推送不应进入收件箱"
+
+
+# ---------------------------------------------------------------- GET 写操作守卫
+
+def test_browser_get_cannot_stop_via_img(engine):
+    """网页 `<img src="http://127.0.0.1:8899/api/stop">` 必须被挡（浏览器必带 Sec-Fetch-Site）。"""
+    assert engine.api.post("/api/run", {"enable": True}).status == 200
+    payload = (b"GET /api/stop HTTP/1.1\r\nHost: 127.0.0.1\r\n"
+               b"Sec-Fetch-Site: cross-site\r\n\r\n")
+    assert _code(_raw_http(engine, payload)) == 403
+    assert engine.status()["limit_on"] is True, "被拒的请求居然真的停了限速"
+
+
+def test_curl_get_stop_still_allowed(engine):
+    """curl / adb 不带 Sec-Fetch-Site：不加任何门槛，照常可停。"""
+    assert engine.api.get("/api/stop").status == 200
+    payload = (b"GET /api/stop HTTP/1.1\r\nHost: 127.0.0.1\r\n"
+               b"Sec-Fetch-Site: none\r\n\r\n")     # 浏览器直接导航也是 none
+    assert _code(_raw_http(engine, payload)) == 200
+
+
+def test_post_stop_is_not_affected(engine):
+    """POST 不走这条校验（浏览器跨站 POST 本来就会被 Origin 检查挡掉）。"""
+    payload = (b"POST /api/stop HTTP/1.1\r\nHost: 127.0.0.1\r\n"
+               b"Sec-Fetch-Site: cross-site\r\nContent-Length: 0\r\n\r\n")
+    assert _code(_raw_http(engine, payload)) == 200

@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""场景说明 / 参数说明 二级窗口（P2-3 面板拆分）
+"""场景说明 / 参数说明 二级窗口（从主界面拆分的独立面板）
 
 从 weaknet_gui.py 整段搬出（方法体与原文件逐字一致，只补了 import）。
 App 通过多继承复用：面板之间不互相调用，只依赖引擎状态与主题层。
@@ -169,11 +169,11 @@ class NotesMixin:
             btn = self.param_btns.get(key)
             if btn is not None and btn.winfo_ismapped():
                 bx, by = btn.winfo_rootx(), btn.winfo_rooty()
-                bw, bh = btn.winfo_width(), btn.winfo_height()
+                bw = btn.winfo_width()
             else:
                 bx = self.root.winfo_rootx() + 60
                 by = self.root.winfo_rooty() + 60
-                bw = bh = 0
+                bw = 0
             sw, sh = win.winfo_screenwidth(), win.winfo_screenheight()
             x = bx + bw + 6
             if x + w > sw - 8:                # 右边装不下 → 翻到按钮左侧

@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""GUI 纯文本与排版层（P2-3 拆分第一步）。
+"""GUI 纯文本与排版层。
 
 从 weaknet_gui.py 抽出的与窗口状态无关的部分：说明小窗的像素常量、
 参数摘要/详情文案、带宽字节格式化、名字输入限长。抽出来不是为了少几行，
@@ -40,7 +40,7 @@ def _note_measure(text):
         _NOTE_FONT = tkfont.Font(family="Microsoft YaHei UI", size=10)
     return _NOTE_FONT.measure(text)
 
-# GUI 里的短名称（Web 控制台仍用全名）：与 Android / 规格同源
+# GUI 里的短名称（控制接口/报告仍用全名）：与 Android / 规格同源
 SHORT = W.PRESET_SHORT
 
 
@@ -73,6 +73,12 @@ def fmt_rate(bps):
 
 
 def fmt_bytes(n):
+    """GUI 里的字节格式化：KB 取整、MB 一位、GB 两位。
+
+    与 report_gen.human_bytes 刻意保留两套：报告用 KB 一位 / MB 两位（给开发
+    看精度），GUI 表格里 KB 取整、MB 一位（窄列放得下），已有回归断言钉住了
+    这套显示格式。合并会改变 GUI 显示，因此这里只注明差异，不强行复用。
+    """
     if n >= 1024 * 1024 * 1024:
         return f"{n / 1024 ** 3:.2f} GB"
     if n >= 1024 * 1024:

@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """DelayLine 的死锁回归用例。
 
-历史故障（P0-1）两条路都会让连接永久挂住：
+历史故障：两种情形都会让连接永久挂住：
   1. 消费者先退出，生产者卡在满队列的 q.put 上 —— 没人再取，永远等；
   2. 消费者已死时调 aclose()，哨兵 put 同样等不到空位。
 修复点：_mark_dead 先 _drain（get_nowait 会唤醒 putter），aclose 走 dead 分支直接返回。
@@ -34,7 +34,7 @@ class _Writer:
 
 
 def test_every_block_waits_for_drain():
-    """P1-5 已回退：每块都等 drain，不再按写缓冲水位跳过。
+    """现状：每块都等 drain，不再按写缓冲水位跳过。
 
     水位版（缓冲 > 128KB 才 drain）经两轮受控 A/B 实测无收益
     （8000 kbps −1.52% / 50000 kbps +0.43%），已删除实现与 A/B 脚本。
@@ -67,7 +67,7 @@ def test_zero_delay_fast_path_writes_immediately():
 
 
 def test_abort_unblocks_producer_stuck_on_full_queue(monkeypatch):
-    """队列满 + 消费者不存在时，abort 必须立刻放行生产者（P0-1 路径 1）。"""
+    """队列满 + 消费者不存在时，abort 必须立刻放行生产者。"""
     monkeypatch.setattr(W.DelayLine, "MAX_BLOCKS", 2)
 
     async def go():
@@ -83,7 +83,7 @@ def test_abort_unblocks_producer_stuck_on_full_queue(monkeypatch):
 
 
 def test_aclose_after_consumer_death_returns(monkeypatch):
-    """消费者已死时的 aclose 不能等满超时（P0-1 路径 2）。"""
+    """消费者已死时的 aclose 不能等满超时。"""
     async def go():
         dl = W.DelayLine(_Writer(), "dead").start()
         await asyncio.sleep(0)
@@ -138,7 +138,7 @@ class _DeadWriter(_Writer):
 
 
 def test_dead_writer_fast_path_stops_without_writing():
-    """P0-3：iperf3 收尾断开后不得再对着死 socket 投递。"""
+    """iperf3 收尾断开后不得再对着死 socket 投递。"""
     async def go():
         w = _DeadWriter()
         dl = W.DelayLine(w, "dead-peer").start()
@@ -177,7 +177,7 @@ def test_dead_writer_wakes_producer_blocked_on_full_queue(monkeypatch):
 
 
 def test_pipe_immediate_eof_does_not_raise_or_leak(monkeypatch):
-    """P0-3：连接首次 read() 就 EOF 时，finally 不能再炸 UnboundLocalError。
+    """连接首次 read() 就 EOF 时，finally 不能再炸 UnboundLocalError。
 
     旧实现把 rate_key 赋值放在 while 循环体内，首次读就 EOF 的话 finally
     里的 `prof.get(rate_key, 0)` 直接抛异常，aclose() 没机会跑，投递协程
@@ -217,7 +217,7 @@ def test_pipe_immediate_eof_does_not_raise_or_leak(monkeypatch):
 
 
 def test_aclose_reaps_cancelled_consumer():
-    """P0-3：aclose 返回时消费者任务必须已结束，不能留下 pending Task。
+    """aclose 返回时消费者任务必须已结束，不能留下 pending Task。
 
     旧实现只 cancel 不 await，iperf3 -P 8 每轮收尾都会打
     `Task was destroyed but it is pending!`，属于连接级任务泄漏。
@@ -252,3 +252,55 @@ def test_write_eof_style_writer_is_still_writable():
         return w.data()
 
     assert run_async(go()) == b"tail"
+
+
+def test_pipe_uses_current_gen_for_later_blocks(monkeypatch):
+    """P0（从零审查）：切场景后，在途连接的新块必须带当代 gen。
+
+    旧实现在 pipe() 入口 `gen = G.gen` 捕获一次就不再更新。切场景使
+    G.gen +1 后，新块仍带旧 gen，DelayLine._run 里 nap(wait, 旧gen) 见
+    代数不符就跳过等待直接投递 —— 延迟/丢包停顿对在途连接的新块全部失效。
+    本用例让 reader 在第 2 块前切一次场景，断言第 2 块 submit 传的是新 gen。
+    """
+    seen = []
+
+    class _RecordingSubmit(W.DelayLine):
+        async def submit(self, data, delay, gen):
+            seen.append(gen)
+            return await super().submit(data, delay, gen)
+
+    monkeypatch.setattr(W, "DelayLine", _RecordingSubmit)
+
+    class _SwitchReader:
+        def __init__(self):
+            self.n = 0
+
+        async def read(self, size):
+            self.n += 1
+            if self.n == 1:
+                return b"first"
+            if self.n == 2:
+                # 第 2 块读出前切场景：set_profile 的核心动作就是 G.gen += 1
+                W.G.gen += 1
+                return b"second"
+            return b""
+
+    class _Ctx:
+        fixed = False
+        label = "gen-switch"
+        prof = W.default_profile()
+
+        def touch(self):
+            pass
+
+        def abort_all(self):
+            pass
+
+    def profile_get(key, default=None):
+        return W.G.profile.get(key, default)
+
+    W.G.gen = 10
+    run_async(W.pipe(_SwitchReader(), _Writer(), {}, "down", _Ctx()))
+    assert len(seen) >= 2, "应至少提交两块，实际 %d" % len(seen)
+    assert seen[0] == 10, "第 1 块应带入队时的 gen=10"
+    assert seen[1] == 11, "第 2 块应带切场景后的当代 gen=11，实际 %d" % seen[1]

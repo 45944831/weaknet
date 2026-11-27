@@ -8,7 +8,7 @@ package com.weaknet.app;
  * 收不到大包 —— 实测会得出「提 MTU 没有收益」的错误结论。
  * 现在 MTU 是单一真值（VpnNetService.tunMtu()），MSS 上限从它派生，这里锁住这个约束。
  *
- * 2026-11-13 补充（P1-2）：MTU 从「编译期常量」变成「默认 1500 + 可验证实验档」，
+ * 2026-11-13 补充：MTU 从「编译期常量」变成「默认 1500 + 可验证实验档」，
  * 因此这里同时锁住档位白名单 —— 16384 档必须让下游缓冲落到 16 KB 级，
  * 非法档位必须被拒绝，否则真机 A/B 的结论无法复现。
  */
@@ -60,7 +60,7 @@ public class _MssClampTest {
         }
         ck("clampMss 单调不减", mono, bad);
 
-        // 6) 档位白名单（P1-2）：合法档位生效，非法档位不改变当前值
+        // 6) 档位白名单：合法档位生效，非法档位不改变当前值
         ck("16384 在档位白名单里", VpnNetService.applyMtuTier(16384), "");
         ck("切到 16384 后 tunMtu 生效", VpnNetService.tunMtu() == 16384,
            "" + VpnNetService.tunMtu());

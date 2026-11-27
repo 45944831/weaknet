@@ -58,6 +58,10 @@ public class UdpSession {
                 new LinkedBlockingQueue<Runnable>());
         e.allowCoreThreadTimeOut(true);
         this.serial = e;
+        // 与 TcpSession 同口径：构造即活跃，close() 里成对递减。
+        // 竞争失败（putIfAbsent 已有同 key 会话）的那条由调用方立刻 close()，
+        // 计数不会泄漏。
+        WeakNet.I.connActive.incrementAndGet();
     }
 
     /** 提交一个发送任务（同一会话内严格串行）；会话已关闭时静默丢弃 */
@@ -174,6 +178,7 @@ public class UdpSession {
 
     void close() {
         if (closed.compareAndSet(false, true)) {
+            WeakNet.I.connActive.decrementAndGet();
             vpn.clearUdpFast(fastIdx, this);
             try {
                 serial.shutdownNow();

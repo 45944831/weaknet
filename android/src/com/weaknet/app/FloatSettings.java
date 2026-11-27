@@ -15,8 +15,8 @@ import java.util.List;
  * 存 SharedPreferences，与自定义场景（MyPresets）同一套做法：
  * 卸载 App 才丢，读写由系统保证原子性。
  *
- * 所有外部输入都要过 {@link #sanitize}：控制台页面可能被旧版本引擎服务，
- * 不能假设传进来的字段 id 一定认识、数值一定在合理区间。
+ * 所有外部输入都要过 {@link #sanitize}：设置值可能来自旧版本 App 或外部
+ * HTTP 控制请求，不能假设传进来的字段 id 一定认识、数值一定在合理区间。
  */
 public class FloatSettings {
     // ---- 可选显示行：id / 名称 / 说明 / 示例 ----
@@ -195,7 +195,7 @@ public class FloatSettings {
         return o;
     }
 
-    /** 给控制台的完整应答：设置值 + 可选行定义 + 变量说明 + 当前显示状态 */
+    /** 给 HTTP 控制接口的完整应答：设置值 + 可选行定义 + 变量说明 + 当前显示状态 */
     public static JSONObject describe(Context c) {
         JSONObject o = new JSONObject();
         try {

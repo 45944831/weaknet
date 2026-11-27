@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """版本号 / EXE 元数据 / 构建产物的一致性校验（不需要打包）。
 
-P1-5 要解决的问题：同一个版本号被写在四处（version.py、build.sh、Manifest、
+要解决的问题：同一个版本号被写在四处（version.py、build.sh、Manifest、
 PyInstaller 版本资源），任何一处忘了改，发布物就会自相矛盾 ——
 exe 属性里写着 1.1.8、APK 却叫 1.1.9，用户没法判断装的是哪个。
 

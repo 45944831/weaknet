@@ -18,7 +18,8 @@ cd "$(dirname "$0")/.."
 AJAR=""
 for CAND in "$(pwd)/sdk/platforms/android-34/android.jar" \
             "$(pwd)/sdk/platforms/android-33/android.jar" \
-            "${ANDROID_HOME:-/nonexistent}/platforms/android-34/android.jar"; do
+            "${ANDROID_HOME:-/nonexistent}/platforms/android-34/android.jar" \
+            "${ANDROID_HOME:-/nonexistent}/platforms/android-33/android.jar"; do
   if [ -f "$CAND" ]; then AJAR="$CAND"; break; fi
 done
 if [ -z "$AJAR" ]; then
@@ -82,7 +83,7 @@ javac -encoding UTF-8 -nowarn \
       _jw/com/weaknet/app/_*Test.java
 
 FAIL=0
-for T in _PortIdxTest _FlowMatchTest _ScopeTest _BucketConcTest _PresetNotesTest _ParamNotesTest _NoteWrapTest _ComboNewAgainTest _PauseResumeTest _DelayLineTest _NameLimitTest _ComboCardTest _TabSyncTest _MainStatusSyncTest _FloatSettingsTest _MssClampTest _TunWriteQueueTest _MtuAbTest _FrameStatsTest _UiScreenAdaptTest _RunToggleRestoreTest _ValueClampTest _ReportGenTest; do
+for T in _PortIdxTest _FlowMatchTest _ScopeTest _BucketConcTest _PresetNotesTest _ParamNotesTest _NoteWrapTest _ComboNewAgainTest _PauseResumeTest _DelayLineTest _NameLimitTest _ComboCardTest _TabSyncTest _MainStatusSyncTest _FloatSettingsTest _MssClampTest _TunWriteQueueTest _MtuAbTest _FrameStatsTest _UiScreenAdaptTest _RunToggleRestoreTest _ValueClampTest _ReportGenTest _CtrlHostCheckTest _SafePageUrlTest _ShareAuthTest; do
   echo ""
   echo "== $T =="
   if java -cp "$OUT$CPSEP$AJAR" "com.weaknet.app.$T"; then

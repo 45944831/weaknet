@@ -11,7 +11,6 @@ import java.net.ServerSocket;
 import java.net.Socket;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.concurrent.Executors;
 
 /** 控制 HTTP 服务：只提供 /api/*（界面改为 App 原生 MainActivity） */
 public class CtrlServer implements Runnable {
@@ -23,24 +22,48 @@ public class CtrlServer implements Runnable {
     private ServerSocket server;
     private volatile boolean stopped = false;
     /** 控制请求处理池：GUI 每 500ms poll 一次 /api/status，来一个请求建一个线程
-     *  纯属浪费；控制接口都是低频小请求，4 个线程足够（多客户端同时 poll 也不堵） */
-    private final java.util.concurrent.ExecutorService pool =
-            Executors.newFixedThreadPool(4, new java.util.concurrent.ThreadFactory() {
-                public Thread newThread(Runnable r) {
-                    Thread t = new Thread(r, "ctrl-req");
-                    t.setDaemon(true);
-                    return t;
+     *  纯属浪费；控制接口都是低频小请求，4 个线程足够（多客户端同时 poll 也不堵）。
+     *  队列必须有界：newFixedThreadPool 默认用无界 LinkedBlockingQueue，慢请求会
+     *  无限堆积直到 OOM；满了直接回 503（见 BUSY_REJECT），绝不让 accept 线程
+     *  代跑 Handler —— CallerRuns 会在 accept 线程里解析请求体，30s 的 socket
+     *  超时足以把整个 accept 循环停摆，后续请求全部连不进来。 */
+    private static final int QUEUE_CTRL = 64;
+    private static final int QUEUE_PUSH = 32;
+
+    /** 队列饱和时的拒绝策略：在提交线程（accept）只写一个极短响应就关 socket，
+     *  不解析请求体、不执行业务。推送任务不带 socket，饱和时直接丢弃即可。 */
+    private static final java.util.concurrent.RejectedExecutionHandler BUSY_REJECT =
+            new java.util.concurrent.RejectedExecutionHandler() {
+                public void rejectedExecution(Runnable r,
+                        java.util.concurrent.ThreadPoolExecutor e) {
+                    if (r instanceof Handler) ((Handler) r).rejectBusy();
                 }
-            });
+            };
+    private final java.util.concurrent.ThreadPoolExecutor pool =
+            new java.util.concurrent.ThreadPoolExecutor(4, 4, 0L,
+                    java.util.concurrent.TimeUnit.MILLISECONDS,
+                    new java.util.concurrent.LinkedBlockingQueue<Runnable>(QUEUE_CTRL),
+                    new java.util.concurrent.ThreadFactory() {
+                        public Thread newThread(Runnable r) {
+                            Thread t = new Thread(r, "ctrl-req");
+                            t.setDaemon(true);
+                            return t;
+                        }
+                    },
+                    BUSY_REJECT);
     /** 推送独立成池：同步 HTTP 最长要等十几秒，不能占着控制池把状态轮询全堵住 */
-    private final java.util.concurrent.ExecutorService pushPool =
-            Executors.newFixedThreadPool(2, new java.util.concurrent.ThreadFactory() {
-                public Thread newThread(Runnable r) {
-                    Thread t = new Thread(r, "share-push");
-                    t.setDaemon(true);
-                    return t;
-                }
-            });
+    private final java.util.concurrent.ThreadPoolExecutor pushPool =
+            new java.util.concurrent.ThreadPoolExecutor(2, 2, 0L,
+                    java.util.concurrent.TimeUnit.MILLISECONDS,
+                    new java.util.concurrent.LinkedBlockingQueue<Runnable>(QUEUE_PUSH),
+                    new java.util.concurrent.ThreadFactory() {
+                        public Thread newThread(Runnable r) {
+                            Thread t = new Thread(r, "share-push");
+                            t.setDaemon(true);
+                            return t;
+                        }
+                    },
+                    BUSY_REJECT);
 
     public CtrlServer(int port, ProxyServer proxy, android.content.Context ctx) {
         this.port = port;
@@ -94,9 +117,23 @@ public class CtrlServer implements Runnable {
         private final Socket sock;
         /** 异步响应（推送不能占着 4 线程的控制池等对方回包） */
         private volatile boolean async = false;
+        /** 本请求是否通过 Host/Origin 校验（不通过直接 403） */
+        private boolean localOk = false;
 
         Handler(Socket s) {
             sock = s;
+        }
+
+        /** 被 BUSY_REJECT 在 accept 线程调用：只发一个短响应就关 socket，
+         *  绝不读请求体、绝不跑业务，避免 30s 超时把 accept 循环拖死。 */
+        void rejectBusy() {
+            try {
+                respond(503, JSON_CT, "{\"error\":\"busy\"}".getBytes("UTF-8"));
+            } catch (Exception e) {
+                // ignore：客户端可能已断开
+            } finally {
+                try { sock.close(); } catch (Exception e) { /* ignore */ }
+            }
         }
 
         public void run() {
@@ -107,14 +144,34 @@ public class CtrlServer implements Runnable {
                 try {
                     req = HttpIn.read(in, HttpIn.MAX_BODY_CTRL);
                 } catch (HttpIn.Bad bad) {
-                    respond(bad.code, JSON_CT, ("{\"error\":\"" + bad.getMessage() + "\"}")
-                            .getBytes("UTF-8"));
+                    // 不回显解析异常细节（可能是对方构造的畸形输入）
+                    respond(bad.code, JSON_CT, "{\"error\":\"bad request\"}".getBytes("UTF-8"));
                     return;
                 }
                 if (req == null) return;
+                // 与 Windows ctrl_host_ok 同构：只绑回环还不够，网页/DNS rebinding
+                // 照样能把请求打进来。校验失败一律 403，且不带任何 token。
+                localOk = CtrlHostCheck.ok(req.header("host"), req.header("origin"), port);
+                if (!localOk) {
+                    respond(403, JSON_CT, "{\"error\":\"forbidden\"}".getBytes("UTF-8"));
+                    return;
+                }
                 String path = req.path;
                 int q = path.indexOf('?');
                 if (q >= 0) path = path.substring(0, q);
+                // GET 写操作：浏览器跨站发起的请求一律拒绝。网页 <img src> 不带
+                // Origin（Host 校验放行），但现代浏览器一定带 Sec-Fetch-Site；
+                // curl/adb 不带该头，照常可用 —— 不加 token/Content-Type/访问码，
+                // 不增加任何使用门槛。与 Windows 端 _browser_get_write_blocked 同构。
+                if ("GET".equalsIgnoreCase(req.method) && "/api/stop".equals(path)) {
+                    String site = req.header("sec-fetch-site");
+                    if (site != null && site.length() > 0
+                            && !"none".equalsIgnoreCase(site)) {
+                        respond(403, JSON_CT,
+                                "{\"error\":\"forbidden\"}".getBytes("UTF-8"));
+                        return;
+                    }
+                }
                 route(req.method, path, req.body == null ? "" : req.body);
             } catch (Exception e) {
                 // ignore
@@ -240,9 +297,10 @@ public class CtrlServer implements Runnable {
                             for (String s : pr.pending) pen.put(s);
                             o.put("pending", pen);
                         } catch (Exception e) {
+                            WeakNet.I.log("error", "推送失败：" + e.getMessage());
                             try {
                                 o.put("ok", false);
-                                o.put("msg", "推送失败：" + e.getMessage());
+                                o.put("msg", "推送失败（内部错误）");
                             } catch (Exception ignore) {
                             }
                         }
@@ -529,10 +587,18 @@ public class CtrlServer implements Runnable {
                     respond(400, JSON_CT, "{\"error\":\"bad request\"}".getBytes("UTF-8"));
                     return;
                 }
-                // 与 App 界面同一条规矩：切场景只是选中，没在测试时不施加限速
+                // 与 App 界面（MainPanels.java）同一条规矩：没在测试时只是选中，
+                // 没生效就不能记成「切换场景」，否则报告会把没测过的场景算进去。
+                // 暂停中 limitOn 仍为 true，但参数并未落地（见 WeakNet.selectScene
+                // 的 whilePaused 分支），同样只能记「选择场景：」。
+                boolean testing = WeakNet.I.limitOn && !WeakNet.I.paused;
                 WeakNet.I.selectScene(p, key);
-                WeakNet.I.log("config", "切换场景：" + p.name);
-                respond(200, JSON_CT, "{\"ok\":true}".getBytes("UTF-8"));
+                WeakNet.I.log("config", (testing ? "切换场景：" : "选择场景：") + p.name);
+                // C6：与 combo 分支、Windows 端同形——ok 表示「选中这个操作成功」，
+                // applied 才表示「真的落到引擎参数上」。没开限速 / 暂停中 applied=false
+                // 仍是 200（选中本身成功），不增加任何使用门槛。
+                respond(200, JSON_CT, ("{\"ok\":true,\"applied\":" + testing
+                        + ",\"kind\":\"preset\"}").getBytes("UTF-8"));
                 return;
             }
             // GET /api/combos：弱网组合列表（含每段 steps 与一行摘要）
@@ -574,8 +640,8 @@ public class CtrlServer implements Runnable {
                     r.put("steps", it.steps.size());
                     respond(200, JSON_CT, r.toString().getBytes("UTF-8"));
                 } catch (Exception e) {
-                    respond(500, JSON_CT, ("{\"error\":\"" + e.getMessage() + "\"}")
-                            .getBytes("UTF-8"));
+                    WeakNet.I.log("error", "保存组合失败：" + e.getMessage());
+                    respond(500, JSON_CT, "{\"error\":\"internal error\"}".getBytes("UTF-8"));
                 }
                 return;
             }
@@ -609,11 +675,14 @@ public class CtrlServer implements Runnable {
                     JSONObject o = new JSONObject(body);
                     Profile p = Profile.custom(o);
                     WeakNet.I.setProfile(p, "custom");
-                    // 开启态下应用「不构成任何限制」的参数（全零/只动 stall 这类
-                    // 字段）＝用户要的效果已经是「不限速」：开关跟着回到关，
-                    // 避免 limit_on=true 的假开启（复测 P2；与 Windows 端
-                    // set_profile 的 has_limits 推断同语义）。
-                    if (WeakNet.I.limitOn && !p.hasLimits()) {
+                    // 应用即生效：与 Windows set_profile 的 limit_on = has_limits(prof)
+                    // 对齐。setProfile 本身不动开关（selectScene 也走它，「选中不生效」），
+                    // 所以这条语义只在 /api/profile 这个入口显式补齐。
+                    // 全零参数落地即「不限速」，开关跟着回关，避免 limit_on=true 的假开启。
+                    if (WeakNet.limitOnForApply(p)) {
+                        if (!WeakNet.I.limitOn) WeakNet.I.setLimitOn(true, p);
+                        WeakNet.I.log("config", "应用自定义参数");
+                    } else if (WeakNet.I.limitOn) {
                         WeakNet.I.setLimitOn(false, null);
                         WeakNet.I.log("config", "自定义参数不含任何限制，限速开关已复位为关");
                     } else {
@@ -757,14 +826,14 @@ public class CtrlServer implements Runnable {
                     JSONObject o = new JSONObject();
                     o.put("ok", true);
                     o.put("host", host);
-                    o.put("token", proxy.token());
                     o.put("warn", "0.0.0.0".equals(host)
-                            ? "局域网代理已开启：其它设备需要 Proxy-Authorization 才能使用" : "");
+                            ? "局域网代理已开启：同网段设备可直接把代理指向本机" : "");
                     WeakNet.I.log("config", "代理监听切换为 " + host + ":" + proxy.port()
-                            + ("0.0.0.0".equals(host) ? "（局域网代理已开启，需要 token）" : ""));
+                            + ("0.0.0.0".equals(host) ? "（局域网代理已开启，同网段可访问）" : ""));
                     respond(200, JSON_CT, o.toString().getBytes("UTF-8"));
                 } catch (Exception e) {
-                    respond(500, JSON_CT, ("{\"error\":\"" + e.getMessage() + "\"}").getBytes("UTF-8"));
+                    WeakNet.I.log("error", "切换代理监听失败：" + e.getMessage());
+                    respond(500, JSON_CT, "{\"error\":\"internal error\"}".getBytes("UTF-8"));
                 }
                 return;
             }
@@ -900,7 +969,8 @@ public class CtrlServer implements Runnable {
                 } catch (Exception ignore) {
                 }
                 JSONObject o = new JSONObject();
-                o.put("error", String.valueOf(t));
+                // 详情已写入上面的日志，响应里不再回显（错误信息可能含内部路径/主机）
+                o.put("error", "internal error");
                 return o;
             }
         }
@@ -927,7 +997,6 @@ public class CtrlServer implements Runnable {
             listen.put("host", proxy.host());
             listen.put("port", proxy.port());
             listen.put("lan", !ProxyServer.loopback(proxy.host()));
-            listen.put("token", proxy.token());
             o.put("listen", listen);
             o.put("lan_ip", WeakNet.I.lanIp());
             o.put("vpn_active", VpnNetService.active);
@@ -939,7 +1008,7 @@ public class CtrlServer implements Runnable {
             o.put("mss", VpnNetService.defaultMss());
             o.put("effective_mtu", VpnNetService.effectiveMtu());
             o.put("mtu_ready", VpnNetService.mtuReady());
-            // 接管范围（与 Windows 端同构，两端共用同一份控制台页面）
+            // 接管范围（与 Windows 端同构；网页控制台已下线，两端各自原生界面 + 同一套 HTTP API）
             JSONObject sc = new JSONObject();
             sc.put("mode", WeakNet.I.scopeMode);
             sc.put("supported", true);
@@ -961,8 +1030,20 @@ public class CtrlServer implements Runnable {
             st.put("uptime", (System.currentTimeMillis() - WeakNet.I.startedAt) / 1000);
             o.put("stats", st);
 
-            JSONArray evs = new JSONArray();
+            // C4 配合：events 只给最近 60 条，报告里的故障次数不能因此被截断。
+            // 与 Windows 端同名字段 fault_counts_full：从全量（上限 300 条）事件
+            // 按 type 聚合，ReportGen 优先用它，缺失时回退到 events 统计。
+            JSONObject fullCounts = new JSONObject();
             List<String[]> events = WeakNet.I.events;
+            synchronized (events) {
+                for (String[] e : events) {
+                    String type = e[1];
+                    fullCounts.put(type, fullCounts.optInt(type, 0) + 1);
+                }
+            }
+            o.put("fault_counts_full", fullCounts);
+
+            JSONArray evs = new JSONArray();
             synchronized (events) {
                 int n = events.size();
                 int from = Math.max(0, n - 60);
@@ -1009,6 +1090,7 @@ public class CtrlServer implements Runnable {
                 case 431: reason = "Request Header Fields Too Large"; break;
                 case 500: reason = "Internal Server Error"; break;
                 case 501: reason = "Not Implemented"; break;
+                case 503: reason = "Service Unavailable"; break;
                 default: reason = "Bad Request"; break;
             }
             StringBuilder h = new StringBuilder();

@@ -3,6 +3,7 @@ package com.weaknet.app;
 import android.app.Activity;
 import android.content.Intent;
 import android.content.pm.ActivityInfo;
+import android.content.pm.ApplicationInfo;
 import android.content.res.Configuration;
 import android.graphics.Color;
 import android.graphics.Typeface;
@@ -71,6 +72,22 @@ public class MainActivity extends Activity {
         }
     };
 
+    /** Android 13(API 33)+：前台服务通知需要 POST_NOTIFICATIONS 才能显示。
+     *  没授权时服务仍能跑，但通知栏空着，容易被误判成「没开启成功」。 */
+    private void requestNotificationPermission() {
+        try {
+            if (Build.VERSION.SDK_INT < 33) return;
+            if (checkSelfPermission("android.permission.POST_NOTIFICATIONS")
+                    == android.content.pm.PackageManager.PERMISSION_GRANTED) {
+                return;
+            }
+            requestPermissions(
+                    new String[]{"android.permission.POST_NOTIFICATIONS"}, 11);
+        } catch (Exception e) {
+            WeakNet.I.log("notify", "请求通知权限失败：" + e);
+        }
+    }
+
     public void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
 
@@ -82,6 +99,10 @@ public class MainActivity extends Activity {
         // 免得服务还没起来时读到的列表是空的
         MyPresets.bind(this);
         MyCombos.bind(this);
+
+        // targetSdk 33 起，前台服务通知也要 POST_NOTIFICATIONS 授权。
+        // 不请求不会崩，但通知栏没有「正在模拟弱网」，用户会以为没生效。
+        requestNotificationPermission();
 
         // 控制台（同时提供可选的 HTTP 代理通道）
         Intent console = new Intent(this, NetService.class);
@@ -211,10 +232,18 @@ public class MainActivity extends Activity {
         // 启动时不自动接管：接管与限速是一体的，只能由用户点总开关触发。
         // 早期版本会在这里 requestVpn(false) 自动接管，结果是刚打开 App 就已经把
         // 流量拽进通道（状态栏挂着 VPN 图标，却什么都没限），与「手动启动才生效」相悖。
-        // 真机测试用：adb shell am start ... --es update_api <url> 可临时替换检查接口；
-        // 正式使用时这个 extra 不存在，始终访问 GitHub 官方 API。
+        // 真机测试用：adb 安装的 debuggable 包可用 --es update_api <url> 临时替换
+        // 检查接口；正式包必须忽略这个 extra，否则任意外部 App 都能用显式 Intent
+        // 把更新检查指向假服务器（MainActivity 是 exported 的）。
         String apiOverride = getIntent() == null ? null : getIntent().getStringExtra("update_api");
-        if (apiOverride != null) UpdateCheck.setApiOverride(apiOverride);
+        boolean debuggable = (getApplicationInfo().flags & ApplicationInfo.FLAG_DEBUGGABLE) != 0;
+        if (apiOverride != null) {
+            if (debuggable) {
+                UpdateCheck.setApiOverride(apiOverride);
+            } else {
+                WeakNet.I.log("config", "忽略 update_api：仅 debuggable 构建允许替换检查接口");
+            }
+        }
 
         // 本次启动唯一的一次版本检查：设置界面只读结果，运行中不再联网复查。
         // 后台线程 + 失败静默，不阻塞启动、不弹错；结果晚到时由设置界面的

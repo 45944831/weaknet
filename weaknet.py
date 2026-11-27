@@ -28,6 +28,7 @@ import ipaddress
 import json
 import os
 import random
+import secrets
 import signal
 import socket
 import sys
@@ -45,6 +46,11 @@ from pathlib import Path
 # 超时估算和 test_perf.py 用 1000，同一档位在测量侧被系统性低估 2.4%，
 # 现在统一到这里，改口径只需改这一个常量。
 BITS_PER_KBPS = 1024.0
+
+# 默认端口只在这里定义一次：CLI 参数默认值、G 的初始值、系统代理还原
+# 的匹配串、控制口/共享口的「禁止转发」判定都引用它，避免四处硬编码漂移。
+DEFAULT_PROXY_PORT = 8888
+DEFAULT_CTRL_PORT = 8899
 
 try:
     from version import BUILD, VERSION
@@ -144,6 +150,18 @@ def _app_dir():
 LOG_FILE = _app_dir() / "weaknet.log"
 
 
+def _warn_stderr(msg):
+    """日志系统自身的失败：不能再走 log()（会递归），只打 stderr。
+
+    完全静默是更坏的选择——历史上「日志不轮转」就是被 `except: pass`
+    藏了整整一个版本，直到有人发现 weaknet.log 涨到几百 MB。
+    """
+    try:
+        sys.stderr.write("[log] " + msg + "\n")
+    except Exception:
+        pass
+
+
 class _LogSink:
     """缓冲日志：攒够一批再落盘（原来是每条一次 open/write/close），超限自动轮转。
 
@@ -185,12 +203,16 @@ class _LogSink:
                     if old.exists():
                         old.unlink()
                     self.path.replace(old)
-            except Exception:
-                pass
+            except Exception as e:
+                # 轮转失败（占用/权限）不该让整批日志一起丢，也不该静默：
+                # 日志无限增长的根因往往就是这里，却从来没有任何痕迹。
+                _warn_stderr("日志轮转失败：%r" % (e,))
             with open(self.path, "a", encoding="utf-8") as f:
                 f.writelines(self.buf)
-        except Exception:
-            pass
+        except Exception as e:
+            # 日志本身失败不能再走 log()（会递归），但也不能完全静默：
+            # 打到 stderr，--console 与调试场景才看得到。
+            _warn_stderr("日志写入失败：%r" % (e,))
         self.buf = []
         self.pending_bytes = 0
 
@@ -282,7 +304,7 @@ def is_weaknet_running(port):
 
 IS_WIN = (os.name == "nt")
 
-_PROC_NAME_CACHE = {"at": 0.0, "map": {}}    # pid -> exe 名，带 TTL，避免每次新连接都做进程快照
+# 进程名缓存（pid -> exe 名，带 TTL）现在挂在 G 上，见 G.proc_name_cache。
 _PROC_CACHE_TTL = 5.0                        # 定期刷新间隔
 _PROC_MISS_GAP = 0.25                        # 因「查不到」触发的刷新最小间隔（防抖）
 _TCP_LOOKUP_RETRIES = 4                      # 连接表里查不到这行时最多重试几次
@@ -409,7 +431,7 @@ def _lookup_proc_name(pid):
     表现就是名单外的程序照样被限速 / 名单内的却没被接管。
     全量快照仍需限频（_PROC_MISS_GAP），它约 10ms，不能每条连接都做。
     """
-    c = _PROC_NAME_CACHE
+    c = G.proc_name_cache
     now = time.monotonic()
     name = c["map"].get(pid)
     if name is None:
@@ -502,9 +524,8 @@ def list_procs():
     if not IS_WIN:
         return []
     try:
-        names = set(_snapshot_proc_names().values())
         rows = _tcp_rows()
-        pid2n = {r[4]: _PROC_NAME_CACHE["map"].get(r[4]) for r in rows}
+        pid2n = {r[4]: G.proc_name_cache["map"].get(r[4]) for r in rows}
         live = {n.lower() for n in pid2n.values() if n and n.lower() != "system"}
         live.discard("")
         common = ["chrome.exe", "msedge.exe", "firefox.exe", "wechat.exe",
@@ -595,9 +616,19 @@ def has_limits(prof):
 
     用来推断限速总开关的语义：应用了带内容的场景就等于把限速打开，
     回到全零就等于是关掉。这样网页 / GUI / 接口三个入口不用各自维护一份状态。
+
+    ``stall_ms`` 与 ``flap_blackout_sec`` 不算：前者只在 loss_pct>0 时才被
+    用到，后者只在 flap_sec>0 时才被用到 —— 单独改这两项不会改变任何流量，
+    与 Java 端 Profile.hasLimits() 的口径保持一致（否则同一份参数在两端
+    会得出「有没有在限速」的不同结论）。
     """
     d = default_profile()
-    return any(prof.get(k) != d.get(k) for k in d if k != "name")
+    for k, dv in d.items():
+        if k in ("name", "stall_ms", "flap_blackout_sec"):
+            continue
+        if prof.get(k, dv) != dv:      # 缺项按默认值算，部分字典也能判定
+            return True
+    return False
 
 
 # 预置场景：名称 / 分类 / 参数覆盖全部来自 spec/spec.json。
@@ -743,269 +774,13 @@ def _split_sentences(text):
 
 
 # ---------------------------------------------------------------- 说明文案的排版
-#
-# 为什么不能直接用 Label 的 wraplength 折行：
-#   Tk 的 Label 只在「空格」处断行。中文正文里为了排版留的空格
-#   （→、≈、+ 两侧）于是全都成了断点 —— 「·」条目符被单独甩到一行，
-#   「「本机 → 服务器」」这种引号短语被从中间劈开。换成 U+00A0 也一样断
-#   （实测行数不变），Tk 层面救不回来。
-#   安卓 TextView 的断行规则又跟 Tk 不一样，同一段文字在两端会长得不同。
-# 所以折行规则必须下沉到引擎层：先把文字切成「不可再分的原子」，
-# 再按像素宽度贪心拼行。两端（桌面 / 安卓）共用同一套规则，
-# 改了一端忘了另一端的话，同一个参数在电脑上和手机上会长得不一样。
-#
-# 原子有四种：
-#   c  单个字符（汉字 / 中文标点 / 独立符号），可以在它前后断行
-#   q  引号短语（「」「『』“”《》整段不可断）
-#   w  英文单词 / 数字带单位（800ms、0.5~1.5、RTT 整段不可断）
-#   s  空白（只用来标记「这里原本有空格」，断开时丢掉）
-#
-# 断行时还会做两件中文排版的事：
-#   避头：收尾标点（，。、）」等）不另起一行 —— 把它留在上一行
-#   避尾：起头标点（（「等）不留在行末 —— 把它带到下一行
-
-_NOTE_QUOTE_PAIRS = {"「": "」", "『": "』", "“": "”", "《": "》"}
-
-# 行首禁则：这些标点不能出现在一行的开头
-_NOTE_NO_START = "，。、；：？！）」』】”’%‰°′″℃…"
-# 行尾禁则：这些标点不能出现在一行的末尾
-_NOTE_NO_END = "（「『【《“"
-
-# 不能孤零零出现在行首的符号：数学 / 箭头符号
-_NOTE_NO_START_GLUE = "≈→←±×÷·〜～"
-
-# 数字 / 单词内部的连接符（0.5~1.5 里的 . ~ ，800ms% 里的 %）
-_NOTE_WORD_CONNECT = ".-~_%+/"
-
-# 视为「空白」的字符（断行时空格丢弃，行内保留一个）
-_NOTE_SPACE_CHARS = " \t　"
-
-
-def _is_note_cjk(ch):
-    """是不是中日韩字符 / 中文标点（含全角形式）。"""
-    code = ord(ch)
-    return (0x2E80 <= code <= 0x9FFF) or (0xF900 <= code <= 0xFAFF) \
-        or (0xFF00 <= code <= 0xFFEF)
-
-
-def _is_note_word_char(text, i):
-    """text[i] 能不能算「英文单词 / 数字」的一部分。
-
-    字母数字当然算；连接符只在两边都是字母数字时才算，
-    这样 0.5~1.5 是一个整体，而「上行 + 下行」里的 + 是独立符号。
-    """
-    ch = text[i]
-    if ch.isascii() and ch.isalnum():
-        return True
-    if ch in _NOTE_WORD_CONNECT:
-        prev_alnum = i > 0 and text[i - 1].isascii() and text[i - 1].isalnum()
-        nxt = text[i + 1] if i + 1 < len(text) else ""
-        next_alnum = bool(nxt) and nxt.isascii() and nxt.isalnum()
-        return prev_alnum and next_alnum
-    return False
-
-
-def split_note_atoms(text):
-    """把一段说明文字切成不可再分的排版原子。
-
-    返回 [[kind, text], ...]，kind 取值 c / q / w / s。
-    折行只能发生在原子与原子之间，绝不会把一个原子劈成两半 ——
-    「「本机 → 服务器」」里的箭头和空格因此永远跟参数名待在一起。
-    """
-    s = str(text or "")
-    out = []
-    i = 0
-    n = len(s)
-    while i < n:
-        ch = s[i]
-        if ch in _NOTE_SPACE_CHARS:
-            j = i
-            while j < n and s[j] in _NOTE_SPACE_CHARS:
-                j += 1
-            out.append(["s", s[i:j]])
-            i = j
-            continue
-        if ch in _NOTE_QUOTE_PAIRS:
-            close = _NOTE_QUOTE_PAIRS[ch]
-            j = s.find(close, i + 1)
-            if j != -1:
-                out.append(["q", s[i:j + 1]])
-                i = j + 1
-                continue
-        if _is_note_cjk(ch):
-            out.append(["c", ch])
-            i += 1
-            continue
-        if ch.isascii() and ch.isalnum():
-            j = i
-            while j < n and _is_note_word_char(s, j):
-                j += 1
-            # 百分号跟在词尾（100%）也算这个词的一部分
-            if j < n and s[j] == "%":
-                j += 1
-            out.append(["w", s[i:j]])
-            i = j
-            continue
-        # 其它 ASCII 符号（= + % 等）单独成原子
-        out.append(["c", ch])
-        i += 1
-    return out
-
-
-def _note_group_units(atoms):
-    """原子表 -> 排版单元表。
-
-    排版单元 = 行内不可再分的一段文字。返回 [[文字, 前面有没有空格], ...]。
-
-    这里顺手做了中文排版的两条「避头尾」规则 —— 不做的话，断行处会出现
-    孤零零的标点（比如一行的开头是「，」）：
-      · 行首禁则（，。、；：？！）等）不能起行 → 粘到前一个单元末尾
-      · 行尾禁则（（《 等）不能收行 → 粘到后一个单元开头
-    合成之后，断行只发生在单元之间，标点自然跟着前面的字走。
-    """
-    units = []
-    sep = False             # 上一段和这一段之间有没有空格
-    hold_txt = ""           # 待与下一个单元合并的起头标点
-    hold_sep = False
-    for kind, t in atoms:
-        if kind == "s":
-            sep = True
-            continue
-        if kind == "c" and len(t) == 1:
-            ch = t
-            if ch in _NOTE_NO_END:
-                # 起头标点不能收在行末 —— 先攒着，跟下一个单元走
-                hold_txt += ch
-                hold_sep = sep
-                sep = False
-                continue
-            if hold_txt:
-                t = hold_txt + ch
-                sep = hold_sep
-                hold_txt = ""
-                hold_sep = False
-            if ch in _NOTE_NO_START or ch in _NOTE_NO_START_GLUE:
-                if units:
-                    # 收尾标点不能起行 —— 粘到上一个单元末尾
-                    units[-1][0] += (" " if sep else "") + ch
-                    sep = False
-                    continue
-            units.append([t, sep])
-            sep = False
-            continue
-        # 引号短语 / 英文单词：整体不可断
-        if hold_txt:
-            t = hold_txt + t
-            sep = hold_sep
-            hold_txt = ""
-            hold_sep = False
-        units.append([t, sep])
-        sep = False
-    if hold_txt:
-        units.append([hold_txt, hold_sep])
-    return units
-
-
-
-def _note_units_text(units):
-    """单元表 -> 一行文字（行首不留空格，行内空格保留）。"""
-    parts = []
-    for idx, u in enumerate(units):
-        if idx > 0 and u[1]:
-            parts.append(" ")
-        parts.append(u[0])
-    return "".join(parts)
-
-
-def _note_safe_chunks(text):
-    """把一个单元切成「行内安全的最小块」。
-
-    单元宽过整行时只能硬切，但切之前先按避头尾规则重新分块：
-      · 收尾标点（，。、；：？！）等）粘到前一块末尾 —— 它不能起行
-      · 起头标点（（《 等）粘到后一块开头 —— 它不能收行
-    切完之后，断行只发生在块与块之间，标点自然跟着前面的字走。
-    少了这一步，窄屏上就会出现「」。」这种一行开头的怪事
-    （实测：引号短语被硬切后，收尾引号正好落在下一行开头）。
-    """
-    chunks = []
-    hold = ""                     # 待与下一块合并的起头标点
-    for ch in text:
-        if ch in _NOTE_NO_END:
-            hold += ch
-            continue
-        if hold:
-            ch = hold + ch
-            hold = ""
-        # 只看末字符：拼上起头标点之后，末字符仍是原来那个
-        # （安卓端 Profile.noteSafeChunks 用的是同一套判断）
-        if ch[-1] in _NOTE_NO_START and chunks:
-            chunks[-1] += ch
-            continue
-        chunks.append(ch)
-    if hold:
-        if chunks:
-            chunks[-1] += hold
-        else:
-            chunks.append(hold)
-    return chunks
-
-
-def _note_hard_split(units, measure, max_width):
-    """把宽过整行的单元按「安全块」硬切。
-
-    超长英文词 / 超长引号短语在正常文案里不会出现，但真出现了也不能把
-    版式撑破 —— 宁可切碎，也不能让文字溢出卡片。
-    """
-    out = []
-    for text, sp in units:
-        if measure(text) <= max_width:
-            out.append([text, sp])
-            continue
-        cur = ""
-        for ch in _note_safe_chunks(text):
-            if cur and measure(cur + ch) > max_width:
-                out.append([cur, sp])
-                sp = False
-                cur = ch
-            else:
-                cur += ch
-        if cur:
-            out.append([cur, sp])
-    return out
-
-
-def wrap_note_lines(text, measure, max_width):
-    """把一段说明文字按宽度折成若干行。
-
-    measure : callable(str) -> 数值，量一段文字有多宽
-    max_width : 每行最多允许多宽
-
-    规则（安卓端 Profile.wrapNoteLines 完全一致）：
-      · 引号短语、英文单词、数字带单位整体不可拆开
-      · 断行只发生在排版单元之间；行首不留空格
-      · 收尾标点不另起一行，起头标点不留在行末（避头尾）
-      · 单个单元宽过整行时按字符硬切，不撑破版式
-    """
-    units = _note_hard_split(_note_group_units(split_note_atoms(text)),
-                             measure, max_width)
-    if not units:
-        return []
-    lines = []
-    cur = []
-    cur_w = 0
-    for text, sp in units:
-        w = measure(text)
-        add = (measure(" ") if (sp and cur) else 0) + w
-        if cur and cur_w + add > max_width:
-            lines.append(_note_units_text(cur))
-            cur = []
-            cur_w = 0
-            add = w                 # 断行后行首不留空格
-        cur.append([text, sp])
-        cur_w += add
-    if cur:
-        lines.append(_note_units_text(cur))
-    return lines
+# 具体规则搬到 text_layout.py（纯函数、可单测）；这里 re-export 保持
+# `W.wrap_note_lines` / `W.split_note_atoms` 等旧路径可用，调用方零改动。
+from text_layout import (                       # noqa: E402
+    split_note_atoms, wrap_note_lines, _is_note_cjk, _is_note_word_char,  # noqa: F401
+    _note_group_units, _note_units_text, _note_safe_chunks, _note_hard_split,  # noqa: F401
+    _NOTE_QUOTE_PAIRS, _NOTE_NO_START, _NOTE_NO_END, _NOTE_NO_START_GLUE,  # noqa: F401
+    _NOTE_WORD_CONNECT, _NOTE_SPACE_CHARS)  # noqa: F401
 
 
 def _norm_user_profile(name, prof):
@@ -1029,7 +804,10 @@ def load_user_presets():
             if not f.exists():
                 continue
             data = json.loads(f.read_text(encoding="utf-8"))
-        except Exception:
+        except Exception as e:
+            # 静默 continue 会让「自定义场景全没了」变成一个查不出来的现象：
+            # 文件损坏、权限不足、磁盘满都长一个样。至少留一行可检索的日志。
+            log("自定义场景读取失败（%s）：%r" % (f, e))
             continue
         raw = data.get("items") if isinstance(data, dict) else data
         out = []
@@ -1095,7 +873,8 @@ def _dump_store(items=None, combos=None):
                 f.parent.mkdir(parents=True, exist_ok=True)
             f.write_bytes(payload)
             return True
-        except Exception:
+        except Exception as e:
+            log("写入 %s 失败：%r" % (f, e))
             continue
     return False
 
@@ -1346,7 +1125,8 @@ def load_combos():
             if not f.exists():
                 continue
             data = json.loads(f.read_text(encoding="utf-8"))
-        except Exception:
+        except Exception as e:
+            log("弱网组合读取失败（%s）：%r" % (f, e))
             continue
         raw = data.get("combos") if isinstance(data, dict) else None
         out = []
@@ -1590,15 +1370,26 @@ class G:
     flap_task = None
     proxy_server = None
     proxy_host = "127.0.0.1"
-    proxy_port = 8888
+    proxy_port = DEFAULT_PROXY_PORT
+    ctrl_port = DEFAULT_CTRL_PORT
     lan_ip = "127.0.0.1"
     started_at = time.time()
     gen = 0                     # 参数代数：每次切换场景 +1，用于唤醒在途连接
     wake = None                 # asyncio.Event：参数切换时唤醒挂起（黑洞/卡顿）的连接
+    # set_profile 的调用代数：await G.flap_task 期间若别的请求又换了场景，
+    # 旧调用凭这个计数器发现自己过期，不能用旧 prof 覆盖新的状态收尾。
+    profile_gen = 0
+    # 原先散落在模块级的几个可变状态收进 G，随应用生命周期统一管理/复位。
+    proc_name_cache = {"at": 0.0, "map": {}}   # pid -> exe 名，带 TTL
+    prev_proxy = None           # 首次接管前备份的原始系统代理值，解除时还原
+    sysproxy_on = False         # 当前是否是本工具开启的系统代理
     # 接管范围：all=全部程序 / only=仅下列程序 / exclude=排除下列程序
     scope_mode = "all"
     scope_list = []             # exe 名（小写）列表
     scope_seen = {}             # 观测到的进程名 -> 次数（便于用户选择要接管谁）
+    # 共享 PIN 失败退避：peer_ip -> {"n": 次数, "until": monotonic 解锁时刻}。
+    # 4 位 PIN 只有 1 万种组合，不限速的话同网段几分钟就能穷举完。
+    share_fail = {}
     bytes_bypass = 0            # 未接管程序的直通流量（不计入弱网统计）
     # 全局令牌桶：上下行各一份，所有连接共享。
     # ——必须是全局的。早先每条连接各建一个桶，结果开 8 条并发下载能跑出设定带宽的
@@ -1714,18 +1505,14 @@ def sysproxy_enabled():
         return False
 
 
-_prev_proxy = None   # 首次接管前备份的原始值，解除时还原
-_sysproxy_on = False # 当前是否是本工具开启的系统代理
-
-
 def _auto_release_sysproxy():
     """退出时自动解除接管，避免工具被关掉后系统代理指向已失效的端口"""
-    if _sysproxy_on:
+    if G.sysproxy_on:
         try:
             set_sysproxy(False)
             log("[WeakNet] 已自动解除系统代理接管")
-        except Exception:
-            pass
+        except Exception as e:
+            log("[WeakNet] 自动解除系统代理接管失败：%r" % (e,))
 
 
 def _reg_values(k, names):
@@ -1742,7 +1529,6 @@ def _reg_values(k, names):
 
 def set_sysproxy(enable):
     """开启/关闭本机系统代理（写入注册表并通知系统立即生效，解除时还原原始配置）"""
-    global _prev_proxy, _sysproxy_on
     if sys.platform != "win32":
         return False
     try:
@@ -1753,8 +1539,8 @@ def set_sysproxy(enable):
         # 需要同时具备读(备份原值)与写(写入新值)权限
         k = winreg.OpenKey(winreg.HKEY_CURRENT_USER, path, 0,
                            winreg.KEY_READ | winreg.KEY_WRITE)
-        if enable and _prev_proxy is None:
-            _prev_proxy = _reg_values(k, names)
+        if enable and G.prev_proxy is None:
+            G.prev_proxy = _reg_values(k, names)
         if enable:
             winreg.SetValueEx(k, "ProxyEnable", 0, winreg.REG_DWORD, 1)
             winreg.SetValueEx(k, "ProxyServer", 0, winreg.REG_SZ,
@@ -1763,19 +1549,67 @@ def set_sysproxy(enable):
                               "localhost;127.*;<local>")
         else:
             winreg.SetValueEx(k, "ProxyEnable", 0, winreg.REG_DWORD, 0)
-            if _prev_proxy:                       # 还原接管前的配置
+            if G.prev_proxy:                       # 还原接管前的配置
                 for n in names:
-                    saved = _prev_proxy.get(n)
+                    saved = G.prev_proxy.get(n)
                     if saved:
                         winreg.SetValueEx(k, n, 0, saved[1], saved[0])
-            _prev_proxy = None
+            G.prev_proxy = None
         winreg.CloseKey(k)
         ctypes.windll.wininet.InternetSetOptionW(0, 39, 0, 0)  # SETTINGS_CHANGED
         ctypes.windll.wininet.InternetSetOptionW(0, 37, 0, 0)  # REFRESH
-        _sysproxy_on = bool(enable)
+        G.sysproxy_on = bool(enable)
         return True
+    except Exception as e:
+        # 原来这里裸 except 直接 return False：注册表写失败时用户只看到
+        # 「接管没生效」，日志里一点线索都没有。保留 False 的返回语义，只补日志。
+        log("[WeakNet] %s系统代理失败：%r" % ("开启" if enable else "解除", e))
+        return False
+
+
+def release_stale_sysproxy(proxy_port=None):
+    """启动时清掉「上次崩溃 / 被 taskkill 留下的系统代理」。
+
+    正常退出走 atexit（CLI）或窗口关闭（GUI）还原；被强杀时那段代码根本不会
+    执行，注册表里就留下 ProxyEnable=1 + ProxyServer=127.0.0.1:8888 —— 指向
+    一个已经没有进程在听的端口，表现为整机断网，用户很难看出原因。
+    启动时发现它指向本程序的端口就先还原，并留一行日志说明。
+
+    两道保险避免误伤正在运行的实例：端口上还有人监听时不动（那是活着的
+    WeakNet），端口传 0（由系统分配，测试/嵌入式用法）时也不动。
+    非 Windows 直接跳过，不 import winreg，也不新增任何依赖。
+    """
+    if sys.platform != "win32":
+        return False
+    try:
+        port = int(proxy_port or 0)
+    except (TypeError, ValueError):
+        return False
+    if port <= 0:
+        return False
+    try:
+        import winreg
+        path = r"Software\Microsoft\Windows\CurrentVersion\Internet Settings"
+        k = winreg.OpenKey(winreg.HKEY_CURRENT_USER, path)
+        try:
+            enabled, _t = winreg.QueryValueEx(k, "ProxyEnable")
+            try:
+                server, _t = winreg.QueryValueEx(k, "ProxyServer")
+            except OSError:            # 有 ProxyEnable 但没有 ProxyServer
+                server = ""
+        finally:
+            winreg.CloseKey(k)
     except Exception:
         return False
+    if not enabled or ("127.0.0.1:%d" % port) not in str(server or ""):
+        return False
+    if not can_bind(port, "127.0.0.1"):
+        # 端口仍被占用：多半是另一个实例在跑，它的接管是有效的，别动
+        return False
+    ok = set_sysproxy(False)
+    log("[WeakNet] 检测到上次异常退出残留的系统代理（%s），已还原" % server)
+    log_event("config", "检测到上次异常退出残留的系统代理，已还原")
+    return ok
 
 
 def detect_lan_ip():
@@ -1880,6 +1714,11 @@ class ConnCtx:
         self.label = label
         self.writers = []
         self.fixed = False     # True = 直通连接：参数固定，不随场景切换变化
+        self.bypassed = False  # True = 未接管（直通）：flap 断网不掐它
+        # 出生时还没做完进程名反查（那里有 await），此时既不能算「接管」
+        # 也不能算「直通」。flap 黑窗必须跳过未判定的 ctx，否则会把马上要被
+        # 判为直通的连接误掐掉。handle_proxy 判定完成后置 False。
+        self.bypass_pending = True
         self.prof = None       # fixed 时使用的固定 profile（BYPASS_PROFILE）
         self.last_active = time.monotonic()   # 最后一次有数据流动，供空闲回收
         # 一出生就登记：否则「请求头读到一半就晾着」的连接在 register() 之前
@@ -1894,6 +1733,17 @@ class ConnCtx:
             self.writers.append(w)
         G.active.add(w)
         G.contexts.add(self)
+
+    def unregister(self, w):
+        """重连时摘除旧的上游 writer。
+
+        keep-alive 会多次重连，只 register 不摘除的话 ctx.writers / G.active
+        会一直累积已死的 writer，直到连接结束才 cleanup —— 长时间打开的
+        浏览器页面能让这个列表涨到几十项。
+        """
+        if w in self.writers:
+            self.writers.remove(w)
+        G.active.discard(w)
 
     def abort_all(self):
         for w in self.writers:
@@ -2170,8 +2020,12 @@ class DelayLine:
 
 async def pipe(reader, writer, prof, direction, ctx):
     """注意：每块数据都重新读取 G.profile，保证「停止模拟 / 切换场景」对已在途的连接立即生效"""
-    gen = G.gen
-    # 必须在循环外定义：finally 里要用它估算排空超时。旧实现放在循环体内，
+    # 代数不能在连接建立时捕获一次就不变：那样切场景后新数据块仍带旧 gen，
+    # DelayLine._run 里 nap(wait, 旧gen) 见 G.gen 已变就立即放行，延迟/丢包
+    # 停顿对新块全部失效（表现为「界面说慢、正文全速」）。改为每次调用
+    # nap/dl.submit 时读当代 G.gen：旧块仍按入队时的代数被切场景放行，
+    # 新块带当代代数按新参数注入。
+    # 下面 rate_key 必须在循环外定义：finally 里要用它估算排空超时。旧实现放在循环体内，
     # 连接若在首次 read() 就 EOF / 抛异常，finally 会触发 UnboundLocalError，
     # 于是 aclose() 根本没机会执行，DelayLine 的投递协程被整体遗弃
     # （iperf3 -P 8 收尾时成片 `Task was destroyed but it is pending!`）。
@@ -2207,7 +2061,7 @@ async def pipe(reader, writer, prof, direction, ctx):
                 await bucket.consume(n)
             # 丢包 -> 表现为一段时间的传输停顿（TCP 重传效果）
             if prof["loss_pct"] and random.random() * 100 < prof["loss_pct"]:
-                await nap(prof["stall_ms"] / 1000.0 * (0.5 + random.random()), gen)
+                await nap(prof["stall_ms"] / 1000.0 * (0.5 + random.random()), G.gen)
                 prof = G.profile
             # 随机断连 -> 立即掐断整条连接（两侧 RST/FIN）
             if prof["disconnect_pct"] and random.random() * 100 < prof["disconnect_pct"]:
@@ -2217,7 +2071,7 @@ async def pipe(reader, writer, prof, direction, ctx):
             # 延迟：每块数据都注入，而不是只在建连时注入一次。
             # 只在建连时等一次的话，HTTP keep-alive / 视频流 / WebSocket 这类
             # 长连接里除了第一个请求，后面的数据全是零延迟，延迟参数等于没设。
-            await dl.submit(data, _latency_delay(prof, direction), gen)
+            await dl.submit(data, _latency_delay(prof, direction), G.gen)
     except Abort:
         dl.abort()
         raise
@@ -2231,6 +2085,19 @@ async def pipe(reader, writer, prof, direction, ctx):
         else:
             need = 30.0
         await dl.aclose(timeout=max(30.0, min(need, 600.0)))
+
+
+def task_failed(t):
+    """已结束的 pipe task 是否因异常失败；被取消不算失败（那是正常收尾）。
+
+    ``Task.exception()`` 是**返回**异常对象而不是抛出它，只有取消/未完成时
+    才会抛 CancelledError / InvalidStateError。以前用 try/except 包住它判断
+    失败，导致 pipe 抛 Abort / ConnectionError 时一律被当成正常 EOF。这里
+    单独成纯函数，便于无网络单测直接验证三种结束状态。
+    """
+    if t.cancelled():                 # CancelledError 是 BaseException，必须先判
+        return False
+    return t.exception() is not None
 
 
 async def run_tunnel(ctx, c_reader, s_writer, s_reader, c_writer, prof):
@@ -2252,9 +2119,12 @@ async def run_tunnel(ctx, c_reader, s_writer, s_reader, c_writer, prof):
                 pending, return_when=asyncio.FIRST_COMPLETED)
             hard_stop = False
             for t in done:
-                try:
-                    t.exception()
-                except Exception:
+                if t.cancelled():
+                    continue
+                # 与单测共用同一份判定：内联复制过一份时，改了测试锚点也不会
+                # 触发生产逻辑的回归（影子测试）。done 里的 task 均已结束，
+                # task_failed 调 exception() 不会抛 InvalidStateError。
+                if task_failed(t):
                     hard_stop = True        # Abort / 连接错误：拆掉整条连接
                 else:
                     # 正常 EOF：FIN 转给对端。此时 pipe 的 finally 已排空延迟队列，
@@ -2266,10 +2136,15 @@ async def run_tunnel(ctx, c_reader, s_writer, s_reader, c_writer, prof):
             if hard_stop or not pending:
                 break
             # 另一端通常会跟着结束；挂死的 keep-alive 客户端到点也拆，防连接泄漏
+            # 但不能无条件拆：源站持续发数据、只是 60s 内没 EOF 时（如 256kbps
+            # 下 2MB 响应约 64s），无条件 break 会把响应尾部整段吞掉。仅在
+            # 这个方向上确实没有数据流动、空闲超过 60s 时才当挂死连接处理。
             done2, pending = await asyncio.wait(
                 pending, timeout=60, return_when=asyncio.FIRST_COMPLETED)
             if not done2:
-                break
+                if time.monotonic() - ctx.last_active > 60:
+                    break
+                continue
     finally:
         for t in (up, down):
             if not t.done():
@@ -2372,7 +2247,6 @@ async def http_keepalive_relay(ctx, c_reader, c_writer, s_reader, s_writer,
     下行延迟 + 下行带宽，切场景对已在途的连接立即生效（每块重读 G.profile）。
     """
     dl = DelayLine(c_writer, ctx.label).start()
-    gen = G.gen
     cur_target = None
 
     async def _reconnect(host, port):
@@ -2382,6 +2256,9 @@ async def http_keepalive_relay(ctx, c_reader, c_writer, s_reader, s_writer,
             s_writer.close()
         except Exception:
             pass
+        # 摘掉旧 writer 的登记：多次重连不能让 ctx.writers / G.active 累积死引用
+        old_writer = s_writer
+        ctx.unregister(old_writer)
         try:
             s_reader, s_writer = await asyncio.wait_for(
                 asyncio.open_connection(host, port), timeout=15)
@@ -2398,17 +2275,27 @@ async def http_keepalive_relay(ctx, c_reader, c_writer, s_reader, s_writer,
             return False
 
     async def _send_down(block):
-        """一块响应数据：下行带宽 + 下行延迟后投递给客户端（与 pipe() 同规则）"""
+        """一块响应数据：丢包停顿 + 断连 + 下行带宽 + 下行延迟（与 pipe() 同规则）"""
         if ctx.fixed:
-            await dl.submit(block, 0, gen)
+            await dl.submit(block, 0, G.gen)
             return
         p = G.profile
+        # 与 pipe() 相同的丢包/断连判定：明文 keep-alive 的 GET/HEAD/DELETE
+        # 过去只吃带宽+延迟，完全不吃 loss_pct/disconnect_pct，故障计数与
+        # 实际表现不一致。每块重读 G.profile，切场景立即生效。
+        if p["loss_pct"] and random.random() * 100 < p["loss_pct"]:
+            await nap(p["stall_ms"] / 1000.0 * (0.5 + random.random()), G.gen)
+            p = G.profile
+        if p["disconnect_pct"] and random.random() * 100 < p["disconnect_pct"]:
+            log_event("disconnect", "模拟断连：" + ctx.label)
+            ctx.abort_all()
+            raise Abort()
         bucket = G.bucket_down
         if bucket is not None:
             bucket.sync(p.get("down_kbps", 0))
             await bucket.consume(len(block))
         G.bytes_down += len(block)
-        await dl.submit(block, _latency_delay(p, "down"), gen)
+        await dl.submit(block, _latency_delay(p, "down"), G.gen)
 
     try:
         first = True
@@ -2475,7 +2362,12 @@ async def http_keepalive_relay(ctx, c_reader, c_writer, s_reader, s_writer,
                     await s_writer.drain()
                 except (ConnectionError, OSError):
                     if attempt == 0 and not ctx.fixed:
-                        continue               # 连接已死：重连后重试
+                        # 连接已死：必须真正重连再重试。旧实现直接 continue，
+                        # 用的是同一个已死的 s_writer，重试必然再次抛错后 return，
+                        # 注释承诺的「重连」从未发生。
+                        if not await _reconnect(cur_target[0], cur_target[1]):
+                            return
+                        continue
                     return
                 head = await _read_msg_head(s_reader, 60)
                 if head:
@@ -2581,6 +2473,74 @@ async def http_keepalive_relay(ctx, c_reader, c_writer, s_reader, s_writer,
 # --------------------------------------------------------------------------
 
 UPSTREAM_502 = b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+# 拒绝转发到本机/控制口目标时用 403：与「上游连不上」的 502 区分开，
+# 脚本一眼能看出是被策略挡下的，不是目标服务挂了。
+UPSTREAM_403 = b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+
+# 代理绝不转发的端口：控制口 + 共享口。它们只服务本机 / 局域网内的
+# WeakNet 自己，正常转发永远不会以它们为目标。
+def _forbidden_target_ports():
+    ports = {DEFAULT_CTRL_PORT, SHARE_PORT}
+    for p in (G.ctrl_port, G.share_port):
+        try:
+            if int(p or 0) > 0:
+                ports.add(int(p))
+        except (TypeError, ValueError):
+            pass
+    return ports
+
+
+def _target_forbidden(host, port):
+    """这个转发目标是否属于「绝不该被代理转发」的一类（纯函数，便于单测）。
+
+    两类目标：
+      * 回环 / 本机地址（localhost、*.localhost、127.*、::1、0.0.0.0、::）
+        —— 经代理隧道访问它们会绕过控制面的 Host 校验，把局域网请求直接
+        送进只服务本机的端口；
+      * 控制口 / 共享口（8899 / 8900 及实际占用的那两个端口）。
+    弱网转发本身不需要这两种目标，所以拒绝它们不增加任何使用门槛。
+
+    只看精确值与后缀：`localhost.example.com` 是普通域名，必须放行。
+    """
+    h = (host or "").strip().strip("[]").strip().lower().rstrip(".")
+    if h == "localhost" or h.endswith(".localhost"):
+        return True
+    if h in ("::1", "::", "0.0.0.0"):
+        return True
+    if h.startswith("127."):
+        return True
+    try:
+        p = int(port)
+    except (TypeError, ValueError):
+        return False
+    return p in _forbidden_target_ports()
+
+
+def _proxy_exposed():
+    """代理是否绑在回环之外（--proxy-host 0.0.0.0，手机 Wi-Fi 直连场景）。"""
+    return (G.proxy_host or "").strip().lower() not in (
+        "", "127.0.0.1", "localhost", "::1", "[::1]")
+
+
+def _proxy_target_blocked(host, port):
+    """运行时判定：这条转发要不要拒。
+
+    控制口/共享口一律拒（本机、局域网都不转发）；回环目标只在代理对局域网
+    开放时才拒 —— 绑 127.0.0.1 时代理本来就只有本机进程能用，而本机进程
+    直接连 127.0.0.1:8899 根本不需要绕代理，封掉只会误伤「用弱网测本机
+    服务」这条常用路径。
+
+    取舍：远端主机上恰好也用 8899/8900 的服务无法经本代理做弱网测试。
+    这是有意的——控制口是本工具的本地管理面，不能因为「可能有人要测远端
+    同端口服务」就留一条可被利用的隧道。
+    """
+    try:
+        p = int(port)
+    except (TypeError, ValueError):
+        return False
+    if p in _forbidden_target_ports():
+        return True
+    return _proxy_exposed() and _target_forbidden(host, p)
 
 
 def _target_host(target):
@@ -2601,6 +2561,35 @@ def _is_ip_literal(host):
         return True
     except ValueError:
         return False
+
+
+# 请求行/请求头的读取超时。正常客户端毫秒级就发完请求头，30s 只掐
+# 「连上来就晾着」的半开连接；已建立的长连接早过了读头阶段，完全不受影响。
+REQ_HEADER_TIMEOUT = 30
+
+# 请求头上限：控制口与代理共用同一组口径。代理侧原来只靠上面的超时，
+# 客户端只要每行都在超时前到达，就能一行接一行地把内存顶上去。
+MAX_HEADER_BYTES = 16 * 1024     # 请求行 + 全部头部
+MAX_HEADER_LINES = 100
+
+
+async def read_proxy_headers(reader, max_bytes=MAX_HEADER_BYTES,
+                             max_lines=MAX_HEADER_LINES):
+    """读代理请求头，返回原始行列表；超限返回 None（调用方回 431 并断开）。
+
+    行数与总字节同时限制：只限字节挡不住「十万行空头」，只限行数挡不住
+    「一行 16MB」。
+    """
+    hs = []
+    total = 0
+    while True:
+        h = await reader.readline()
+        if not h or h in (b"\r\n", b"\n"):
+            return hs
+        total += len(h)
+        if total > max_bytes or len(hs) >= max_lines:
+            return None
+        hs.append(h)
 
 
 async def handle_proxy(reader, writer):
@@ -2632,7 +2621,11 @@ async def handle_proxy(reader, writer):
         bypass = not scope_hit(pname)
         if bypass:
             ctx.fixed = True
+            ctx.bypassed = True
             ctx.prof = BYPASS_PROFILE
+        # 判定完成。此前 ctx 已在 G.contexts 里（空闲回收看得见），
+        # 但 flap 会跳过 pending 的它；到这里才纳入 flap 的掐断范围。
+        ctx.bypass_pending = False
 
         # 周期断网黑窗期：只掐断被接管的连接（未接管的程序不受影响）
         if (not G.gate_open) and not bypass:
@@ -2641,7 +2634,7 @@ async def handle_proxy(reader, writer):
             return
 
         try:
-            line = await asyncio.wait_for(reader.readline(), timeout=600)
+            line = await asyncio.wait_for(reader.readline(), timeout=REQ_HEADER_TIMEOUT)
         except (asyncio.TimeoutError, TimeoutError, ConnectionError, OSError):
             return
         if not line:
@@ -2654,17 +2647,26 @@ async def handle_proxy(reader, writer):
 
         # 读完请求头（整体 30s 超时）。原来逐行裸 readline：客户端发个请求行就
         # 晾着的话，连接会无限期挂起，占着 ctx/writer/G.active 条目。
-        async def _read_headers():
-            hs = []
-            while True:
-                h = await reader.readline()
-                if not h or h in (b"\r\n", b"\n"):
-                    return hs
-                hs.append(h)
+        # 超限（16KB / 100 行）时 read_proxy_headers 返回 None，回 431 断开。
         try:
-            headers = await asyncio.wait_for(_read_headers(), timeout=30)
+            headers = await asyncio.wait_for(read_proxy_headers(reader),
+                                             timeout=REQ_HEADER_TIMEOUT)
         except (asyncio.TimeoutError, TimeoutError, ConnectionError, OSError):
             return
+        if headers is None:
+            log_event("error", "代理请求头超限（>%d 字节或 >%d 行），已断开"
+                      % (MAX_HEADER_BYTES, MAX_HEADER_LINES))
+            try:
+                writer.write(b"HTTP/1.1 431 Request Header Fields Too Large"
+                             b"\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                await writer.drain()
+            except Exception:
+                pass
+            return
+
+        # 绑定 0.0.0.0 时本端口对整个网段开放，这是「手机 Wi-Fi 代理直连」
+        # 的必要前提——Android 原生代理设置没有凭据输入口，任何鉴权都会让
+        # 这条路径直接不可用。风险改由开启时的一次确认与顶栏提示承担。
 
         # 直通连接用固定全零参数：不注入任何弱网效果，也不随场景切换而变化
         prof = ctx.prof if ctx.fixed else G.profile
@@ -2704,6 +2706,16 @@ async def handle_proxy(reader, writer):
                 return
             label = f"{host}:{port}"
             ctx.label = label
+            if _proxy_target_blocked(host, port):
+                # 绑 0.0.0.0 时本端口对整个网段开放，同网段任何人发
+                # `CONNECT 127.0.0.1:8899` 都能把请求塞进只服务本机的控制口。
+                log_event("reject", "拒绝转发到本机/控制口目标：" + label)
+                try:
+                    writer.write(UPSTREAM_403)
+                    await writer.drain()
+                except Exception:
+                    pass
+                return
             try:
                 s_reader, s_writer = await asyncio.wait_for(
                     asyncio.open_connection(host, port), timeout=15)
@@ -2732,6 +2744,15 @@ async def handle_proxy(reader, writer):
             label = f"{host}:{port}"
             ctx.label = label
             path = (u.path or "/") + ("?" + u.query if u.query else "")
+            if _proxy_target_blocked(host, port):
+                # 与 CONNECT 同一套判据：普通 HTTP 绝对地址同样能打到本机端口
+                log_event("reject", "拒绝转发到本机/控制口目标：" + label)
+                try:
+                    writer.write(UPSTREAM_403)
+                    await writer.drain()
+                except Exception:
+                    pass
+                return
             try:
                 s_reader, s_writer = await asyncio.wait_for(
                     asyncio.open_connection(host, port), timeout=15)
@@ -2785,8 +2806,10 @@ async def handle_proxy(reader, writer):
             await run_tunnel(ctx, reader, s_writer, s_reader, writer, prof)
     except Abort:
         pass
-    except (ConnectionError, OSError):
-        pass
+    except (ConnectionError, OSError) as e:
+        # 客户端取消、App 切后台、上游 reset 都是常态，不该打印栈；但完全
+        # 静默会让「这条连接为什么失败」在事件环里查不到任何线索。
+        log_event("error", "%s 转发中断：%s" % (ctx.label, type(e).__name__))
     finally:
         G.conns_active -= 1
         ctx.cleanup()
@@ -2804,8 +2827,14 @@ async def flap_loop():
                 break
             G.gate_open = False
             log_event("flap", f"网络切换：全部连接中断 {G.profile['flap_blackout_sec']}s")
-            for w in list(G.active):
-                abort_writer(w)
+            # 未接管（bypass）连接虽然也登记进 G.active，但承诺是「不受弱网影响」。
+            # 按 ConnCtx 逐个筛，只掐真正被我们接管的那批。
+            for ctx in list(G.contexts):
+                # 未判定完的（卡在进程名反查的 await 上）先放过，
+                # 它可能是直通连接；真被接管的话后面的黑窗入口检查会拒掉它。
+                if ctx.bypass_pending or ctx.bypassed:
+                    continue
+                ctx.abort_all()
             await asyncio.sleep(G.profile["flap_blackout_sec"])
             G.gate_open = True
             log_event("flap", "网络恢复")
@@ -2852,6 +2881,11 @@ async def set_profile(prof, key):
     dict 引用，这样「停止模拟 / 切换场景」能让正在传输的连接立刻生效，
     否则它们会一直拿着旧参数跑完（表现为点了停止还是慢、黑洞里的请求一直挂着）。
     """
+    # 本调用拿到的代数。下面 cancel+await flap_task 会让出事件循环，
+    # 期间并发的 /api/preset 可能又换了一次场景；收尾时必须认代数，
+    # 否则旧调用会用自己那份 prof 把新场景的开关/参数覆盖掉。
+    G.profile_gen += 1
+    my_gen = G.profile_gen
     cur = G.profile
     cur.clear()
     cur.update(prof)
@@ -2879,6 +2913,13 @@ async def set_profile(prof, key):
             await G.flap_task
         except (asyncio.CancelledError, Exception):
             pass
+        # 先认代数再动共享句柄。await 期间可能被更新的 set_profile 接手，
+        # 它已经建好了自己的 flap_task；本调用若在这里写 None 就会抹掉新句柄，
+        # 新任务失去引用后再也停不掉，表现为「双 flap」。
+        if G.profile_gen != my_gen:
+            # 已经有更新的 set_profile 接手：参数、桶、开关、flap_task 都由它收尾，
+            # 这次旧调用到此为止，一个共享字段都不能写。
+            return
         G.flap_task = None
     G.gate_open = True
     # 应用带内容的场景即视为「开启限速」，回到全零（直连）即视为「关闭」
@@ -2901,8 +2942,9 @@ async def select_scene(prof, key):
     if G.combo_task is not None and key != COMBO_KEY_PREFIX + str(G.combo_id):
         # 用户手动点了别的场景：正在播放的组合必须停下，否则它会到点把场景抢回去
         await stop_combo()
-    if has_limits(prof):
-        G.last_profile = dict(prof)
+    # 没开启限速时只改 preset_key，不能把「只是选中」的 prof 记成
+    # last_profile（报告兜底会据此谎报测过）。真正生效时由 set_profile
+    # 里的 has_limits 分支统一记录，语义就是「最后一次生效的场景」。
     if not G.limit_on:
         return False
     await set_profile(prof, key)
@@ -3071,6 +3113,9 @@ async def restart_proxy(host):
     G.proxy_host = host
     G.proxy_server = await asyncio.start_server(
         handle_proxy, host, G.proxy_port, limit=1 << 20)
+    if host not in ("127.0.0.1", "localhost", "::1"):
+        log_event("config", "局域网代理已开启（同网段设备可直连 %s:%d）"
+                  % (host, G.proxy_port))
 
 
 # --------------------------------------------------------------------------
@@ -3125,8 +3170,9 @@ def load_settings():
             d = json.loads(f.read_text(encoding="utf-8"))
             if isinstance(d, dict):
                 return d
-    except Exception:
-        pass
+    except Exception as e:
+        # 设置文件损坏会让用户名/id/PIN 全部回到默认值，而界面上看不出来
+        log("设置读取失败（%s）：%r" % (_settings_file(), e))
     return {}
 
 
@@ -3179,7 +3225,9 @@ def normalize_pin(v):
 
 
 def new_share_pin():
-    return "%04d" % random.randint(0, 9999)
+    # PIN 是局域网共享的唯一凭据，必须用密码学随机源：random 的 Mersenne
+    # Twister 状态可被几个输出反推，4 位 PIN 会被预测。randbelow 不引入新依赖。
+    return "%04d" % secrets.randbelow(10000)
 
 
 def set_share_pin(pin=None, refresh=False):
@@ -3211,23 +3259,78 @@ def share_proto_ver(payload):
         return 1
 
 
-def share_auth_error(payload, target_pin=None):
+# PIN 退避参数：前 5 次不锁（允许手误），之后 60s 起、按次数翻倍、上限 15 分钟。
+SHARE_FAIL_FREE = 5
+SHARE_FAIL_LOCK = 60.0
+SHARE_FAIL_MAX = 900.0
+
+
+def _share_fail_cleanup(now):
+    """失败表按来源 IP 记。局域网最多个位数设备，但伪造源地址可以刷表，
+    所以超过 512 条时清掉已过期的，避免长期运行内存缓慢增长。"""
+    if len(G.share_fail) <= 512:
+        return
+    for k in [k for k, v in G.share_fail.items() if v.get("until", 0.0) <= now]:
+        G.share_fail.pop(k, None)
+
+
+def share_throttle_left(peer_ip):
+    """距离解锁还剩几秒；0 = 未锁定。"""
+    if not peer_ip:
+        return 0.0
+    st = G.share_fail.get(peer_ip)
+    if not st:
+        return 0.0
+    left = float(st.get("until", 0.0)) - time.monotonic()
+    return left if left > 0 else 0.0
+
+
+def note_share_fail(peer_ip):
+    if not peer_ip:
+        return
+    now = time.monotonic()
+    _share_fail_cleanup(now)
+    st = G.share_fail.setdefault(peer_ip, {"n": 0, "until": 0.0})
+    st["n"] = int(st.get("n", 0)) + 1
+    if st["n"] >= SHARE_FAIL_FREE:
+        over = st["n"] - SHARE_FAIL_FREE
+        lock = min(SHARE_FAIL_MAX, SHARE_FAIL_LOCK * (2 ** min(over, 4)))
+        st["until"] = now + lock
+        log_event("share", "PIN 连续错误 %d 次，锁定 %.0f 秒（%s）"
+                  % (st["n"], lock, peer_ip))
+
+
+def note_share_ok(peer_ip):
+    if peer_ip:
+        G.share_fail.pop(peer_ip, None)
+
+
+def share_auth_error(payload, target_pin=None, peer_ip=None):
     """共享推送的鉴权判定：None = 放行，否则返回 (HTTP 状态码, 原因)。
 
     默认安全：ver<2（旧版、无 PIN）直接 409 拒收；用户在面板里显式打开
     allow_legacy 后才接受，且调用方会把内容强制降级为「只进收件箱」。
+    连续 PIN 错误按来源 IP 退避：4 位 PIN 无退避时可被快速穷举。
     """
+    left = share_throttle_left(peer_ip)
+    if left > 0:
+        return 429, "PIN 连续错误，请 %.0f 秒后再试" % left
     if share_proto_ver(payload) < SHARE_VER:
         if not G.allow_legacy:
             return 409, "对方是旧版 WeakNet（无 PIN），已拒收；可在共享面板允许旧版设备"
         return None
     want = G.share_pin if target_pin is None else normalize_pin(target_pin)
     if not want:
-        # 本机从未生成过 PIN（例如刚升级、设置文件只读）：此时没有可校验的口令，
-        # 与其全部拒收让用户以为共享坏了，不如放行并提示去面板设置 PIN。
-        return None
+        # 原来这里 fail-open 放行，等于本机没设 PIN 时任何人都能推送内容进来。
+        # 没有可校验的口令就必须拒收，并明确提示去共享面板设置 PIN。
+        return 409, "本机尚未设置共享 PIN，无法校验推送；请先在共享面板设置 4 位 PIN"
     if normalize_pin(payload.get("pin")) != want:
+        note_share_fail(peer_ip)
+        left = share_throttle_left(peer_ip)
+        if left > 0:
+            return 429, "PIN 连续错误，已锁定 %.0f 秒" % left
         return 403, "PIN 不正确"
+    note_share_ok(peer_ip)
     return None
 
 
@@ -3650,7 +3753,9 @@ async def handle_share(reader, writer):
                 d = {}
             if not isinstance(d, dict):
                 d = {}
-            err = share_auth_error(d)
+            _peer = writer.get_extra_info("peername")
+            _pip = _peer[0] if _peer else None
+            err = share_auth_error(d, peer_ip=_pip)
             if err:
                 code, msg = err
                 log_event("share", "拒收 %s 的推送（HTTP %d）：%s"
@@ -3693,13 +3798,39 @@ async def start_sharing():
         pass
 
 
+# 故障类型：与 report_gen.FAULT_TYPES 对齐（本模块不 import 报告层，避免反向依赖）。
+FAULT_EVENT_TYPES = ("disconnect", "dns", "timeout", "reject", "flap")
+# Android ReportGen.summarizeEvents 拿到 fault_counts_full 后是「全量整体替换」，
+# 不是只取关心的五类。这里也按全类型出快照（至少含 config/connect/error），
+# 否则 Android 报告里的其他事件计数会被这份五类快照抹成 0。
+ALL_EVENT_TYPES = FAULT_EVENT_TYPES + ("config", "connect", "error", "idle", "share")
+
+
+def full_fault_counts():
+    """从全量环形缓冲（300 条）统计所有事件类型，不受 GUI 只看最近 60 条影响。
+
+    未知类型（含老快照里的 '?'）也照实计入；report_gen 仍只取 FAULT_TYPES，
+    不会被多出来的键影响。
+    """
+    counts = dict.fromkeys(ALL_EVENT_TYPES, 0)
+    for e in G.events:
+        t = e.get("type") if isinstance(e, dict) else None
+        if t is None:              # 与 report_gen.summarize_events 的 '?' 口径一致
+            t = "?"
+        counts[t] = counts.get(t, 0) + 1
+    return counts
+
+
 def status_payload():
     ev = list(G.events)[-60:]
     ev.reverse()
     return {
         "version": VERSION,
         "build": BUILD,
-        "profile": G.profile,
+        # 必须快照：GUI 导出报告时先取这个字典，再弹两个模态框；期间引擎在
+        # 后台线程继续跑，set_profile 原地 clear/update G.profile。若这里直接
+        # 给活引用，报告会把「导出后才切换」的参数记成测过的参数。
+        "profile": dict(G.profile),
         # 最后一次真正生效过的弱网场景（停止限速后 G.profile 会回到直连，
         # 但 last_profile 保留着测过的内容）——报告据此还原「测了什么」，
         # 否则测完点导出只会看到直连，把真实测过的场景丢掉。
@@ -3719,6 +3850,9 @@ def status_payload():
             "uptime": int(time.time() - G.started_at),
         },
         "events": ev,
+        # 事件时间线仍是最近 60 条，但故障计数单独从全量缓冲算，
+        # report_gen 优先读它，避免早期故障被后来的连接/错误事件挤出后漏报。
+        "fault_counts_full": full_fault_counts(),
         "scope": {
             "mode": G.scope_mode,
             "list": G.scope_list,
@@ -3785,8 +3919,6 @@ class HttpError(Exception):
         self.msg = msg
 
 
-MAX_HEADER_BYTES = 16 * 1024     # 请求行 + 全部头部
-MAX_HEADER_LINES = 100
 MAX_BODY_SHARE = 256 * 1024      # 共享推送：20 条环境 + 20 支组合远用不到 256KB
 MAX_BODY_CTRL = 1 << 20          # 控制台：留足余量，但仍必须有上限
 
@@ -3849,6 +3981,18 @@ async def read_http_request(reader, max_body, header_timeout=10.0, body_timeout=
     return method, path, headers, body
 
 
+def _ctrl_host_is_loopback(host):
+    """Host 头是否指向回环。只做判定，不返回/记录原值（原值会被展示并随报告导出）。"""
+    h = (host or "").strip().lower()
+    if not h:
+        return False
+    if h.startswith("["):                 # [::1]:8899
+        h = h.split("]")[0] + "]"
+    elif ":" in h:
+        h = h.rsplit(":", 1)[0]
+    return h in ("127.0.0.1", "localhost", "[::1]")
+
+
 def ctrl_host_ok(headers):
     """控制口只服务本机：Host 必须指向回环，且不允许浏览器带来的 Origin。
 
@@ -3857,14 +4001,7 @@ def ctrl_host_ok(headers):
     """
     if headers.get("origin"):
         return False
-    h = (headers.get("host") or "").strip().lower()
-    if not h:
-        return False
-    if h.startswith("["):                 # [::1]:8899
-        h = h.split("]")[0] + "]"
-    elif ":" in h:
-        h = h.rsplit(":", 1)[0]
-    return h in ("127.0.0.1", "localhost", "[::1]")
+    return _ctrl_host_is_loopback(headers.get("host"))
 
 
 def send_response(writer, code, ctype, body, extra=""):
@@ -3877,6 +4014,46 @@ def send_response(writer, code, ctype, body, extra=""):
 
 
 JSON_CT = "application/json; charset=utf-8"
+
+
+def _json_ok(writer, obj):
+    """回 200 + JSON（紧凑格式，与历史响应逐字节一致）。"""
+    send_response(writer, 200, JSON_CT,
+                  json.dumps(obj, ensure_ascii=False).encode())
+
+
+def _json_err(writer, code, msg, extra=""):
+    """回错误 JSON：`{"error":"<msg>"}`。手写格式而非 json.dumps，
+    是为了保住历史上没有空格的紧凑写法（脚本按字面串匹配时不会突然失配）。"""
+    send_response(writer, code, JSON_CT,
+                  ('{"error":%s}' % json.dumps(msg, ensure_ascii=False)).encode(),
+                  extra=extra)
+
+
+def _parse_json(body):
+    """解析请求体 JSON，失败一律返回 None（调用方各自判定类型）。"""
+    try:
+        return json.loads(body)
+    except Exception:
+        return None
+
+
+# 只有 GET 就能改状态的端点。浏览器里的任意网页可以用
+# `<img src="http://127.0.0.1:8899/api/stop">` 静默触发它（简单请求，无 Origin，
+# 也拿不到响应），所以这层必须单独挡：浏览器发出的请求一定带 Sec-Fetch-Site，
+# 直接导航是 none，页面里的 img/script/fetch 是 cross-site / same-origin /
+# same-site；curl / adb / 脚本不带这个头，照常可用（不加任何鉴权门槛）。
+_GET_WRITE_PATHS = frozenset(("/api/stop",))
+
+
+def _browser_get_write_blocked(method, path, headers):
+    """GET 写操作是否来自浏览器（含 Sec-Fetch-Site 且不是直接导航）。"""
+    if method != "GET" or path not in _GET_WRITE_PATHS:
+        return False
+    site = headers.get("sec-fetch-site")
+    if site is None:
+        return False
+    return site.strip().lower() != "none"
 
 
 # ---- 控制接口路由表 ------------------------------------------------------
@@ -3908,8 +4085,7 @@ async def _h_root(writer, method, body):
 
 @_route("/api/status")
 async def _h_status(writer, method, body):
-    send_response(writer, 200, JSON_CT,
-                  json.dumps(status_payload(), ensure_ascii=False).encode())
+    _json_ok(writer, status_payload())
 
 
 @_route("/api/share/status")
@@ -3920,50 +4096,40 @@ async def _h_share_status(writer, method, body):
                       b'{"error":"method not allowed, use POST /api/push"}',
                       extra="Allow: GET\r\n")
     else:
-        send_response(writer, 200, JSON_CT,
-                      json.dumps(_share_status_payload(), ensure_ascii=False).encode())
+        _json_ok(writer, _share_status_payload())
 
 
 @_route("/api/presets")
 async def _h_presets(writer, method, body):
     data = [{"key": k, "name": v[0], "cat": v[1]} for k, v in PRESETS.items()]
-    send_response(writer, 200, JSON_CT,
-                  json.dumps(data, ensure_ascii=False).encode())
+    _json_ok(writer, data)
 
 
 @_route("/api/params")
 async def _h_params(writer, method, body):
     # 参数规格：两端由同一份 spec.json 生成，脚本/CI 用它做深度比对
-    send_response(writer, 200, JSON_CT, json.dumps(
-        {"spec_hash": SPEC_HASH, "items": PARAM_SPECS},
-        ensure_ascii=False).encode())
+    _json_ok(writer, {"spec_hash": SPEC_HASH, "items": PARAM_SPECS})
 
 
 @_route("/api/upresets")
 async def _h_upresets(writer, method, body):
     # 自定义栏：用户命名保存的参数。老版本客户端没有这个接口也照常工作
-    send_response(writer, 200, JSON_CT, json.dumps(
-        {"items": _items_payload(get_user_presets())},
-        ensure_ascii=False).encode())
+    _json_ok(writer, {"items": _items_payload(get_user_presets())})
 
 
 @_route("/api/combos")
 async def _h_combos(writer, method, body):
     # 弱网组合列表（每支带 steps 与一行摘要）。字段与 Android 端同名，
     # 同一套脚本在两端都能跑，不用为平台各写一份
-    send_response(writer, 200, JSON_CT, json.dumps(
-        {"items": _combos_payload()}, ensure_ascii=False).encode())
+    _json_ok(writer, {"items": _combos_payload()})
 
 
 @_route("/api/combo", "POST")
 async def _h_combo_save(writer, method, body):
     # 新增或覆盖一支组合：{id?, name, loop, steps:[{key,minutes,seconds}]}
-    try:
-        data = json.loads(body)
-    except Exception:
-        data = None
+    data = _parse_json(body)
     if not isinstance(data, dict):
-        send_response(writer, 400, JSON_CT, b'{"error":"bad request"}')
+        _json_err(writer, 400, "bad request")
         return
     raw_steps = data.get("steps") if isinstance(data.get("steps"), list) else []
     steps = []
@@ -3982,10 +4148,8 @@ async def _h_combo_save(writer, method, body):
             {"error": "没有一段能用的场景"}, ensure_ascii=False).encode())
         return
     log_event("config", "保存弱网组合：" + combo["name"])
-    send_response(writer, 200, JSON_CT, json.dumps(
-        {"ok": True, "id": combo["id"], "name": combo["name"],
-         "steps": len(combo["steps"])},
-        ensure_ascii=False).encode())
+    _json_ok(writer, {"ok": True, "id": combo["id"], "name": combo["name"],
+                      "steps": len(combo["steps"])})
 
 
 @_route("/api/combo/delete", "POST")
@@ -3995,7 +4159,7 @@ async def _h_combo_delete(writer, method, body):
     except Exception:
         cid = None
     if not cid:
-        send_response(writer, 400, JSON_CT, b'{"error":"bad request"}')
+        _json_err(writer, 400, "bad request")
         return
     combo = find_combo(cid)
     # 删的这支是不是「当前这支」：正在播放（combo_id）或被选中（preset_key）
@@ -4011,8 +4175,7 @@ async def _h_combo_delete(writer, method, body):
             await set_profile(default_profile(), "direct")
             log_event("config", "删除组合后切回直连")
         log_event("config", "删除弱网组合：" + combo["name"])
-    send_response(writer, 200, JSON_CT,
-                  json.dumps({"ok": ok}, ensure_ascii=False).encode())
+    _json_ok(writer, {"ok": ok})
 
 
 @_route("/api/upreset", "POST")
@@ -4024,14 +4187,12 @@ async def _h_upreset_save(writer, method, body):
     except Exception:
         data, prof = None, None
     if not isinstance(data, dict) or not isinstance(prof, dict):
-        send_response(writer, 400, JSON_CT, b'{"error":"bad request"}')
+        _json_err(writer, 400, "bad request")
         return
     item, _items = upsert_user_preset(data.get("name"), prof, data.get("id"))
     log_event("config", "保存自定义场景：" + item["name"])
-    send_response(writer, 200, JSON_CT, json.dumps(
-        {"ok": True, "id": item["id"], "name": item["name"],
-         "items": _items_payload(get_user_presets())},
-        ensure_ascii=False).encode())
+    _json_ok(writer, {"ok": True, "id": item["id"], "name": item["name"],
+                      "items": _items_payload(get_user_presets())})
 
 
 @_route("/api/upreset/del", "POST")
@@ -4041,13 +4202,12 @@ async def _h_upreset_del(writer, method, body):
     except Exception:
         pid = None
     if not pid:
-        send_response(writer, 400, JSON_CT, b'{"error":"bad request"}')
+        _json_err(writer, 400, "bad request")
         return
     ok, left = delete_user_preset(pid)
     if ok:
         log_event("config", "删除自定义场景")
-    send_response(writer, 200, JSON_CT, json.dumps(
-        {"ok": ok, "items": _items_payload(left)}, ensure_ascii=False).encode())
+    _json_ok(writer, {"ok": ok, "items": _items_payload(left)})
 
 
 @_route("/api/preset", "POST")
@@ -4062,34 +4222,35 @@ async def _h_preset_select(writer, method, body):
         # （已开限速就立刻按序播放，没开只选中，不替用户偷偷开始限速）
         cid = str(key)[len(COMBO_KEY_PREFIX):]
         if find_combo(cid) is None:
-            send_response(writer, 400, JSON_CT, b'{"error":"bad request"}')
+            _json_err(writer, 400, "bad request")
             return
         applied = await select_combo(cid)
-        send_response(writer, 200, JSON_CT, json.dumps(
-            {"ok": True, "applied": bool(applied),
-             "kind": "combo"}, ensure_ascii=False).encode())
+        _json_ok(writer, {"ok": True, "applied": bool(applied),
+                          "kind": "combo"})
         return
     try:
         prof = build_preset_profile(key)
     except Exception:
         prof = None
     if prof is None:
-        send_response(writer, 400, JSON_CT, b'{"error":"bad request"}')
+        _json_err(writer, 400, "bad request")
     else:
-        # 与 GUI 同一条规矩：切场景只是选中，没开启限速时不施加
-        await select_scene(prof, key)
-        log_event("config", "切换场景：" + prof["name"])
-        send_response(writer, 200, JSON_CT, b'{"ok":true}')
+        # 与 GUI 同一条规矩：切场景只是选中，没开启限速时不施加。
+        # select_scene 的返回值就是「是否真正生效」，据此区分文案，
+        # 别让「选择场景：」被 report_gen 当成已落地场景。
+        applied = await select_scene(prof, key)
+        log_event("config", ("切换场景：" if applied else "选择场景：") + prof["name"])
+        # 与 combo 分支同形——ok 表示「点选中这个操作成功」，applied 才表示
+        # 「真的落到引擎参数上」。没开限速时 applied=false 仍是 200。
+        _json_ok(writer, {"ok": True, "applied": bool(applied),
+                          "kind": "preset"})
 
 
 @_route("/api/profile", "POST")
 async def _h_profile(writer, method, body):
-    try:
-        data = json.loads(body)
-    except Exception:
-        data = None
+    data = _parse_json(body)
     if not isinstance(data, dict):
-        send_response(writer, 400, JSON_CT, b'{"error":"bad request"}')
+        _json_err(writer, 400, "bad request")
         return
     # 与「保存/应用用户预设」走同一套收敛逻辑（_norm_user_profile）：
     # 排除布尔、按 spec 的 params.max 夹上限、忽略未知键。
@@ -4118,7 +4279,7 @@ async def _h_run(writer, method, body):
         # 否则 bool("false") == True 会把「停止」误执行为「开启限速」
         enable = enable_raw if isinstance(enable_raw, bool) else None
         if enable is None:
-            send_response(writer, 400, JSON_CT, b'{"error":"bad request"}')
+            _json_err(writer, 400, "bad request")
         else:
             await set_limit(enable)
             log_event("config", ("开启限速：" + G.profile["name"]) if enable
@@ -4140,17 +4301,17 @@ async def _h_stop(writer, method, body):
 
 @_route("/api/sysproxy", "POST")
 async def _h_sysproxy(writer, method, body):
-    try:
-        enable = bool(json.loads(body).get("enable"))
-    except Exception:
-        enable = None
-    if enable is None:
-        send_response(writer, 400, JSON_CT, b'{"error":"bad request"}')
-    else:
-        ok = set_sysproxy(enable)
-        log_event("config", "一键" + ("接管本机流量（系统代理已开启）" if enable else "解除接管（系统代理已关闭）"))
-        send_response(writer, 200, JSON_CT,
-                      ('{"ok":%s}' % ("true" if ok else "false")).encode())
+    data = _parse_json(body)
+    # 只认真布尔：bool("false") == True 会把「关闭」误执行成「接管」；
+    # 缺字段/类型不对一律 400，不再静默当作 False 去关别人的系统代理。
+    enable = data.get("enable") if isinstance(data, dict) else None
+    if not isinstance(enable, bool):
+        _json_err(writer, 400, "bad request")
+        return
+    ok = set_sysproxy(enable)
+    log_event("config", "一键" + ("接管本机流量（系统代理已开启）" if enable else "解除接管（系统代理已关闭）"))
+    send_response(writer, 200, JSON_CT,
+                  ('{"ok":%s}' % ("true" if ok else "false")).encode())
 
 
 @_route("/api/scope")
@@ -4167,12 +4328,12 @@ async def _h_scope(writer, method, body):
             else:
                 log_event("config", "接管范围：排除 " + (", ".join(lst) or "（空名单=全部接管）"))
         except Exception:
-            send_response(writer, 400, JSON_CT, b'{"error":"bad request"}')
+            _json_err(writer, 400, "bad request")
             return
-    send_response(writer, 200, JSON_CT, json.dumps({
+    _json_ok(writer, {
         "mode": G.scope_mode, "list": G.scope_list,
         "supported": IS_WIN,
-    }, ensure_ascii=False).encode())
+    })
 
 
 @_route("/api/targets")
@@ -4181,25 +4342,30 @@ async def _h_targets(writer, method, body):
     names = set(list_procs()) | set(G.scope_seen.keys()) | set(G.scope_list)
     names = {n for n in names if n and n.lower() != "system"
              and n != "<未识别>"}
-    send_response(writer, 200, JSON_CT, json.dumps({
+    _json_ok(writer, {
         "type": "process",
         "unit": "程序（exe）",
         "items": [{"id": n, "name": n, "desc": ""} for n in sorted(names)],
-    }, ensure_ascii=False).encode())
+    })
 
 
 @_route("/api/listen", "POST")
 async def _h_listen(writer, method, body):
     try:
-        host = json.loads(body).get("host")
+        req = json.loads(body)
+        if not isinstance(req, dict):
+            req = {}
     except Exception:
-        host = None
+        req = {}
+    host = req.get("host")
     if host not in ("127.0.0.1", "0.0.0.0"):
-        send_response(writer, 400, JSON_CT, b'{"error":"bad host"}')
+        _json_err(writer, 400, "bad host")
     else:
         await restart_proxy(host)
         log_event("config", f"代理监听切换为 {host}:{G.proxy_port}")
-        send_response(writer, 200, JSON_CT, b'{"ok":true}')
+        out = {"ok": True,
+               "listen": {"host": G.proxy_host, "port": G.proxy_port}}
+        _json_ok(writer, out)
 
 
 # ---- 平台专属能力：Android 有 VPN / 悬浮窗，桌面端没有 ----
@@ -4224,13 +4390,13 @@ async def _h_me(writer, method, body):
         if nm is not None:
             set_user_name(nm)
             log_event("share", "本机名称改为：" + G.user_name)
-    send_response(writer, 200, JSON_CT, json.dumps({
+    _json_ok(writer, {
         "name": G.user_name, "id": G.self_id, "share": G.share_port,
         "discover": G.discover_listen, "lan_ip": G.lan_ip,
         "platform": "windows" if IS_WIN else os.name,
         "share_ver": SHARE_VER, "pin_len": PIN_LEN,
         "allow_legacy": G.allow_legacy,
-    }, ensure_ascii=False).encode())
+    })
 
 
 @_route("/api/share/pin")
@@ -4250,20 +4416,20 @@ async def _h_share_pin(writer, method, body):
         send_response(writer, 200 if res.get("ok") else 400, JSON_CT,
                       json.dumps(res, ensure_ascii=False).encode())
     else:
-        send_response(writer, 200, JSON_CT, json.dumps({
+        _json_ok(writer, {
             "ok": True, "pin": G.share_pin, "len": PIN_LEN,
             "allow_legacy": G.allow_legacy, "ver": SHARE_VER,
-        }, ensure_ascii=False).encode())
+        })
 
 
 @_route("/api/peers")
 async def _h_peers(writer, method, body):
-    send_response(writer, 200, JSON_CT, json.dumps({
+    _json_ok(writer, {
         "items": _share_peer_rows(),
         "self": {"name": G.user_name, "id": G.self_id,
                  "share": G.share_port, "lan_ip": G.lan_ip},
         "discover": G.discover_listen,
-    }, ensure_ascii=False).encode())
+    })
 
 
 @_route("/api/push", "POST")
@@ -4287,11 +4453,10 @@ async def _h_push(writer, method, body):
         ip, _, pstr = peer.partition(":")
         peer = {"ip": ip, "share": int(pstr or SHARE_PORT), "name": ip}
     if not isinstance(peer, dict) or not peer.get("ip"):
-        send_response(writer, 400, JSON_CT, b'{"error":"bad peer"}')
+        _json_err(writer, 400, "bad peer")
     else:
         res = await push_to_peer(peer, ids, cids)
-        send_response(writer, 200, JSON_CT,
-                      json.dumps(res, ensure_ascii=False).encode())
+        _json_ok(writer, res)
 
 
 @_route("/api/inbox")
@@ -4306,8 +4471,7 @@ async def _h_inbox(writer, method, body):
         else:
             row["profile"] = it.get("profile") or {}
         items.append(row)
-    send_response(writer, 200, JSON_CT,
-                  json.dumps({"items": items}, ensure_ascii=False).encode())
+    _json_ok(writer, {"items": items})
 
 
 @_route("/api/inbox/resolve", "POST")
@@ -4318,8 +4482,7 @@ async def _h_inbox_resolve(writer, method, body):
         d = {}
     res = resolve_inbox(str(d.get("id") or ""), str(d.get("action") or ""),
                         d.get("name"))
-    send_response(writer, 200, JSON_CT,
-                  json.dumps(res, ensure_ascii=False).encode())
+    _json_ok(writer, res)
 
 
 async def handle_ctrl(reader, writer):
@@ -4334,8 +4497,21 @@ async def handle_ctrl(reader, writer):
             return
 
         if not ctrl_host_ok(headers):
-            log_event("share", "控制接口拒绝了 Host=%r Origin=%r 的请求"
-                      % (headers.get("host"), headers.get("origin")))
+            # Host/Origin 是攻击者可控的，绝不把原值写进日志或事件环
+            # （两者会被 GUI 展示并随报告导出）。只留固定原因 + 脱敏摘要。
+            host = headers.get("host") or ""
+            origin = headers.get("origin") or ""
+            loopback = _ctrl_host_is_loopback(host)
+            if origin:
+                reason = "带 Origin"
+            elif not host.strip():
+                reason = "缺少 Host"
+            elif not loopback:
+                reason = "Host 非回环"
+            else:
+                reason = "校验未通过"
+            log_event("share", "控制接口拒绝（%s，回环=%s，host_len=%d，origin_len=%d）"
+                      % (reason, "是" if loopback else "否", len(host), len(origin)))
             send_response(writer, 403, JSON_CT, b'{"error":"forbidden"}')
             return
 
@@ -4345,6 +4521,13 @@ async def handle_ctrl(reader, writer):
             send_response(writer, 405, JSON_CT,
                           b'{"error":"method not allowed"}',
                           extra="Allow: GET, POST\r\n")
+            return
+
+        # 浏览器发起的 GET 写操作一律拒绝（见 _GET_WRITE_PATHS 的说明）。
+        # 放在 Host/Origin 校验之后、分发之前：拒绝时记一条不含原值的日志。
+        if _browser_get_write_blocked(method, path, headers):
+            log_event("share", "控制接口拒绝：浏览器发起的 GET 写操作（%s）" % path)
+            send_response(writer, 403, JSON_CT, b'{"error":"forbidden"}')
             return
 
         handler = _CTRL_ROUTES.get((method, path)) or _CTRL_ROUTES.get(("*", path))
@@ -4385,11 +4568,23 @@ async def serve(host, proxy_port, ctrl_port):
     _gc_thr = _tune_gc()
     if _gc_thr:
         log("GC 参数：gen0 阈值 %s（默认 700）" % (_gc_thr,))
+    # 上次异常退出（崩溃 / taskkill）不会走 atexit，注册表里的系统代理会
+    # 一直指向已经没人监听的端口 —— 启动时先还原，别让用户带着断网去排查。
+    # 必须放在 start_server 之前：端口还被别人占着时函数内部会跳过。
+    release_stale_sysproxy(proxy_port)
     proxy = await asyncio.start_server(handle_proxy, host, proxy_port, limit=1 << 20)
     ctrl = await asyncio.start_server(handle_ctrl, "127.0.0.1", ctrl_port)
     G.proxy_host = host
-    G.proxy_port = proxy_port
+    # port=0 由系统分配：必须回读实际端口，否则 G.proxy_port 停在 0，
+    # 后续 restart_proxy 会绑到一个随机端口，调用方却仍以为在原端口。
+    G.proxy_port = (proxy_port if proxy_port
+                    else proxy.sockets[0].getsockname()[1])
+    G.ctrl_port = (ctrl_port if ctrl_port
+                   else ctrl.sockets[0].getsockname()[1])
     G.proxy_server = proxy
+    if host not in ("127.0.0.1", "localhost", "::1"):
+        log_event("config", "局域网代理已开启（同网段设备可直连 %s:%d）"
+                  % (host, G.proxy_port))
     asyncio.get_running_loop().create_task(idle_reap_loop())   # 空闲连接回收
     asyncio.get_running_loop().create_task(_log_flush_loop())  # 缓冲日志定期落盘
     try:
@@ -4436,8 +4631,10 @@ async def main():
     ap = argparse.ArgumentParser(description="WeakNet —— App 弱网测试工具")
     ap.add_argument("--host", default="127.0.0.1",
                     help="代理监听地址，手机测试用 0.0.0.0（默认 127.0.0.1）")
-    ap.add_argument("--proxy-port", type=int, default=8888, help="代理端口（默认 8888）")
-    ap.add_argument("--ctrl-port", type=int, default=8899, help="控制台端口（默认 8899）")
+    ap.add_argument("--proxy-port", type=int, default=DEFAULT_PROXY_PORT,
+                    help="代理端口（默认 %d）" % DEFAULT_PROXY_PORT)
+    ap.add_argument("--ctrl-port", type=int, default=DEFAULT_CTRL_PORT,
+                    help="控制台端口（默认 %d）" % DEFAULT_CTRL_PORT)
     args = ap.parse_args()
 
     _enable_slow_callback_probe()

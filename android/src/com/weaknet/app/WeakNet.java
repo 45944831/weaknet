@@ -33,15 +33,13 @@ public class WeakNet {
     // 暂停是「这段先按住别动」，恢复后要接着刚才的位置继续 ——
     // 组合播到第 3 段暂停，恢复应该还是第 3 段，而不是从头再播一遍。
     // 所以暂停时要记住当时播到哪、还剩多久。
+    /** 界面读取用的镜像；权威状态在 pauseState（纯 JDK 类，测试共用同一份逻辑） */
     public volatile boolean paused = false;
-    /** 暂停时正在播的组合 id（null = 当时播的是单支场景） */
-    private volatile String pausedComboId = null;
-    /** 暂停时播到的段序号（0 起） */
-    private volatile int pausedComboStep = -1;
-    /** 暂停时这一段还剩多少毫秒 */
-    private volatile long pausedComboRemain = 0;
-    /** 暂停时正在生效的那支场景的参数快照 */
-    private volatile Profile pausedProfile = null;
+    private final PauseState pauseState = new PauseState();
+
+    private void syncPaused() {
+        paused = pauseState.paused();
+    }
 
     public final AtomicInteger connTotal = new AtomicInteger();
     public final AtomicInteger connActive = new AtomicInteger();
@@ -183,7 +181,10 @@ public class WeakNet {
         // 显示「已暂停」而流量其实已被限速 —— 状态与事实相反。这里统一结束暂停态。
         // 注意 pause() 是先 setProfile 再置 paused=true，resume() 是先置 false 再
         // setProfile，两条路径都不会被这行误伤。
-        if (paused) clearPauseLocked();
+        if (pauseState.paused()) {
+            pauseState.clear();
+            syncPaused();
+        }
         profile = p;
         presetKey = key;
         gateOpen = true;
@@ -254,15 +255,15 @@ public class WeakNet {
     public synchronized void selectScene(Profile p, String key) {
         stopComboLocked();
         presetKey = key;
-        if (p != null && p.hasLimits()) lastProfile = p.copy();
-        if (paused) {
+        // 这里刻意不写 lastProfile：本方法在「仅选中、未开启」时也走，参数并未
+        // 落地。lastProfile 只由 setProfile() 在 hasLimits 时更新（真正生效过的
+        // 那份），否则报告会把只点过、没测过的场景谎报成「测过」。
+        if (pauseState.paused()) {
             // 暂停中换场景：仍保持暂停，参数不落地（暂停期间流量就该是直连），
             // 只把「恢复时该施加哪一支」换掉。若在这里 setProfile，等于用户以为
             // 还暂停着、流量却被悄悄限速 —— 比标签过期更糟。
-            pausedProfile = p != null ? p.copy() : new Profile();
-            pausedComboId = null;
-            pausedComboStep = -1;
-            pausedComboRemain = 0;
+            pauseState.whilePaused(p != null ? p.copy() : new Profile());
+            syncPaused();
             fireUiChange();
             return;
         }
@@ -285,7 +286,8 @@ public class WeakNet {
         // 总开关一动，暂停就失去意义：暂停快照必须清掉。
         // 否则「暂停 → 停止 → 再开始」会带着 paused=true 起来，界面显示「已暂停」、
         // 按钮显示暂停态，而实际参数已经施加、流量正在被限速 —— 状态与事实相反。
-        clearPauseLocked();
+        pauseState.clear();
+        syncPaused();
         if (on) {
             setProfile(restore != null ? restore : new Profile(), presetKey);
         } else {
@@ -294,21 +296,6 @@ public class WeakNet {
         }
         limitOn = on;      // 开关只认这里：自定义场景哪怕全零，用户点开了就算「已开启」
         fireUiChange();    // setProfile 那次 fire 时开关还是旧值，这里按最终状态再推一次
-    }
-
-    /**
-     * 清掉暂停快照。调用方须已持有本对象锁（synchronized 方法内）。
-     *
-     * 暂停快照（paused / pausedComboId / pausedComboStep / pausedComboRemain /
-     * pausedProfile）只在「暂停中」有意义；一旦总开关被显式操作，这段会话就结束了，
-     * 留着它只会让后续状态判断读到过期值。
-     */
-    private void clearPauseLocked() {
-        paused = false;
-        pausedComboId = null;
-        pausedComboStep = -1;
-        pausedComboRemain = 0;
-        pausedProfile = null;
     }
 
     /**
@@ -344,6 +331,18 @@ public class WeakNet {
         return restore != null ? restore : new Profile();
     }
 
+    /**
+     * 「应用一份参数」（POST /api/profile）之后的限速开关值，纯函数。
+     *
+     * Windows 端 set_profile 里就是 {@code limit_on = has_limits(prof)}：应用即生效。
+     * Android 的 {@link #setProfile} 刻意不动开关（它同时被 selectScene 调用，
+     * 选场景必须保持「选中不生效」），所以这条语义只能由 API handler 显式补齐 ——
+     * 收敛到这一个函数，避免 handler 里各写一份判断、再和 Windows 漂移。
+     */
+    public static boolean limitOnForApply(Profile p) {
+        return p != null && p.hasLimits();
+    }
+
     // ------------------------------------------------------------------ 暂停 / 恢复
     //
     // 暂停与「关闭限速」的区别：关闭是结束这次测试、场景只留着备查；
@@ -360,20 +359,19 @@ public class WeakNet {
      * 直接返回 false，让界面把按钮显示成「未生效」而不是「已暂停」。
      */
     public synchronized boolean pause() {
-        if (paused) return false;
+        if (pauseState.paused()) return false;
         if (!limitOn) return false;
-        // 记住组合播到哪一、还剩多久
-        pausedComboId = comboId;
-        pausedComboStep = comboStep;
-        if (comboId != null && comboDeadline > 0) {
-            pausedComboRemain = Math.max(0, comboDeadline - System.currentTimeMillis());
-        } else {
-            pausedComboRemain = 0;
-        }
-        pausedProfile = profile.copy();
+        // 先把现场算出来，但推迟到 setProfile 之后再交给 pauseState：
+        // setProfile 见到暂停态会清现场，提前 enter 会被它误清（原有顺序语义）。
+        String cid = comboId;
+        int step = comboStep;
+        long remain = (cid != null && comboDeadline > 0)
+                ? Math.max(0L, comboDeadline - System.currentTimeMillis()) : 0L;
+        Profile snap = profile.copy();
         stopComboLocked();               // 组合线程先停，别让它在暂停期间继续改参数
         setProfile(new Profile(), presetKey);   // 参数撤掉 → 流量回到直连
-        paused = true;
+        pauseState.enter(cid, step, remain, snap);
+        syncPaused();
         log("config", "已暂停当前测试（恢复后接着刚才的位置继续）");
         fireUiChange();
         return true;
@@ -386,20 +384,20 @@ public class WeakNet {
      * 单支场景则把暂停前的参数原样施加回去。
      */
     public synchronized boolean resume() {
-        if (!paused) return false;
-        paused = false;
-        String cid = pausedComboId;
-        int step = pausedComboStep;
-        long remain = pausedComboRemain;
-        Profile snap = pausedProfile;
-        pausedComboId = null;
-        pausedComboStep = -1;
-        pausedComboRemain = 0;
-        pausedProfile = null;
+        PauseState.Stored saved = pauseState.take();
+        syncPaused();
+        if (saved == null) return false;
+        String cid = saved.comboId;
+        Profile snap = saved.snapshot instanceof Profile ? (Profile) saved.snapshot : null;
         limitOn = true;
         if (cid != null) {
             MyCombos.Item c = MyCombos.find(cid);
             if (c != null) {
+                // remain 语义是「本段还剩多久」：恰好停在段尾（remain=0）时该段
+                // 已经走完，直接跳到下一段；否则会重等一整段（remainWait(0,full)
+                // 按「没有暂停现场」处理，返回 full）。步进越界时 for 循环自然结束。
+                int step = saved.remain <= 0 ? saved.step + 1 : saved.step;
+                long remain = saved.remain <= 0 ? 0L : saved.remain;
                 startComboLocked(c, step, remain);   // 接着当时那一段继续
                 fireUiChange();
                 return true;
@@ -415,12 +413,14 @@ public class WeakNet {
 
     /** 暂停 / 恢复的切换入口：飘窗上的按钮走这里 */
     public synchronized boolean togglePause() {
-        return paused ? resume() : pause();
+        return pauseState.paused() ? resume() : pause();
     }
 
     /** 暂停时正在生效的那支场景名（暂停期间参数已撤掉，profile 里只剩直连） */
     public String pausedSceneName() {
-        Profile p = pausedProfile;
+        PauseState.Stored s = pauseState.peek();
+        if (s == null || !(s.snapshot instanceof Profile)) return null;
+        Profile p = (Profile) s.snapshot;
         return (p != null && p.name != null) ? p.name : null;
     }
 
@@ -431,11 +431,12 @@ public class WeakNet {
      * 知道自己按住的是哪一支的第几段，所以这里用暂停时记下的信息还原。
      */
     public String pausedProgress() {
-        String cid = pausedComboId;
+        PauseState.Stored s = pauseState.peek();
+        String cid = s == null ? null : s.comboId;
         if (cid == null) return null;
         MyCombos.Item c = MyCombos.find(cid);
         String nm = c != null ? c.name : "组合";
-        int step = pausedComboStep;
+        int step = s.step;
         int total = 0;
         try {
             if (c != null && c.steps != null) total = c.steps.size();
@@ -480,13 +481,11 @@ public class WeakNet {
         if (c == null || c.steps == null || c.steps.isEmpty()) return false;
         stopComboLocked();
         presetKey = comboKey(c.id);
-        if (paused) {
+        if (pauseState.paused()) {
             // 暂停中换组合：仍保持暂停，参数不落地；只记住「恢复时从第 1 段开始播」。
             // 与 selectScene 的暂停分支同构，避免用户以为还暂停着、实际已经开始限速。
-            pausedComboId = c.id;
-            pausedComboStep = 0;
-            pausedComboRemain = 0;
-            pausedProfile = null;
+            pauseState.whilePaused(c.id, 0, 0L);
+            syncPaused();
             fireUiChange();
             return false;
         }
@@ -541,8 +540,9 @@ public class WeakNet {
      * 从指定段开始播。
      *
      * @param startStep 起步段（0 起）；-1 = 从头播
-     * @param firstRemain 起步段已经走过的时间（毫秒）；0 = 这段完整地开始
-     *   暂停恢复时用它接着倒计时，而不是把这段时间白送掉
+     * @param firstRemain 起步段**还剩多久**（毫秒）；0 = 没有暂停现场，这段完整地开始
+     *   注意是「剩余」不是「已走过」：pause() 存的是 comboDeadline - now，
+     *   恢复时原样传进来，换算统一走 {@link PauseState#remainWait}。
      */
     private void startComboLocked(final MyCombos.Item c, int startStep, long firstRemain) {
         final String key = comboKey(c.id);
@@ -576,7 +576,7 @@ public class WeakNet {
     private void runCombo(MyCombos.Item c, String key, int startStep, long firstRemain) {
         try {
             int i = startStep > 0 ? startStep : 0;
-            long skip = firstRemain;             // 起步段已经走过的时间
+            long remain = firstRemain;           // 起步段还剩多久；往后的段都是整段
             while (true) {
                 for (; i < c.steps.size(); i++) {
                     MyCombos.Step st = c.steps.get(i);
@@ -589,7 +589,7 @@ public class WeakNet {
                         // paused 也要校验：pause() 不改 presetKey/limitOn，若组合线程
                         // 恰好在暂停后挤进这把锁，会调 setProfile 把暂停态又清掉
                         // （setProfile 见到 paused 就结束暂停），表现为「点了暂停又自己跑起来」。
-                        if (!key.equals(presetKey) || !limitOn || paused) return;
+                        if (!pauseState.comboAllowed(key, presetKey, limitOn)) return;
                         Profile p = profileOfStep(st.key);
                         if (p == null) {
                             // 这段的场景被删了（自定义场景常见）：跳过它，别把整支带崩
@@ -599,8 +599,11 @@ public class WeakNet {
                         }
                         comboStep = i;
                         long full = ComboPlan.stepMs(st);
-                        waitMs = Math.max(0, full - skip);
-                        skip = 0;                // 只有起步段要扣，往后的段都是完整时长
+                        // 统一「剩余」语义：暂停现场存的就是剩余时长，这里只做夹取。
+                        // 以前把剩余当「已走过」去扣，暂停越早恢复等得越短，
+                        // 30s 段第 12s 暂停、恢复只等 12s 就跳段 —— 与 Windows 相反。
+                        waitMs = PauseState.remainWait(remain, full);
+                        remain = 0;              // 只有起步段带剩余，往后各段整段走
                         comboDeadline = System.currentTimeMillis() + waitMs;
                         // 直接 setProfile，不走 selectScene：那是「手动切场景」的入口，
                         // 会把正在跑的自己给停掉
@@ -649,9 +652,8 @@ public class WeakNet {
     private boolean sleepOwning(long ms, String key) {
         long end = System.currentTimeMillis() + Math.max(0, ms);
         while (true) {
-            if (!key.equals(presetKey)) return false;   // 用户点了别的场景
-            if (!limitOn) return false;                 // 关了总开关
-            if (paused) return false;                   // 暂停：这段先按住，别继续倒计时
+            // 三项准入条件同一把锁里判断，避免校验后被切场景/暂停抢占（历史竞态 bug）
+            if (!pauseState.comboAllowed(key, presetKey, limitOn)) return false;
             long left = end - System.currentTimeMillis();
             if (left <= 0) return true;
             try {

@@ -12,6 +12,106 @@ GUI 点「导出报告」时把 ``W.status_payload()`` 的快照交给 :func:`bu
 这样单测可以直接喂构造好的快照，覆盖空数据、极端值等边界。
 """
 from datetime import datetime
+import re
+import uuid
+
+# 事件文案里会带对端地址（「建立隧道 host:443」「模拟拒连 host」），而报告
+# 的使用场景就是转发给开发/测试同事，甚至贴进 issue。完整 IP 等于把
+# 「被测 App 访问了哪些服务」的画像一起交出去，所以默认脱敏。
+# IPv4 只保留前两段：仍能看出网段/服务商（CDN、云厂商），但无法还原主机。
+# 句尾的「.」不是 IP 的一部分，不能让句号把掩码挡掉（"host 10.0.0.1."
+# 曾被原样外发）。「.数字」也不再让整串失配：10.0.0.1.2 至少要脱敏前四段，
+# 第五段按独立串保留。后顾只排数字——不能排点号，否则 host.10.0.0.1 会被
+# 整串放过；(?!\d) 继续挡住 10.0.0.1234 这类长数字从中间被拆开匹配。
+_IPV4_RE = re.compile(
+    r"(?<!\d)(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})(?!\d)")
+# IPv6 只处理带 :: 或 4 组以上的形式；`14:44:18` 这类时间不会被当成地址。
+_IPV6_RE = re.compile(
+    r"(?<![0-9A-Za-z:])([0-9a-fA-F]{0,4}(?::[0-9a-fA-F]{0,4}){2,7})(?![0-9A-Za-z:])")
+# 版本号不是主机地址：`v 1.2.3.4` / `version1.2.3.4` / `版本 1.2.3.4` 里的
+# 四段数字要在脱敏前占位保护，否则会被 IPv4 规则误伤成 1.2.x.x。
+# 但不能见前缀就整串放过：`v 10.0.0.1` 是真实 IP，过去被占位保护后原样外发。
+# 先按前缀取出数字串，再由 _hold_version 判定是否疑似主机地址。
+# 同样不挡「.数字」续接：否则 v1.2.3.4.5 这类五段版本号会被误伤成 v1.2.x.x.5。
+_VERSION_TOKEN_RE = re.compile(
+    r"(?<![0-9A-Za-z_.])(?:v|version|版本)[\s:：]*(\d{1,3}(?:\.\d{1,3}){2,3})"
+    r"(?!\d)", re.IGNORECASE)
+# 首段落在保留/私网/常见公网段才当疑似主机地址；1~9 这类小首段多是版本号。
+_HOST_IP_HEADS = frozenset((0, 10, 127, 172, 192))
+
+# 全角数字（０-９）与全角句点（．）先归一成半角再脱敏：地址常从聊天工具、
+# 邮件、输入法里复制过来，「10．0．0．1」这种形态下正则只认半角，整串会被
+# 原样外发。只映射这两类字符，其他全角标点不动。
+_FULLWIDTH_TO_ASCII = {0xFF10 + i: 0x30 + i for i in range(10)}
+_FULLWIDTH_TO_ASCII[0xFF0E] = 0x2E
+
+
+def _looks_like_host_ip(digits):
+    """四段且每段 0-255、首段是网络地址段 → 疑似 IP，不能当版本号放过。"""
+    parts = digits.split(".")
+    if len(parts) != 4 or any(int(p) > 255 for p in parts):
+        return False
+    head = int(parts[0])
+    return head in _HOST_IP_HEADS or head > 223
+
+
+def _mask_v4(m):
+    a, b, c, d = m.groups()
+    if any(int(x) > 255 for x in (a, b, c, d)):
+        return m.group(0)          # 形似而非 IP（版本号等），别动
+    # 监听地址/本机回环不含隐私，保留了读起来才正常：
+    # 把「监听地址：0.0.x.x」印在报告里只会让人以为数据坏了。
+    if (a, b, c, d) in (("0", "0", "0", "0"), ("127", "0", "0", "1")):
+        return m.group(0)
+    return "%s.%s.x.x" % (a, b)
+
+
+def _mask_v6(m):
+    s = m.group(1)
+    # 含 :: 或含 a-f 字母的一定是 IPv6；剩下纯数字串才可能是编号/时间。
+    if "::" not in s and not any(c in "abcdefABCDEF" for c in s):
+        parts = [p for p in s.split(":") if p]
+        if len(parts) < 4:
+            return s                      # 14:44:18 这类时间，不足 4 组
+        # 8 组齐全就是标准 IPv6（如 1111:2222:...:8888），哪怕全 4 位数字也要脱敏；
+        # 只有不足 8 组、每组都是短纯数字时才像编号串，保守放过。
+        if len(parts) < 8 and all(len(p) <= 3 and p.isdigit() for p in parts):
+            return s
+    return s.split(":")[0] + ":****"
+
+
+def redact_text(text):
+    """把文本里的 IP 末段掩码。纯函数，单测直接喂字符串。
+
+    IPv4 → `a.b.x.x`；IPv6 → 保留首组，其余 `****`。
+    域名不动：`mirrors.tuna.tsinghua.edu.cn` 这类公开服务不构成隐私。
+    带 v / version / 版本 前缀的版本号先占位保护，还原时原样写回；但前缀紧贴
+    真实 IP（v 10.0.0.1）时不保护，交给 IPv4 规则脱敏。
+    """
+    if not text:
+        return text
+    # 全角数字 / 全角句点先归一（见 _FULLWIDTH_TO_ASCII），否则全角写法的
+    # 地址会绕过下面的匹配原样外发。
+    text = text.translate(_FULLWIDTH_TO_ASCII)
+    # 哨兵前缀每次调用随机，原文无法预知：固定 `\x00VER_0\x00` 会被原文自带
+    # 的同名串在还原时一起替换，把无关文案改写成版本号。
+    nonce = uuid.uuid4().hex
+    saved = []
+
+    def _hold_version(m):
+        # 疑似主机地址不占位，否则 _IPV4_RE 根本看不到它，整串原样外发。
+        if _looks_like_host_ip(m.group(1)):
+            return m.group(0)
+        saved.append(m.group(0))
+        return "\x00%s_%d\x00" % (nonce, len(saved) - 1)
+
+    text = _VERSION_TOKEN_RE.sub(_hold_version, text)
+    text = _IPV6_RE.sub(_mask_v6, _IPV4_RE.sub(_mask_v4, text))
+    if not saved:
+        return text
+    # 单遍还原：旧写法对每个占位符做一次全串 replace，是 O(n·m)。
+    restore_re = re.compile("\x00" + re.escape(nonce) + r"_(\d+)\x00")
+    return restore_re.sub(lambda m: saved[int(m.group(1))], text)
 
 # 事件类型 -> 中文名。未列出的类型原样显示（新事件加进来不会丢）。
 EVENT_LABELS = {
@@ -36,7 +136,7 @@ CAVEATS = [
     "延迟是**逐包注入**的，不是只在建连时加一次；一次往返约等于上行延迟 + 下行延迟。",
     "丢包由停顿（`stall_ms`）实现，**不是 TCP 重传语义**——别按重传模型去推断吞吐。",
     "上下行字节是引擎对**已接管连接**的计数，不含直通（未接管）流量。",
-    "事件日志是内存环形缓冲（上限 300 条），GUI 只展示最近 60 条；本报告导出的是点击那一刻的快照。",
+    "事件日志是内存环形缓冲（上限 300 条），GUI 只展示最近 60 条；故障计数取全量缓冲（fault_counts_full），本报告导出的是点击那一刻的快照。",
     "运行时长是**引擎本次启动**至今的时间，不是单个场景的持续时间。",
 ]
 
@@ -74,6 +174,29 @@ def summarize_events(events):
         t = e.get("type", "?") if isinstance(e, dict) else "?"
         counts[t] = counts.get(t, 0) + 1
     return counts
+
+
+def merge_fault_counts(payload, counts):
+    """故障计数用引擎的全量快照整体替换，缺失时回退到「最近 60 条」的统计。
+
+    双端同构：Android 端只要在同一份 payload 里多带一个 fault_counts_full
+    字段就能得到相同结论；老版本 APK 没这个字段时本函数原样返回 counts，
+    行为与改之前完全一致，不需要两端同步发版才能上线。
+    """
+    full = payload.get("fault_counts_full") if isinstance(payload, dict) else None
+    if not isinstance(full, dict) or not full:
+        return counts
+    # full 是全量缓冲按 type 聚合的结果，整体覆盖「最近 60 条」的 counts，
+    # 与 Android summarizeEvents 对齐；connect/config/error 等键也用全量值。
+    # FAULT_TYPES 只用于结论/解读里判断「主动注入故障」，不参与合并口径。
+    merged = {}
+    for k, raw in full.items():
+        try:
+            v = int(raw or 0)
+        except (TypeError, ValueError):
+            continue             # 脏值跳过，与 Android 一致
+        merged[k] = max(0, v)
+    return merged
 
 
 def tested_profile(payload):
@@ -268,7 +391,8 @@ def interpretation(payload, counts, frames=None, param_specs=()):
     return lines
 
 
-def build(payload, param_specs=(), param_notes=None, frames=None, generated_at=None):
+def build(payload, param_specs=(), param_notes=None, frames=None, generated_at=None,
+          redact=True):
     """把状态快照渲染成 Markdown 报告。
 
     payload      : W.status_payload() 的返回（dict）
@@ -276,13 +400,15 @@ def build(payload, param_specs=(), param_notes=None, frames=None, generated_at=N
     param_notes  : W.PARAM_NOTES（key -> 人话解释）
     frames       : FrameStats.snapshot() 或 None
     generated_at : 生成时间字符串；None 时取当前时间（单测传固定值）
+    redact       : 是否脱敏 IP（默认 True）。关掉只在内部排障时用，
+                   报告里会显式标注「未脱敏」提醒不要外发。
     """
     param_notes = param_notes or {}
     now = generated_at or datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     prof = tested_profile(payload)
     stats = payload.get("stats") or {}
     events = payload.get("events") or []
-    counts = summarize_events(events)
+    counts = merge_fault_counts(payload, summarize_events(events))
     scope = payload.get("scope") or {}
     scenes = scene_sequence(events)
 
@@ -380,10 +506,14 @@ def build(payload, param_specs=(), param_notes=None, frames=None, generated_at=N
     # 6. 事件汇总 + 时间线
     out.append("## 事件汇总")
     out.append("")
-    if counts:
+    # 引擎的 fault_counts_full 是「稠密快照」（10 类全给，没出现的填 0），
+    # 直接打表会让空运行也印出十行 0 值。这里只列真的发生过的事件；
+    # 引擎侧保持稠密（status 兼容 Android），显示侧过滤。
+    rows = [(t, c) for t, c in counts.items() if c > 0]
+    if rows:
         out.append("| 事件 | 次数 |")
         out.append("|---|---:|")
-        for t, c in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0])):
+        for t, c in sorted(rows, key=lambda kv: (-kv[1], kv[0])):
             out.append("| %s | %d |" % (_cell(EVENT_LABELS.get(t, t)), c))
     else:
         out.append("本次运行没有记录到事件。")
@@ -419,7 +549,14 @@ def build(payload, param_specs=(), param_notes=None, frames=None, generated_at=N
     # 8. 口径说明（固定，防止每个开发重复踩坑）
     out.append("## 口径说明")
     out.append("")
-    for c in CAVEATS:
+    caveats = list(CAVEATS)
+    if redact:
+        caveats.append("报告已脱敏：IPv4 只保留前两段（如 `64.233.x.x`）。"
+                       "需要原始地址时重新导出并选择不脱敏。")
+    else:
+        caveats.append("**本报告未脱敏，含完整对端 IP**——仅限内部排障使用，"
+                       "对外分享前请重新导出脱敏版本。")
+    for c in caveats:
         out.append("- %s" % c)
     out.append("")
 
@@ -432,7 +569,8 @@ def build(payload, param_specs=(), param_notes=None, frames=None, generated_at=N
                _cell(payload.get("spec_hash", "-")))
     out.append("")
 
-    return "\n".join(out)
+    md = "\n".join(out)
+    return redact_text(md) if redact else md
 
 
 def default_filename(payload=None, at=None):

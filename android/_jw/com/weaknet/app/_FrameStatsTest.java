@@ -1,6 +1,6 @@
 package com.weaknet.app;
 
-/** 浮窗帧率统计（P2-3）的纯 JDK 回归：不需要设备、不需要 Android API。 */
+/** 浮窗帧率统计的纯 JDK 回归：不需要设备、不需要 Android API。 */
 public class _FrameStatsTest {
 
     private static int failed = 0;

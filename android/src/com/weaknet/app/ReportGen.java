@@ -7,6 +7,9 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.UUID;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
  * 弱网测试报告生成器（Android 端）。
@@ -51,7 +54,7 @@ public final class ReportGen {
         "延迟是**逐包注入**的，不是只在建连时加一次；一次往返约等于上行延迟 + 下行延迟。",
         "丢包由停顿（`stall_ms`）实现，**不是 TCP 重传语义**——别按重传模型去推断吞吐。",
         "上下行字节是引擎对**已接管连接**的计数，不含直通（未接管）流量。",
-        "事件日志是内存环形缓冲（上限 300 条），界面只展示最近 60 条；本报告导出的是点击那一刻的快照。",
+        "事件日志是内存环形缓冲（上限 300 条），GUI 只展示最近 60 条；故障计数取全量缓冲（fault_counts_full），本报告导出的是点击那一刻的快照。",
         "运行时长是**引擎本次启动**至今的时间，不是单个场景的持续时间。"
     };
 
@@ -119,11 +122,16 @@ public final class ReportGen {
      *  飘窗切场景。只认老两个前缀会漏掉主入口，导致结论说测了 5G、概况却写仅直连。
      *  带「（未开启限速，未生效）」的选择类文案不算落地，不在此列。 */
     static final String[] SCENE_PREFIXES = {"切换场景：", "开启限速：", "开始弱网测试：", "飘窗切换场景："};
+    /** 只选中、没生效的文案（CtrlServer /api/preset 未开限速时记这个）。
+     *  显式排除，避免以后有人把它加进 SCENE_PREFIXES 造成「没测也算测过」。 */
+    static final String[] NON_LANDED_PREFIXES = {"选择场景："};
     static final String[] COMBO_PREFIXES = {"开始播放组合：", "继续播放组合：", "播放组合：", "飘窗播放组合："};
 
     /** 从事件文案取落地场景名；组合名若在「」内只取括号内部分。 */
     static String sceneName(String msg) {
         if (msg == null || msg.length() == 0) return "";
+        for (String prefix : NON_LANDED_PREFIXES)
+            if (msg.startsWith(prefix)) return "";
         for (String prefix : SCENE_PREFIXES)
             if (msg.startsWith(prefix)) return msg.substring(prefix.length()).trim();
         for (String prefix : COMBO_PREFIXES) {
@@ -156,9 +164,31 @@ public final class ReportGen {
         return names;
     }
 
-    /** 事件按类型聚合计数 */
+    /**
+     * 事件按类型聚合计数。
+     *
+     * /api/status 的 events 只给最近 60 条，故障计数会被截断（C4）。CtrlServer 与
+     * 桌面端会在 status 里带 fault_counts_full（全量 300 条按 type 聚合）：有就用
+     * 它，没有（老快照/旧服务端）才回退到 events 统计。
+     */
     static Map<String, Integer> summarizeEvents(Map<String, Object> status) {
         Map<String, Integer> counts = new LinkedHashMap<String, Integer>();
+        Map<String, Object> full = asMap(status == null ? null : status.get("fault_counts_full"));
+        if (full != null && !full.isEmpty()) {
+            for (Map.Entry<String, Object> e : full.entrySet()) {
+                Object v = e.getValue();
+                if (v instanceof Number) {
+                    counts.put(e.getKey(), ((Number) v).intValue());
+                } else if (v != null) {
+                    try {
+                        counts.put(e.getKey(), Integer.parseInt(String.valueOf(v)));
+                    } catch (NumberFormatException ignore) {
+                        // 脏值跳过，不让报告生成失败
+                    }
+                }
+            }
+            return counts;
+        }
         List<Object> evs = asList(status == null ? null : status.get("events"));
         if (evs == null) return counts;
         for (Object item : evs) {
@@ -182,7 +212,11 @@ public final class ReportGen {
         String name = s(prof, "name", "未命名场景");
 
         List<String> injected = new ArrayList<String>();
-        for (String t : FAULT_TYPES) if (counts.containsKey(t)) injected.add(labelOf(t));
+        // 桌面版用真值判定：fault_counts_full 预填的 0 值键不代表注入过故障。
+        for (String t : FAULT_TYPES) {
+            Integer v = counts.get(t);
+            if (v != null && v > 0) injected.add(labelOf(t));
+        }
         String faultPhrase = injected.isEmpty() ? "" : ("注入了" + join(injected, "、") + "，");
 
         String head;
@@ -228,8 +262,11 @@ public final class ReportGen {
         boolean limitOn = b(status, "limit_on");
 
         List<String> injected = new ArrayList<String>();   // 「故障名×次数」
-        for (String t : FAULT_TYPES)
-            if (counts.containsKey(t)) injected.add(labelOf(t) + "×" + counts.get(t));
+        // 与桌面版一致按真值判定：0 值键不能混进「注入了 N 类故障」。
+        for (String t : FAULT_TYPES) {
+            Integer v = counts.get(t);
+            if (v != null && v > 0) injected.add(labelOf(t) + "×" + v);
+        }
         int errors = counts.containsKey("error") ? counts.get("error") : 0;
 
         List<String> lines = new ArrayList<String>();
@@ -452,7 +489,125 @@ public final class ReportGen {
          .append(cell(s(status, "build", "-"))).append("`\n");
         o.append("- 规格哈希（spec.json sha256 前 8 位）：`")
          .append(cell(s(status, "spec_hash", "-"))).append("`\n");
-        return o.toString();
+        // 整份 Markdown 统一脱敏：事件日志里有对端 IP（「建连 10.0.0.1:443」），
+        // 报告的使用场景就是转发给开发/贴 issue，完整地址等于把「被测 App 访问了
+        // 哪些服务」的画像一起交出去。规则与桌面版 report_gen.redact_text 一致。
+        return redactText(o.toString());
+    }
+
+    // ------------------------------------------------------------------ 脱敏
+    //
+    // 对齐桌面版 report_gen.py：
+    //   IPv4 → 前两段 + .x.x（0.0.0.0 / 127.0.0.1 不含隐私，原样保留）；
+    //   IPv6 → 保留首组 + :****；
+    //   v / version / 版本 前缀的四段数字是版本号，先占位保护再还原；
+    //   域名不动（mirrors.tuna.tsinghua.edu.cn 这类公开服务不构成隐私）；
+    //   任一段 > 255 的「形似 IP」不动。
+    // 纯 JDK 静态方法，_ReportGenTest 直接喂字符串。
+
+    private static final Pattern IPV4_RE = Pattern.compile(
+            "(?<!\\d)(\\d{1,3})\\.(\\d{1,3})\\.(\\d{1,3})\\.(\\d{1,3})(?!\\d)");
+    private static final Pattern IPV6_RE = Pattern.compile(
+            "(?<![0-9A-Za-z:])([0-9a-fA-F]{0,4}(?::[0-9a-fA-F]{0,4}){2,7})(?![0-9A-Za-z:])");
+    private static final Pattern VERSION_RE = Pattern.compile(
+            "(?<![0-9A-Za-z_.])(?:v|version|版本)[\\s:：]*(\\d{1,3}(?:\\.\\d{1,3}){2,3})(?!\\d)",
+            Pattern.CASE_INSENSITIVE);
+
+    /** 把文本里的 IP 末段掩码；null / 空串原样返回。 */
+    public static String redactText(String text) {
+        if (text == null || text.length() == 0) return text;
+        // 全角数字/句点先归一：从聊天工具复制来的「10．0．0．1」否则会绕过匹配
+        String s = normalizeFullwidth(text);
+        // 哨兵前缀带随机 nonce：原文自带的同名串不会在还原时被一起替换
+        final String nonce = "\u0000WN" + UUID.randomUUID().toString().replace("-", "") + "_";
+        final List<String> saved = new ArrayList<String>();
+
+        Matcher vm = VERSION_RE.matcher(s);
+        StringBuffer vb = new StringBuffer();
+        while (vm.find()) {
+            if (looksLikeVersion(vm.group(1))) {
+                saved.add(vm.group(0));
+                vm.appendReplacement(vb,
+                        Matcher.quoteReplacement(nonce + (saved.size() - 1) + "\u0000"));
+            } else {
+                // v10.0.0.1 是真实 IP：不占位，交给下面的 IPv4 规则脱敏
+                vm.appendReplacement(vb, Matcher.quoteReplacement(vm.group(0)));
+            }
+        }
+        vm.appendTail(vb);
+        s = vb.toString();
+
+        Matcher m4 = IPV4_RE.matcher(s);
+        StringBuffer b4 = new StringBuffer();
+        while (m4.find()) {
+            m4.appendReplacement(b4, Matcher.quoteReplacement(maskV4(m4)));
+        }
+        m4.appendTail(b4);
+
+        Matcher m6 = IPV6_RE.matcher(b4.toString());
+        StringBuffer b6 = new StringBuffer();
+        while (m6.find()) {
+            m6.appendReplacement(b6, Matcher.quoteReplacement(maskV6(m6.group(1))));
+        }
+        m6.appendTail(b6);
+        s = b6.toString();
+
+        for (int i = 0; i < saved.size(); i++) {
+            s = s.replace(nonce + i + "\u0000", saved.get(i));
+        }
+        return s;
+    }
+
+    /** 四段、每段 0~255、首段 1~9 → 版本号（首段 0/10/127/172/192 等更像网段） */
+    private static boolean looksLikeVersion(String digits) {
+        String[] p = digits.split("\\.");
+        if (p.length < 3 || p.length > 4) return false;
+        for (String x : p) {
+            if (x.length() == 0 || Integer.parseInt(x) > 255) return false;
+        }
+        int head = Integer.parseInt(p[0]);
+        return head >= 1 && head <= 9;
+    }
+
+    private static String maskV4(Matcher m) {
+        String a = m.group(1), b = m.group(2), c = m.group(3), d = m.group(4);
+        int ia = Integer.parseInt(a), ib = Integer.parseInt(b);
+        int ic = Integer.parseInt(c), id = Integer.parseInt(d);
+        if (ia > 255 || ib > 255 || ic > 255 || id > 255) return m.group(0);   // 形似而非 IP
+        if ((ia == 0 && ib == 0 && ic == 0 && id == 0)
+                || (ia == 127 && ib == 0 && ic == 0 && id == 1)) {
+            return m.group(0);            // 监听地址 / 本机回环不含隐私
+        }
+        return a + "." + b + ".x.x";
+    }
+
+    private static String maskV6(String s) {
+        // 含 :: 或含 a-f 字母的一定是 IPv6；纯数字串才可能是编号/时间
+        if (s.indexOf("::") < 0 && !s.matches(".*[a-fA-F].*")) {
+            String[] all = s.split(":");
+            int n = 0;
+            boolean shortDigits = true;
+            for (String p : all) {
+                if (p.length() == 0) continue;
+                n++;
+                if (p.length() > 3 || !p.matches("\\d+")) shortDigits = false;
+            }
+            if (n < 4) return s;                              // 14:44:18 这类时间
+            if (n < 8 && shortDigits) return s;               // 不足 8 组的短编号串
+        }
+        int cut = s.indexOf(':');
+        return cut < 0 ? s : s.substring(0, cut) + ":****";
+    }
+
+    private static String normalizeFullwidth(String s) {
+        StringBuilder b = new StringBuilder(s.length());
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i);
+            if (c >= '\uFF10' && c <= '\uFF19') b.append((char) (c - '\uFF10' + '0'));
+            else if (c == '\uFF0E') b.append('.');
+            else b.append(c);
+        }
+        return b.toString();
     }
 
     static boolean sameValue(Object a, Object b) {
@@ -523,6 +678,18 @@ public final class ReportGen {
         stats.put("down", WeakNet.I.bytesDown.get());
         stats.put("uptime", (System.currentTimeMillis() - WeakNet.I.startedAt) / 1000);
         m.put("stats", stats);
+        // 与 /api/status.fault_counts_full 同语义：全量事件按 type 聚合，
+        // 报告不再因为界面只留最近 60 条而漏算故障次数。
+        Map<String, Object> full = new LinkedHashMap<String, Object>();
+        synchronized (WeakNet.I.events) {
+            for (String[] e : WeakNet.I.events) {
+                String type = e[1];
+                Object old = full.get(type);
+                full.put(type, old == null ? Integer.valueOf(1)
+                        : Integer.valueOf(((Integer) old).intValue() + 1));
+            }
+        }
+        m.put("fault_counts_full", full);
         List<Object> evs = new ArrayList<Object>();
         synchronized (WeakNet.I.events) {
             List<String[]> src = WeakNet.I.events;

@@ -124,7 +124,7 @@ echo "==> 3b. aapt2 link"
 rm -f build/base.apk
 if ! "$AAPT2" link -I "$ANDROID_JAR" --manifest AndroidManifest.xml \
   -R build/res.zip \
-    --min-sdk-version 24 --target-sdk-version 29 \
+    --min-sdk-version 24 --target-sdk-version 33 \
     --version-code "${VERSION_CODE}" --version-name "${VERSION_NAME}" \
     --replace-version \
     -o build/base.apk > build/aapt_link.log 2>&1; then

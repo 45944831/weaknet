@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""配色与 ttk 主题层（P2-3 面板拆分的公共底座）。
+"""配色与 ttk 主题层（各拆分面板共用的样式底座）。
 
 面板模块（gui_notes / gui_scope / gui_share / gui_usb）都需要同一套颜色
 与滚动条工厂。颜色原来定义在 weaknet_gui.py 顶层，面板一旦独立出去就会

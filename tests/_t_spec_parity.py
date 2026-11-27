@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""P1-1 规格单一真源的校验：spec.json → Python / Android 生成物 → 运行时 API。
+"""规格单一真源的校验：spec.json → Python / Android 生成物 → 运行时 API。
 
 三层各验一遍，缺一层都可能出现「文件改了、某一端还在用旧值」：
 
@@ -14,6 +14,7 @@ Android 端的运行时校验需要已安装的 App + adb forward，
     python tests/_t_spec_parity.py --android http://127.0.0.1:18899
 """
 import argparse
+import ast
 import asyncio
 import hashlib
 import json
@@ -40,6 +41,8 @@ SPEC_PATH = Path(ROOT) / "spec" / "spec.json"
 SPEC_SRC_PATH = Path(ROOT) / "android" / "src" / "com" / "weaknet" / "app" / "SpecGen.java"
 PROFILE_SRC_PATH = Path(ROOT) / "android" / "src" / "com" / "weaknet" / "app" / "Profile.java"
 PIPE_SRC_PATH = Path(ROOT) / "android" / "src" / "com" / "weaknet" / "app" / "Pipe.java"
+REPORT_PY_PATH = Path(ROOT) / "report_gen.py"
+REPORT_JAVA_PATH = Path(ROOT) / "android" / "src" / "com" / "weaknet" / "app" / "ReportGen.java"
 
 # 与 tools/gen_spec.py 的 FIELD_OF 互逆
 KEY_OF_FIELD = {
@@ -116,6 +119,32 @@ def string_array(src, name):
     if not m:
         return None
     return [java_unescape(x) for x in re.findall(r'"((?:[^"\\]|\\.)*)"', m.group(1))]
+
+
+def py_string_list(src, name):
+    """从 Python 源码里取模块级 `NAME = ["...", ...]`，**不 import**。
+
+    report_gen.py 的依赖链里有 tkinter（经 gui_* 间接引入），在没有显示器的
+    CI 上 import 会失败；这里只需要 AST 里的字面量，ast.parse 足够。
+    """
+    try:
+        tree = ast.parse(src)
+    except SyntaxError:
+        return None
+    for node in tree.body:
+        if not isinstance(node, ast.Assign):
+            continue
+        if not any(isinstance(t, ast.Name) and t.id == name for t in node.targets):
+            continue
+        if not isinstance(node.value, (ast.List, ast.Tuple)):
+            return None
+        vals = []
+        for e in node.value.elts:
+            if not (isinstance(e, ast.Constant) and isinstance(e.value, str)):
+                return None
+            vals.append(e.value)
+        return vals
+    return None
 
 
 def int_array(src, name):
@@ -215,6 +244,17 @@ def check_static(spec):
         "Windows BURST_SEC=%.2fs / Android BURST_SEC=%s（两端一致）"
         % (W.Bucket.BURST_SEC,
            m_sec.group(1) if m_sec else "未找到"))
+
+    # 报告的 5 条口径说明（CAVEATS）在两端是逐字复制的：Android 侧已有 5 条
+    # 断言，但如果只改一端，同一份测试在两台机器上会给出不同解释。
+    py_caveats = py_string_list(read(REPORT_PY_PATH), "CAVEATS")
+    j_caveats = string_array(read(REPORT_JAVA_PATH), "CAVEATS")
+    rec("A12 两端报告口径说明（CAVEATS）5 条逐字一致",
+        py_caveats is not None and j_caveats is not None
+        and len(py_caveats) == 5 and py_caveats == j_caveats,
+        "Python %d 条 / Java %d 条%s"
+        % (len(py_caveats or []), len(j_caveats or []),
+           "" if py_caveats == j_caveats else "（内容不同）"))
 
 
 def check_generated(spec):
