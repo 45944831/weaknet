@@ -55,7 +55,8 @@ def reset_engine_state():
     W.G.wake = None
     W.G.profile_gen = 0
     W.G.proc_name_cache = {"at": 0.0, "map": {}}
-    W.G.prev_proxy = None
+    W.G.sysproxy_prev = None
+    W.G.sysproxy_written = None
     W.G.sysproxy_on = False
     W.G.flap_task = None
     W.G.combo_task = None
@@ -72,6 +73,15 @@ def reset_engine_state():
     W.G.bytes_up = 0
     W.G.bytes_down = 0
     W.G.bytes_bypass = 0
+    # 测试会话：不复位的话上例的基线和累计故障会算进下例的报告
+    W.G.test_seq = 0
+    W.G.test_open = False
+    W.G.test_started_at = 0.0
+    W.G.test_base = {}
+    W.G.test_fault_base = {}
+    W.G.fault_cum.clear()
+    W.G.pending_profile = None
+    W.G.pending_key = ""
     W.G.share_pin = ""
     W.G.allow_legacy = False
     W.G.share_fail.clear()   # PIN 失败计数：上例遗留的锁定会污染下例

@@ -8,18 +8,24 @@
 import asyncio
 import http.client
 import json
+import os
 import socket
 import time
 from collections import namedtuple
 
 
-def run_async(coro, timeout=30.0):
+def run_async(coro, timeout=None):
     """在新事件循环里跑完一个协程，退出前取消所有残留任务。
+
+    `WN_TEST_TIMEOUT` 可覆盖默认 30s：变异测试里大量「改坏后死循环」的变异体
+    每个都等 30s，一轮要跑一小时；收到 5s 只影响变异探测，正常测试仍用 30s。
 
     残留任务必须显式取消：DelayLine 的投递协程、nap 的等待者若还挂着，
     关闭循环时会留下「Task was destroyed but it is pending」噪音，
     而这些噪音恰好会盖住真正的失败信息。
     """
+    if timeout is None:
+        timeout = float(os.environ.get("WN_TEST_TIMEOUT", "30"))
     loop = asyncio.new_event_loop()
     try:
         asyncio.set_event_loop(loop)

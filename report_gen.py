@@ -135,9 +135,9 @@ FAULT_TYPES = ("disconnect", "dns", "timeout", "reject", "flap")
 CAVEATS = [
     "延迟是**逐包注入**的，不是只在建连时加一次；一次往返约等于上行延迟 + 下行延迟。",
     "丢包由停顿（`stall_ms`）实现，**不是 TCP 重传语义**——别按重传模型去推断吞吐。",
-    "上下行字节是引擎对**已接管连接**的计数，不含直通（未接管）流量。",
-    "事件日志是内存环形缓冲（上限 300 条），GUI 只展示最近 60 条；故障计数取全量缓冲（fault_counts_full），本报告导出的是点击那一刻的快照。",
-    "运行时长是**引擎本次启动**至今的时间，不是单个场景的持续时间。",
+    "上下行字节是引擎对**已接管连接**的计数，不含直通（未接管）流量；有会话基线时只统计本次测试的增量。",
+    "五类故障（断连 / DNS / 超时 / 拒连 / 网络切换）取**累计计数**，不受 300 条事件环形缓冲影响；其余事件仍是最新 300 条的快照。",
+    "运行时长是**引擎本次启动**至今的时间；「测试会话」的已运行时间才是本次测试的时长。",
 ]
 
 
@@ -182,21 +182,74 @@ def merge_fault_counts(payload, counts):
     双端同构：Android 端只要在同一份 payload 里多带一个 fault_counts_full
     字段就能得到相同结论；老版本 APK 没这个字段时本函数原样返回 counts，
     行为与改之前完全一致，不需要两端同步发版才能上线。
+
+    有 ``session``（本次测试增量）时，五类故障再覆盖成**本次**的次数：
+    报告是给「这次测试」看的，把上一次测试甚至是历史长跑留下的故障算进来
+    会直接改变结论。其余事件类型没有独立累计器，仍取引擎快照。
     """
     full = payload.get("fault_counts_full") if isinstance(payload, dict) else None
     if not isinstance(full, dict) or not full:
-        return counts
-    # full 是全量缓冲按 type 聚合的结果，整体覆盖「最近 60 条」的 counts，
-    # 与 Android summarizeEvents 对齐；connect/config/error 等键也用全量值。
-    # FAULT_TYPES 只用于结论/解读里判断「主动注入故障」，不参与合并口径。
-    merged = {}
-    for k, raw in full.items():
-        try:
-            v = int(raw or 0)
-        except (TypeError, ValueError):
-            continue             # 脏值跳过，与 Android 一致
-        merged[k] = max(0, v)
+        merged = dict(counts)
+    else:
+        # full 是全量缓冲按 type 聚合的结果，整体覆盖「最近 60 条」的 counts，
+        # 与 Android summarizeEvents 对齐；connect/config/error 等键也用全量值。
+        # FAULT_TYPES 只用于结论/解读里判断「主动注入故障」，不参与合并口径。
+        merged = {}
+        for k, raw in full.items():
+            try:
+                v = int(raw or 0)
+            except (TypeError, ValueError):
+                continue             # 脏值跳过，与 Android 一致
+            merged[k] = max(0, v)
+    s = session_stats(payload)
+    faults = (s or {}).get("faults")
+    if isinstance(faults, dict):
+        for k in FAULT_TYPES:
+            if k not in faults:
+                continue
+            try:
+                merged[k] = max(0, int(faults.get(k) or 0))
+            except (TypeError, ValueError):
+                pass
     return merged
+
+
+def session_stats(payload):
+    """本次测试的增量快照；没有该字段（老快照 / 老 APK）时返回 None。
+
+    ``seq <= 0`` 视为没有会话 —— 引擎刚启动、还没点过「开启限速」。
+    """
+    s = payload.get("session") if isinstance(payload, dict) else None
+    if not isinstance(s, dict):
+        return None
+    try:
+        if int(s.get("seq") or 0) <= 0:
+            return None
+    except (TypeError, ValueError):
+        return None
+    return s
+
+
+def counted_stats(payload):
+    """报告统计口径：有会话增量就用增量，没有才退回引擎累计值。
+
+    返回 ``(stats, session)``。``stats`` 的键与 status_payload.stats 一致；
+    ``session`` 为 None 表示这是老快照，报告里要标注「累计口径」。
+    """
+    raw = payload.get("stats") or {}
+    s = session_stats(payload)
+    if s is None:
+        return raw, None
+    return ({
+        "total": s.get("total", 0),
+        "active": raw.get("active", 0),      # 活跃连接是「此刻」，不属于增量
+        "up": s.get("up", 0),
+        "down": s.get("down", 0),
+        "bypass": s.get("bypass", 0),
+        # 引擎运行时长保持原值：测试会话的时长单独在「测试会话」一行展示，
+        # 两者混用会让「运行 5 分钟」既不像引擎时长也不像测试时长。
+        "uptime": raw.get("uptime", 0),
+    }, s)
 
 
 def tested_profile(payload):
@@ -241,11 +294,11 @@ def scene_name(msg):
 
 
 def scene_sequence(events):
-    """从事件流提取本次测过的场景名序列（按出现顺序，去重）。
+    """从事件流提取本次测过的场景名序列（按出现顺序）。
 
-    场景由多个入口落地：切场景、开启限速、主界面「开始弱网测试」、组合播放；
-    停止限速不算。报告里列这个，是为了让开发看到「这次测过哪几档」，不只是导出
-    瞬间那一档。
+    只去掉**相邻重复**，不做全局去重：A → B → A 是一次「切回去复测」，
+    全局去重会把它压成 A → B，丢掉最后那段。场景由多个入口落地：切场景、
+    开启限速、主界面「开始弱网测试」、组合播放；停止限速不算。
     """
     names = []
     # status_payload() 把 events 反转成「最新在前」，而这里要按测试发生的
@@ -255,7 +308,7 @@ def scene_sequence(events):
         if not isinstance(e, dict):
             continue
         name = scene_name(e.get("msg", "") or "")
-        if name and name not in names:
+        if name and (not names or names[-1] != name):
             names.append(name)
     return names
 
@@ -264,7 +317,7 @@ def conclusion(payload, counts, frames=None):
     """一句话结论：场景 + 注入的故障 + 连接与流量，或明确说明没有数据。"""
     prof = tested_profile(payload)
     name = prof.get("name") or "未命名场景"
-    stats = payload.get("stats") or {}
+    stats, _session = counted_stats(payload)
     total = int(stats.get("total") or 0)
     active = int(stats.get("active") or 0)
     scenes = scene_sequence(payload.get("events"))
@@ -304,7 +357,7 @@ def interpretation(payload, counts, frames=None, param_specs=()):
     有效性判定、异常关注点、行动建议。返回 Markdown 行列表；纯逻辑，不写文件，
     单测可以直接喂构造好的快照。
     """
-    stats = payload.get("stats") or {}
+    stats, session = counted_stats(payload)
     total = int(stats.get("total") or 0)
     active = int(stats.get("active") or 0)
     bypass = int(stats.get("bypass") or 0)
@@ -331,6 +384,16 @@ def interpretation(payload, counts, frames=None, param_specs=()):
         verdict = "empty"
         lines.append("**数据有效性**：本次未捕获到经过代理的连接，报告仅含配置与状态快照，"
                      "**不能用于评估弱网效果**——需让被测 App 的流量真正经过代理后再导出。")
+        if session is not None:
+            try:
+                history = int((payload.get("stats") or {}).get("total") or 0)
+            except (TypeError, ValueError):
+                history = 0
+            if history > 0:
+                # 这正是「旧流量冒充本次样本」的典型场景：引擎累计有连接，
+                # 但都是开始测试之前跑的。必须点明，否则看总数会以为有效。
+                lines.append("> 引擎累计有 %d 条历史连接，但**本次测试开始后没有新流量**；"
+                             "历史连接不计入本次样本。" % history)
     elif not has_weaknet:
         verdict = "direct"
         lines.append("**数据有效性**：捕获 %d 条连接，但未识别到弱网场景或故障注入，"
@@ -340,6 +403,13 @@ def interpretation(payload, counts, frames=None, param_specs=()):
         fault = ("，注入 " + "、".join("%s×%d" % (n, c) for n, c in injected)) if injected else ""
         lines.append("**数据有效性**：**有效**——捕获 %d 条连接%s，可用于评估该场景下的表现。" %
                      (total, fault))
+    if session is not None:
+        try:
+            started = datetime.fromtimestamp(int(session.get("started_at") or 0)).strftime("%H:%M:%S")
+        except (ValueError, OSError, OverflowError):
+            started = "-"
+        lines.append("> 统计口径：自测试会话 #%s 开始（%s）的**增量**，同一次测试内切场景不重置；"
+                     "引擎累计值仅作参考。" % (_cell(session.get("seq", "?")), _cell(started)))
 
     # 2. 测过哪些场景
     if scenes:
@@ -406,7 +476,8 @@ def build(payload, param_specs=(), param_notes=None, frames=None, generated_at=N
     param_notes = param_notes or {}
     now = generated_at or datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     prof = tested_profile(payload)
-    stats = payload.get("stats") or {}
+    raw_stats = payload.get("stats") or {}
+    stats, session = counted_stats(payload)
     events = payload.get("events") or []
     counts = merge_fault_counts(payload, summarize_events(events))
     scope = payload.get("scope") or {}
@@ -450,7 +521,13 @@ def build(payload, param_specs=(), param_notes=None, frames=None, generated_at=N
     out.append("| 场景 key | `%s` |" % _cell(payload.get("preset_key", "-")))
     out.append("| 限速开关 | %s |" % ("开启" if payload.get("limit_on") else "关闭（已停止）"))
     out.append("| 限速闸门 | %s |" % ("打开" if payload.get("gate_open") else "关闭"))
-    out.append("| 系统代理 | %s |" % ("已接管" if payload.get("sysproxy") else "未接管"))
+    out.append("| 覆盖协议 | IPv4 HTTP/HTTPS 代理；直连 socket、UDP、IPv6 不受控（IPv6 不接管、不施加弱网） |")
+    # 优先看「本实例是否接管」：只读 ProxyEnable 会把用户自己的公司代理记成
+    # 「本次已接管」，是错误归因。老快照没有这个键时退回旧字段。
+    _owned = payload.get("sysproxy_owned")
+    if _owned is None:
+        _owned = payload.get("sysproxy")
+    out.append("| 系统代理 | %s |" % ("已接管" if _owned else "未接管"))
     listen = payload.get("listen") or {}
     out.append("| 监听地址 | %s:%s |" %
                (_cell(listen.get("host", "-")), _cell(listen.get("port", "-"))))
@@ -460,21 +537,43 @@ def build(payload, param_specs=(), param_notes=None, frames=None, generated_at=N
                 "（%s）" % _cell(", ".join(scope.get("list") or []))
                 if scope.get("list") else ""))
     out.append("| 运行时长 | %s |" % human_duration(stats.get("uptime")))
+    if session is not None:
+        try:
+            _started = datetime.fromtimestamp(
+                int(session.get("started_at") or 0)).strftime("%H:%M:%S")
+        except (ValueError, OSError, OverflowError):
+            _started = "-"
+        out.append("| 测试会话 | #%s，开始于 %s，已运行 %s |" %
+                   (_cell(session.get("seq", "?")), _cell(_started),
+                    human_duration(session.get("elapsed"))))
+    else:
+        out.append("| 测试会话 | 老快照（无会话基线，以下统计为引擎累计口径） |")
     out.append("")
 
     # 4. 流量统计
     out.append("## 流量统计")
     out.append("")
+    if session is not None:
+        out.append("> 下表为**本次测试增量**（自会话 #%s 开始）；引擎累计值另列，"
+                   "避免把开始测试前的历史流量算进本次样本。"
+                   % _cell(session.get("seq", "?")))
+        out.append("")
     out.append("| 指标 | 数值 |")
     out.append("|---|---:|")
-    out.append("| 连接总数 | %d |" % int(stats.get("total") or 0))
+    out.append("| 本次连接数 | %d |" % int(stats.get("total") or 0))
     out.append("| 当前活跃 | %d |" % int(stats.get("active") or 0))
-    out.append("| 下行字节 | %s（%d B） |" %
+    out.append("| 本次下行字节 | %s（%d B） |" %
                (human_bytes(stats.get("down")), int(stats.get("down") or 0)))
-    out.append("| 上行字节 | %s（%d B） |" %
+    out.append("| 本次上行字节 | %s（%d B） |" %
                (human_bytes(stats.get("up")), int(stats.get("up") or 0)))
-    out.append("| 直通字节 | %s（%d B） |" %
+    out.append("| 本次直通字节 | %s（%d B） |" %
                (human_bytes(stats.get("bypass")), int(stats.get("bypass") or 0)))
+    if session is not None:
+        out.append("| 引擎累计连接（参考） | %d |" % int(raw_stats.get("total") or 0))
+        out.append("| 引擎累计下行（参考） | %s（%d B） |" %
+                   (human_bytes(raw_stats.get("down")), int(raw_stats.get("down") or 0)))
+        out.append("| 引擎累计上行（参考） | %s（%d B） |" %
+                   (human_bytes(raw_stats.get("up")), int(raw_stats.get("up") or 0)))
     out.append("")
 
     # 5. 参数快照：只列非默认项，附一句人话解释——开发要看的是「这次改了什么」

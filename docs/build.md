@@ -145,3 +145,21 @@ python -m pytest -m device    # 真机契约：先 set ANDROID_SERIAL=<adb devic
 - **必须真机 / 外部工具**：`-m device` 的 adb 全局代理与 TUN 逐字节转发；限速精度须用
   iperf3 外部真值（`tools/perf_iperf.py`）。这两类没有可注入替身，CI 只跑前者，
   绿灯不替代真机回归，也不代表限速精度达标。
+
+## 发布前检查（正式发版必须全过）
+
+1. `python tests/_t_version.py --require-artifacts` —— 四处版本号一致，且 EXE/APK
+   **确实存在**、不比源码旧。日常源码检查可以不带该参数（仓库不带产物时跳过），
+   正式发版必须带：缺产物直接判失败，不能拿「跳过」当通过。
+2. `python -m pytest -q` —— 全量功能回归；CI 的 `unit-tests` job 已改成必过，
+   不再挂在可失败的性能任务里。
+3. `python tests/_t_spec_parity.py` 与 `python tests/_t_api_parity.py` —— 跨端数据
+   规格、Windows API 契约；Android 侧契约需真机 `adb forward` 后加 `--android`。
+4. `cd android && bash _jw/run.sh` —— Java 纯 JDK 套件。
+5. 上传资产后跑 `python tests/_t_release.py --strict` —— 它从 Release API 取回
+   字节数与 `digest`，逐项比对 README 下载表（大小 / 短指纹 / 完整摘要 / 下载链接），
+   并校验 README 指向的就是**最新正式版**。**不要手抄指纹**：第八轮的错值就是这么来的
+   （`9d80713c…` / `04e00ff5…`，两个都和真实资产不符，而当时全部测试是绿的）。
+   脚本会直接打印「文档 X / 资产 Y」，照着改成资产那一侧。
+6. 发布页与 README 必须引用同一份最终上传文件，不要贴本机重打产物的指纹。
+7. 需要替换已发布文件时用新版本号 + 新标签，保留可追踪的变更记录。

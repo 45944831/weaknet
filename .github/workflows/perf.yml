@@ -129,7 +129,58 @@ jobs:
           raise SystemExit(1 if bad else 0)
           PY
 
-  # ---- PR 快速子集：只跑一项、只跑 3 次，标红但不拦合并 ----
+  # ---- 功能回归（必过）：与性能门禁分开 ----
+  # 以前全量 pytest 塞在 perf-quick 里且 continue-on-error：功能回归失败只标红
+  # 不拦合并，等于没有门禁。这里单独成 job —— 功能/契约/Java 是确定性检查，
+  # 不受 runner 噪声影响，失败就该红。
+  unit-tests:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: 安装依赖
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements-dev.txt
+
+      - name: 期望来源检查
+        run: python tests/_t_expect.py --list
+
+      - name: 全量功能回归
+        run: python -m pytest -q
+
+      - name: 崩溃一致性（系统代理）
+        run: python tests/_probe_crash.py
+
+  # ---- 夜间 / 手动：变异测试（约 4 分钟，验证「测试真的会因实现改坏而变红」）----
+  # 不进 PR：单轮 4 分钟对合并门禁太重；但它是唯一能发现「断言恒真 / 测试跟着
+  # 实现写」的检查，所以夜间必跑。门槛 85% 是实测值（当前 89.9%）留的余量，
+  # 剩下的幸存者都是已登记的等价变异，详见 docs/mutation.md。
+  mutation:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: 安装依赖
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements-dev.txt
+
+      - name: 变异测试
+        run: python tests/_t_mutation.py --min-score 85 --json mutation-report.json
+
+  # ---- PR 快速子集：只跑性能项、只跑 3 次，标红但不拦合并 ----
   perf-quick:
     if: github.event_name == 'pull_request'
     runs-on: windows-latest
@@ -146,11 +197,6 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           python -m pip install -r requirements-dev.txt
-
-      - name: 功能回归 + 覆盖率（仅报告，不设门槛）
-        # 先只把数字亮出来：没有基线时设 --cov-fail-under 只会逼大家
-        # 「把门槛调低」，反而失去意义。稳定几版后再收紧。
-        run: python -m pytest -q --cov=. --cov-report=term-missing
 
       - name: 性能快速子集（单项 × 3 次，仅提示）
         env:

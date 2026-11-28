@@ -8,6 +8,7 @@
 这些用例必须在修复被删掉时稳定失败，而不是「跑十分钟超时」。
 """
 import asyncio
+import time
 
 import pytest
 
@@ -119,6 +120,94 @@ def test_submit_after_abort_is_dropped():
     assert run_async(go()) == b""
 
 
+def test_abort_cancels_delivery_task():
+    """abort 必须真的 cancel 投递协程，不能只置 dead。
+
+    变异测试删掉 `not t.done()` 里的 `not` 后活了下来：现有用例只关心中止后
+    不再写数据，没人检查投递协程本身是否被取消。只置 dead 不 cancel，协程会
+    留在事件循环里，关循环时打 "Task was destroyed but it is pending"。
+    """
+    async def go():
+        dl = W.DelayLine(_Writer(), "abort-cancel").start()
+        dl.abort()
+        await asyncio.sleep(0.01)          # 给取消一个调度周期
+        return dl.task.cancelled()
+
+    assert run_async(go()) > 0
+
+
+def test_idle_requires_no_pending_bytes():
+    """`_idle()` 必须同时满足「队列空」和「没有在途字节」。
+
+    变异测试把 `and` 改成 `or` 后活了下来：只判队列空，会把「已从队列取出、
+    正在 flush」的块当成没有在途数据，零延迟块插队写出 —— 顺序被打乱。
+    """
+    dl = W.DelayLine(_Writer())
+    assert dl._idle() is True
+    dl.pending = 8
+    assert dl._idle() is False
+
+
+def test_peer_alive_false_for_closing_writer_without_transport():
+    """writer 自己报 closing（哪怕没有 transport）就必须按已死处理。"""
+    class _Closing(_Writer):
+        def is_closing(self):
+            return True
+
+    assert W.DelayLine(_Closing(), "closing")._peer_alive() is False
+
+
+def test_peer_alive_true_for_transport_without_conn_lost():
+    """没有 `_conn_lost` 字段的 transport 按「可写」处理，不能默认判死。"""
+    w = _Writer()
+    w.transport = object()
+    assert W.DelayLine(w, "plain")._peer_alive() is True
+
+
+def test_peer_alive_false_when_transport_reports_conn_lost():
+    """transport 已累计 `_conn_lost`（RST / _force_close）就必须停止投递。
+
+    这类 writer 的 `is_closing()` 可能还没置位（半关闭路径），只看 is_closing
+    会继续往死 socket 写，刷出上百条 socket.send 警告。
+    """
+    w = _Writer()
+    w.transport = type("_T", (), {"_conn_lost": 1})()
+    assert W.DelayLine(w, "conn-lost")._peer_alive() is False
+
+
+def test_abort_clears_pending_counter():
+    """abort 排空队列后 pending 必须归零，否则后续 submit 永远觉得有积压。"""
+    async def go():
+        dl = W.DelayLine(_Writer())        # 不启动消费者，确保块留在队列里
+        await dl.submit(b"x" * 8, 0.05, 0)
+        assert dl.pending == 8
+        dl.abort()
+        return dl.pending
+
+    assert run_async(go()) == 0
+
+
+def test_positive_delay_does_not_take_fast_path(monkeypatch):
+    """只要有延迟就必须入队，不能走零延迟快路径。
+
+    变异测试把 `delay <= 0` 改成 `<= 1`、把 `and` 改成 `or`、把入队到期时间
+    的 `+` 改成 `-`，三个都活了下来 —— 因为没有用例量过「正延迟到底等了多久」。
+    """
+    monkeypatch.setattr(W.G, "gen", 0)
+    monkeypatch.setattr(W.G, "wake", None)      # 走普通 sleep，避免上例留下的 Event
+
+    async def go():
+        w = _Writer()
+        dl = W.DelayLine(w, "delay-100ms").start()
+        t0 = time.monotonic()
+        await dl.submit(b"x" * 8, 0.1, W.G.gen)
+        await dl.aclose(timeout=2)
+        return time.monotonic() - t0
+
+    el = run_async(go())
+    assert el >= 0.07, "100ms 延迟只用了 %.3fs，走了零延迟快路径" % el
+
+
 class _DeadWriter(_Writer):
     """模拟 asyncio StreamWriter：连接已被 RST / close，再 write 只会打警告。"""
 
@@ -152,6 +241,22 @@ def test_dead_writer_fast_path_stops_without_writing():
         return dl.dead
 
     assert run_async(go()) is True
+
+
+def test_peer_alive_treats_broken_close_check_as_dead():
+    """`is_closing()` 自己抛异常时按「已死」处理，不能按「活着」继续投递。
+
+    变异测试把 `except: return False` 改成 `return True` 后活了下来：
+    现有替身要么正常返回、要么不实现 is_closing，没人覆盖「检查本身坏了」。
+    这类 transport 已是半损坏状态，继续写只会白占限速桶和 CPU。
+    """
+
+    class _Broken(_Writer):
+        def is_closing(self):
+            raise RuntimeError("transport gone")
+
+    dl = W.DelayLine(_Broken(), "broken")
+    assert dl._peer_alive() is False
 
 
 def test_dead_writer_wakes_producer_blocked_on_full_queue(monkeypatch):

@@ -1012,6 +1012,10 @@ public class CtrlServer implements Runnable {
             JSONObject sc = new JSONObject();
             sc.put("mode", WeakNet.I.scopeMode);
             sc.put("supported", true);
+            // 实际生效范围：白名单里的 App 可能已被卸载，addAllowedApplication 会失败。
+            // 只回显用户选的名单而不回显生效数，界面就无法区分「3 个都在测」和
+            // 「3 个里只有 1 个真的进了 tun」。
+            sc.put("effective_note", VpnNetService.scopeNote());
             JSONArray sl = new JSONArray();
             for (String p : new java.util.ArrayList<String>(WeakNet.I.scopePkgs)) sl.put(p);
             sc.put("list", sl);

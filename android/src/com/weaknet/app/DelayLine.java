@@ -18,17 +18,24 @@ import java.util.PriorityQueue;
  * 没有这个保护的话，服务器全速发 + 大延迟 = 队列无限堆积直到 OOM。
  */
 public class DelayLine {
+    /** 上行（App → 上游） */
+    static final int DIR_UP = 0;
+    /** 下行（上游 → App） */
+    static final int DIR_DOWN = 1;
+
     static class Item {
         final long due;
         final long seq;        // 入队序号：到期时间相同时按它排，保证先进先出
         final Runnable job;
         final int bytes;
+        final int dir;
 
-        Item(long due, long seq, Runnable job, int bytes) {
+        Item(long due, long seq, Runnable job, int bytes, int dir) {
             this.due = due;
             this.seq = seq;
             this.job = job;
             this.bytes = bytes;
+            this.dir = dir;
         }
     }
 
@@ -45,13 +52,64 @@ public class DelayLine {
     private Thread worker;          // 空闲久了会退出，下次 post 再拉起来
     private long lastBusy = System.currentTimeMillis();
     private volatile boolean closed = false;
-    private volatile int pendingBytes = 0;
     /** 已出队、job 还在锁外执行的数量。>0 时禁止内联快路径——
-     *  否则后发的包可能插到前面那个包的 job 之前写完（tun 写入顺序即乱序）。 */
-    private int inFlight = 0;
+     *  否则后发的包可能插到前面那个包的 job 之前写完（tun 写入顺序即乱序）。
+     *  按方向分开计数：上行与下行是两条独立的数据流，互不构成顺序约束，
+     *  合并计数会让「上行有一个 job 在跑」无谓地挡掉下行的内联快路径。 */
+    private int inFlightUp = 0;
+    private int inFlightDown = 0;
     /** 已入队项的最大到期时间：新项的到期时间不得早于它，保证抖动不把包打乱。
-     *  （队列空且无在途 job 时重置——那时的到期时间都已过去，不该再压制新包） */
-    private long lastDue = 0;
+     *  （队列空且无在途 job 时重置——那时的到期时间都已过去，不该再压制新包）
+     *
+     *  按方向各一份。共用一份时，上行配置 2s 延迟、下行配 0，上行的到期水位会把
+     *  下行的包一起往后推 —— 表现为「只开了上行延迟，下行也跟着变慢」，
+     *  双向不对称的弱网场景根本配不出来。 */
+    private long lastDueUp = 0;
+    private long lastDueDown = 0;
+    /** 各方向待投递字节：容量判断与回压也按方向算，
+     *  免得下行的大流量把上行的 ACK/小包一起卡住。 */
+    private int pendingUp = 0;
+    private int pendingDown = 0;
+    /** 各方向在队项数：判断「这个方向的基准是否已过期」用，
+     *  不能用全局 q.isEmpty()—— 下行有积压时上行水位就永远得不到重置。 */
+    private int queuedUp = 0;
+    private int queuedDown = 0;
+
+    private int queued(int dir) {
+        return dir == DIR_DOWN ? queuedDown : queuedUp;
+    }
+
+    private void addQueued(int dir, int delta) {
+        if (dir == DIR_DOWN) queuedDown += delta;
+        else queuedUp += delta;
+    }
+
+    private int inFlight(int dir) {
+        return dir == DIR_DOWN ? inFlightDown : inFlightUp;
+    }
+
+    private void addInFlight(int dir, int delta) {
+        if (dir == DIR_DOWN) inFlightDown += delta;
+        else inFlightUp += delta;
+    }
+
+    private long lastDue(int dir) {
+        return dir == DIR_DOWN ? lastDueDown : lastDueUp;
+    }
+
+    private void setLastDue(int dir, long v) {
+        if (dir == DIR_DOWN) lastDueDown = v;
+        else lastDueUp = v;
+    }
+
+    private int pending(int dir) {
+        return dir == DIR_DOWN ? pendingDown : pendingUp;
+    }
+
+    private void addPending(int dir, int delta) {
+        if (dir == DIR_DOWN) pendingDown += delta;
+        else pendingUp += delta;
+    }
 
     /** 空闲这么久就撤掉线程：手机上同时挂着的连接可能有上百条，
      *  每条都常驻一个投递线程太浪费 —— 反正闲着也是闲着，真有包进来再拉起来。 */
@@ -64,29 +122,29 @@ public class DelayLine {
 
     /** 延迟 delayMs 后执行 job。delayMs<=0 且无在途数据时直接同步执行，省掉一次线程切换。 */
     void post(long delayMs, Runnable job, int bytes) {
+        post(DIR_UP, delayMs, job, bytes);
+    }
+
+    void post(int dir, long delayMs, Runnable job, int bytes) {
         if (delayMs <= 0) {
             // 不限延迟时直接同步跑：队列为空说明没有更早的包在等，不会打乱顺序。
             // 少了「入队 + 唤醒投递线程」这一来一回，直连档的吞吐能差出 30%。
             boolean inline = false;
             synchronized (lock) {
                 // inFlight>0 = 已出队的包 job 还在锁外跑，此时内联会让顺序颠倒，必须入队
-                inline = !closed && q.isEmpty() && inFlight == 0;
-                if (inline) lastDue = 0;
+                inline = !closed && queued(dir) == 0 && inFlight(dir) == 0;
+                if (inline) setLastDue(dir, 0);
             }
             if (inline) {
                 // 必须出了锁再跑：job 里会去拿 TcpSession 的锁，而提交方是拿着
                 // TcpSession 的锁来 post 的 —— 在锁里跑就是 AB-BA 死锁，整条连接卡死。
-                try {
-                    job.run();
-                } catch (Exception e) {
-                    // ignore
-                }
+                runQuietly(job);
                 return;
             }
         }
         synchronized (lock) {
             if (closed) return;
-            while (maxPending > 0 && pendingBytes > maxPending) {
+            while (maxPending > 0 && pending(dir) > maxPending) {
                 try {
                     lock.wait(50);
                 } catch (InterruptedException e) {
@@ -94,8 +152,26 @@ public class DelayLine {
                 }
                 if (closed) return;
             }
-            enqueueLocked(delayMs, job, bytes);
+            enqueueLocked(dir, delayMs, job, bytes);
         }
+    }
+
+    /**
+     * 只入队、绝不内联、绝不阻塞：满了直接返回 false。
+     *
+     * 给「持有会话锁」的调用方用（TCP 上行数据与 FIN）。它们既不能内联 ——
+     * job 里会 awaitGate（断网窗口最长等 120s）和写 socket，跑在会话锁里等于
+     * 把整条连接连同 TUN 分发线程一起冻住；也不能阻塞等容量 ——
+     * 同样是在持锁等待。返回 false 表示「这个包发不出去」，由调用方决定
+     * 不回 ACK、让客户端按真实丢包重传，这与真实网络的拥塞行为一致。
+     */
+    boolean offer(int dir, long delayMs, Runnable job, int bytes) {
+        synchronized (lock) {
+            if (closed) return false;
+            if (maxPending > 0 && pending(dir) + bytes > maxPending) return false;
+            enqueueLocked(dir, delayMs, job, bytes);
+        }
+        return true;
     }
 
     /**
@@ -107,38 +183,48 @@ public class DelayLine {
      * 卡住 —— 与「满了就丢、绝不阻塞」的约定正好相反。
      */
     boolean tryPost(long delayMs, Runnable job, int bytes) {
+        return tryPost(DIR_UP, delayMs, job, bytes);
+    }
+
+    boolean tryPost(int dir, long delayMs, Runnable job, int bytes) {
         boolean inline;
         synchronized (lock) {
             if (closed) return false;
-            if (maxPending > 0 && pendingBytes + bytes > maxPending) return false;
-            inline = delayMs <= 0 && q.isEmpty() && inFlight == 0;
+            if (maxPending > 0 && pending(dir) + bytes > maxPending) return false;
+            inline = delayMs <= 0 && queued(dir) == 0 && inFlight(dir) == 0;
             if (inline) {
-                lastDue = 0;
+                setLastDue(dir, 0);
             } else {
-                enqueueLocked(delayMs, job, bytes);
+                enqueueLocked(dir, delayMs, job, bytes);
             }
         }
         if (inline) {
             // 与 post() 同理：job 必须在锁外跑，否则会和会话锁形成 AB-BA 死锁
-            try {
-                job.run();
-            } catch (Exception e) {
-                // ignore
-            }
+            runQuietly(job);
         }
         return true;
     }
 
+    private static void runQuietly(Runnable job) {
+        try {
+            job.run();
+        } catch (Exception e) {
+            // ignore
+        }
+    }
+
     /** 调用方必须持有 lock */
-    private void enqueueLocked(long delayMs, Runnable job, int bytes) {
+    private void enqueueLocked(int dir, long delayMs, Runnable job, int bytes) {
         long due = System.currentTimeMillis() + Math.max(0, delayMs);
         // 单调保序：新包不得早于已在队/在途的包到期（抖动是 ±jitter 的，
         // 放任的话后发的包可能先到期，投递顺序乱了 TCP 会当成重传全丢掉）
-        if (q.isEmpty() && inFlight == 0) lastDue = 0;   // 基准已过去，重置
-        if (due < lastDue) due = lastDue;
-        lastDue = due;
-        q.add(new Item(due, seqGen++, job, bytes));
-        pendingBytes += bytes;
+        if (queued(dir) == 0 && inFlight(dir) == 0) setLastDue(dir, 0);   // 基准已过去，重置
+        long last = lastDue(dir);
+        if (due < last) due = last;
+        setLastDue(dir, due);
+        q.add(new Item(due, seqGen++, job, bytes, dir));
+        addQueued(dir, 1);
+        addPending(dir, bytes);
         if (worker == null || !worker.isAlive()) {
             worker = new Thread(new Runnable() {
                 public void run() {
@@ -152,7 +238,7 @@ public class DelayLine {
     }
 
     int pendingBytes() {
-        return pendingBytes;
+        return pendingUp + pendingDown;
     }
 
     private void loop() {
@@ -184,8 +270,9 @@ public class DelayLine {
                     continue;
                 }
                 q.poll();
-                pendingBytes -= it.bytes;
-                inFlight++;
+                addQueued(it.dir, -1);
+                addPending(it.dir, -it.bytes);
+                addInFlight(it.dir, 1);
                 lastBusy = System.currentTimeMillis();
                 lock.notifyAll();
             }
@@ -196,7 +283,7 @@ public class DelayLine {
                     // ignore
                 }
                 synchronized (lock) {
-                    inFlight--;
+                    addInFlight(it.dir, -1);
                     lock.notifyAll();
                 }
             }
@@ -207,7 +294,10 @@ public class DelayLine {
         closed = true;
         synchronized (lock) {
             q.clear();
-            pendingBytes = 0;
+            pendingUp = 0;
+            pendingDown = 0;
+            queuedUp = 0;
+            queuedDown = 0;
             lock.notifyAll();
         }
         try {

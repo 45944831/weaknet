@@ -97,6 +97,33 @@ public class ShareNet {
     private static volatile boolean allowLegacy = false;
     /** 共享服务处理池：慢客户端不能把后面所有推送都堵在 accept 循环里 */
     private static java.util.concurrent.ExecutorService servePool;
+    /** 处理线程数与排队上限：队列必须有界，理由见 {@link #newServePool()} */
+    static final int SERVE_THREADS = 4;
+    static final int SERVE_QUEUE = 64;
+
+    /**
+     * 共享服务线程池：固定线程、**有界**队列、满了直接拒绝。
+     *
+     * 不能用 {@code Executors.newFixedThreadPool}：它内部是无界
+     * {@code LinkedBlockingQueue}，慢客户端一多，任务就在队列里无限堆积 ——
+     * accept 循环看着一点没堵，实际把堆吃光（CtrlServer 的处理池早就因为
+     * 同一个原因改成有界）。拒绝时由调用方关掉连接，让压力沿 TCP 窗口回传
+     * 给对端，而不是转成内存占用。
+     */
+    static java.util.concurrent.ThreadPoolExecutor newServePool() {
+        return new java.util.concurrent.ThreadPoolExecutor(
+                SERVE_THREADS, SERVE_THREADS, 0L,
+                java.util.concurrent.TimeUnit.MILLISECONDS,
+                new java.util.concurrent.LinkedBlockingQueue<Runnable>(SERVE_QUEUE),
+                new java.util.concurrent.ThreadFactory() {
+                    public Thread newThread(Runnable r) {
+                        Thread t = new Thread(r, "share-serve");
+                        t.setDaemon(true);
+                        return t;
+                    }
+                },
+                new java.util.concurrent.ThreadPoolExecutor.AbortPolicy());
+    }
 
     private static final Map<String, Peer> peers =
             Collections.synchronizedMap(new LinkedHashMap<String, Peer>());
@@ -402,14 +429,7 @@ public class ShareNet {
                 WeakNet.I.log("share", "环境共享已开启（端口 " + SHARE_PORT + "）");
                 synchronized (ShareNet.class) {
                     if (servePool == null) {
-                        servePool = java.util.concurrent.Executors.newFixedThreadPool(
-                                4, new java.util.concurrent.ThreadFactory() {
-                                    public Thread newThread(Runnable r) {
-                                        Thread t = new Thread(r, "share-serve");
-                                        t.setDaemon(true);
-                                        return t;
-                                    }
-                                });
+                        servePool = newServePool();
                     }
                 }
                 while (running) {
@@ -417,11 +437,22 @@ public class ShareNet {
                         Socket c = ss.accept();
                         // accept 循环只负责收：慢客户端（5s 超时）不能再让后续推送排队
                         final Socket fc = c;
-                        servePool.execute(new Runnable() {
-                            public void run() {
-                                serve(fc);
+                        try {
+                            servePool.execute(new Runnable() {
+                                public void run() {
+                                    serve(fc);
+                                }
+                            });
+                        } catch (java.util.concurrent.RejectedExecutionException rej) {
+                            // 排队满了：立刻关掉这条，让对端看到连接被拒，
+                            // 而不是把任务堆在内存里到最后一起 OOM
+                            WeakNet.I.log("share", "共享服务排队已满，拒绝一条连接");
+                            try {
+                                fc.close();
+                            } catch (Exception ignore) {
+                                // 已经断了
                             }
-                        });
+                        }
                     } catch (Exception e) {
                         if (!running) break;
                     }

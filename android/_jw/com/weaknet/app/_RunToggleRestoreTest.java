@@ -81,6 +81,73 @@ public class _RunToggleRestoreTest {
         ck("只改延迟也算有极限（hasLimits 口径）",
            WeakNet.limitOnForApply(onlyLatency), "false");
 
+        // ---- 停止态草稿：开启时原样生效（外部审查：停止态编辑参数丢失）----
+        WeakNet w = new WeakNet();
+        w.presetKey = "custom";
+        Profile draft = custom(480);
+        w.pendingProfile = draft;
+        w.pendingKey = "custom";
+        Profile got = w.resolveEnableRestore(null);
+        ck("停止态草稿优先于 lastProfile", got == draft && got.downKbps == 480,
+           "" + got.downKbps);
+        w.pendingKey = "other";
+        Profile got2 = w.resolveEnableRestore(null);
+        ck("草稿 key 不匹配时不误用", got2 != draft && got2.downKbps == 0,
+           "" + got2.downKbps);
+
+        // ---- 操作序列矩阵（第 1 轮）：跨操作时序 ----
+        // 开关只跟「参数是否真的会动流量」走：运行中点「直连」这一档不能停在
+        // 「已开启」——否则界面显示弱网、实际零限制，导出报告还会把直连当弱网。
+        WeakNet w2 = new WeakNet();
+        w2.limitOn = true;
+        w2.selectScene(new Profile(), "direct");
+        ck("运行中切直连：开关按实际参数关掉", !w2.limitOn, "" + w2.limitOn);
+
+        // 切直连已经等于「停止」，之后的切场景只算选中（与桌面端 S6b 同行为）
+        w2.selectScene(custom(300), "4g");
+        ck("停止后切场景：只选中不生效", !w2.limitOn, "" + w2.limitOn);
+        ck("停止后切场景：参数留成草稿",
+           w2.pendingProfile != null && w2.pendingProfile.downKbps == 300,
+           w2.pendingProfile == null ? "null" : "" + w2.pendingProfile.downKbps);
+
+        // 关闭前把运行中调过的参数存成草稿，否则再开启按预设重建会静默覆盖
+        WeakNet w3 = new WeakNet();
+        w3.profile = custom(800);
+        w3.presetKey = "4g";
+        w3.limitOn = true;
+        w3.setLimitOn(false, null);
+        ck("关闭时把运行中调参存成草稿",
+           w3.pendingProfile != null && w3.pendingProfile.downKbps == 800,
+           w3.pendingProfile == null ? "null" : "" + w3.pendingProfile.downKbps);
+        ck("关闭后开关为 false", !w3.limitOn, "" + w3.limitOn);
+
+        // 组合 key 不存草稿：下一段由播放器重新给参数
+        WeakNet w3b = new WeakNet();
+        w3b.profile = custom(800);
+        w3b.presetKey = MyCombos.KEY_PREFIX + "1";
+        w3b.limitOn = true;
+        w3b.setLimitOn(false, null);
+        ck("组合播放中关闭不存草稿", w3b.pendingProfile == null,
+           "" + (w3b.pendingProfile == null ? "null" : "not-null"));
+
+        // 开启时目标组合已失效且没有可施加的参数：不能谎报「已开启」
+        WeakNet w4 = new WeakNet();
+        w4.presetKey = MyCombos.KEY_PREFIX + "nope";
+        w4.profile = new Profile();
+        w4.limitOn = true;
+        boolean handled = w4.resumeIfCombo();
+        ck("组合已删且参数全零：开关回落 false",
+           !handled && !w4.limitOn, "handled=" + handled + " on=" + w4.limitOn);
+
+        // 组合没了但回落参数有内容：保持开启
+        WeakNet w5 = new WeakNet();
+        w5.presetKey = MyCombos.KEY_PREFIX + "nope";
+        w5.profile = custom(1200);
+        w5.limitOn = true;
+        boolean handled2 = w5.resumeIfCombo();
+        ck("组合已删但回落参数有内容：保持开启",
+           !handled2 && w5.limitOn, "handled=" + handled2 + " on=" + w5.limitOn);
+
         System.out.println("_RunToggleRestoreTest: " + pass + " passed, " + fail + " failed");
         if (fail > 0) System.exit(1);
     }

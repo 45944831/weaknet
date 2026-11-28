@@ -140,8 +140,12 @@ def _fmt(ts):
     return time.strftime("%m-%d %H:%M:%S", time.localtime(ts))
 
 
-def check_artifacts():
+def check_artifacts(require_artifacts=False):
     """C5/C6：产物不能比源码旧。
+
+    ``require_artifacts=True``（命令行 ``--require-artifacts``）时，产物缺失
+    直接判 FAIL：正式发布必须先把 EXE/APK 打出来，不能拿「仓库不带产物」
+    当通过。日常源码检查保持跳过，否则 clone 下来跑测试一片红。
 
     `spec.json` 与 Java 源码都是**打进包里**的：只改源码不重打，所有单测仍然
     全绿，两端却跑着旧内容。v1.1.16 踩过两次 ——
@@ -160,7 +164,10 @@ def check_artifacts():
             ("C5 EXE 产物比源码新", os.path.join(ROOT, "WeakNet.exe"), py_src + [spec]),
             ("C6 APK 产物比源码新", os.path.join(ROOT, "android", "WeakNet.apk"), java_src)):
         if not os.path.exists(art):
-            rec(tag, True, "产物不存在，跳过（仓库可不带产物）")
+            if require_artifacts:
+                rec(tag, False, "产物不存在（--require-artifacts：正式发布必须先生成）")
+            else:
+                rec(tag, True, "产物不存在，跳过（仓库可不带产物）")
             continue
         a, n = os.path.getmtime(art), _newest(srcs)
         # 容差 2s：打包与保存源码可能落在同一秒
@@ -172,10 +179,11 @@ def check_artifacts():
 
 
 def main():
+    require_art = "--require-artifacts" in sys.argv[1:]
     check_python()
     check_android()
     check_exe()
-    check_artifacts()
+    check_artifacts(require_artifacts=require_art)
     bad = [x for x in R if not x[1]]
     print("\n%d 通过 / %d 失败" % (len(R) - len(bad), len(bad)), flush=True)
     return 1 if bad else 0

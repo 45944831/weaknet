@@ -1,6 +1,467 @@
 # 验证记录
 
-各版本的实测结果与已修缺陷。当前版本 v1.1.20 的汇总在最前面，更早的记录按时间倒序排列。
+各版本的实测结果与已修缺陷。当前版本 v1.1.21 的汇总在最前面，更早的记录按时间倒序排列。
+
+## v1.1.21（第十五轮）· 2026-11-27 打包 + 安卓/PC 双端全量测试（发版前，未提交）
+
+### 测试方案
+
+本轮是用户明确授权的**打包发版**流程（此前各轮一律不打包）：升版本 → 全量自动化回归 →
+重打 EXE/APK → 安卓真机 + PC 本机双端联调 → 修复 → 提交 / tag / Push / Release。
+双端联调发现的问题已全部定位并处理，回归全绿；下一步是 README 回填与发版。
+**截至本节写入时仍未 commit、未 push、未发布。**
+
+| 阶段 | 口径 | 结果 |
+|---|---|---|
+| 版本真值 | `version.py` 1.1.20/130 → **1.1.21/131**，同步 `android/build.sh` 默认值、`AndroidManifest.xml`，重刷 `_build_gui/version_info.txt` | `tools/gen_exe_version.py --check` 通过 |
+| 自动化回归（打包前） | `pytest -q`、`android/_jw/run.sh`（Java 纯 JDK）、`tests/_t_expect.py`、`_t_spec_parity.py`、`_t_api_parity.py`、`ruff check .` | pytest 562 通过 / 1 失败（仅版本脚本 C5/C6「产物旧于源码」，打包后即转绿）；Java 全过；契约 **34 模块 / 1190 断言**（第十五轮新增代理竞态用例）；spec 23/23、API 12/12；ruff 全绿 |
+| 打包 | APK：`android/build.sh`（`ANDROID_HOME=$PWD/sdk`）；EXE：`D:/python/python.exe -m PyInstaller --clean --noconfirm --distpath . --workpath _build_gui _build_gui/WeakNet.spec` | APK **234,532 B**（`aapt2 dump badging` 回读 `versionCode=131 / versionName=1.1.21`，文件 SHA-256 `ec9cf835…`）；EXE **10,907,448 B**（`f4703278…`）；修复后重打，`_t_version.py --require-artifacts` **16/16**，C5/C6 转绿 |
+| EXE 内容一致性 | `tests/_t_exe_fresh.py` 解包 CArchive/PYZ 逐 code object 比对 | 1003 条目 / 216 模块 / 218 顶层子对象，**内嵌 weaknet 与源码完全一致** |
+| 安卓真机 | 设备 `45EU65AQIR49PFD6`，`adb install -r` 覆盖安装；`pytest -m device`、`_t_apk_edge.py` | 设备回读 1.1.21/131；真机契约 **13/13**；参数边界与状态机健壮性 **27/27** |
+| PC 本机 | `_t_exe_smoke.py`、`_t_exit_residue_win.py` | 冒烟 **7/7**；关闭残留 **37 项 / 0 失败**（5 项初测失败已处理，见下） |
+| 安卓代理路径 | `_t_phone_proxy_e2e.py`、`_t_apk_edge.py`、`_t_apk_stab.py` | 代理数据面 **11/11**（限速 21,342/20,000、拥塞 505/512、卫星往返 1,366ms）；边界 27/27；并发/切换/长稳 **11/11** |
+| 真机 tun 数据面 | `_t_apk_tun_real.py` | **12/12**：透明转发正文 sha 逐字节一致；限速 4,137/4,000 kbps；800ms 档首字节 1,760ms（基线 150ms）；5% 丢包正文完整；100% 拒连 80ms、黑洞 18.3s |
+| USB 两端联调 | PC EXE + `adb reverse` → 手机 → PC 引擎 → 9129 源站 | `_t_usb_proxy_e2e.py` **7/7**：隧道连通、代理转发、记账、限速、延迟注入 2.1s、恢复直连 |
+| 安卓关闭残留 | `_t_exit_residue_apk.py` | **29 项 / 0 失败**（A1 后台保留、A3 强停全清、A4 10s 不复活） |
+
+### 发现的问题与处理
+
+**P1｜系统代理接管恒失败（真缺陷，已修）**
+`POST /api/sysproxy {"enable":true}` 返回 `ok=false`，`ProxyEnable` 始终为 0。
+逐字段打点定位到根因：`_notify_proxy_changed()` 的 `InternetSetOption(SETTINGS_CHANGED/REFRESH)`
+会把 `AutoDetect` 注册表值删掉——本机实测 REG_DWORD 0 / REG_SZ "0" / 值 1 全都会被删。
+而 `_sysproxy_takeover()` 的自检要求「写完回读逐字段全等」，于是把整套接管回滚。
+修法：新增 `_reg_same_after_refresh()`，把「AutoDetect 缺失」视为与写入 0 等价
+（缺失即未开启 WPAD）；解除接管时把 AutoDetect 放在最后一次刷新**之后**还原，
+避免把用户原来的 WPAD 设置弄丢。补 2 条假注册表用例（模拟 WinINET 清理）；
+真实注册表上 `set_sysproxy(True)` 由 False 变 True，解除后 `ProxyEnable=0` 且
+`ProxyServer` 原样恢复。这是本轮唯一影响用户功能的缺陷。
+
+**P2｜TCP 会话创建竞态（加固，已修）**
+`VpnNetService` 的 TCP 慢路径 `tcpSessions.get/put` 没加锁（UDP 侧早就用了
+`putIfAbsent`）：同 key 并发 SYN 会造出两个会话，先入表的被覆盖后再无人关闭，
+构造时加的 `connActive` 永久不减；新建会话还可能刚好落在 `stopVpn` 的 clear 之后。
+改为查找/入表共用 `tcpSessions` 锁、用 `putIfAbsent`，竞争失败的会话立即 `close()`。
+注：这不是压测里 `active` 残留的主因（见下），但属于同一类资源所有权漏洞，顺手补齐。
+
+**测试工具自身的 5 处误报（均已修）**
+
+* `_t_exe_smoke.py`：原断言「进程树里不能出现 conhost 父进程」在手机连着时误报。
+  GUI 开启限速会拉起 `adb.exe`，控制台子进程即便用 `CREATE_NO_WINDOW`，Windows
+  **仍会分配一个无窗口的 conhost 宿主**。改为枚举可见窗口并检查 `ConsoleWindowClass`。
+* `_t_exe_fresh.py`：产物路径写死 `dist/WeakNet.exe`，而正式流程是 `--distpath .`
+  （产物在仓库根）。改为支持参数、默认「仓库根 → dist/」。
+* `_t_exit_residue_win.py` W1：全局孤儿扫描抓到 `adb.exe` 常驻 server——adb 的设计就是
+  「客户端拉起 daemon 后退出」，父进程消失属正常形态，不是 WeakNet 泄漏，排除该进程名。
+* `_t_exit_residue_win.py` W5：原场景杀的是 onefile **引导进程**（无窗口），而任务管理器
+  里用户能看到、会去结束的是带窗口的**实体进程**。改为先杀引导（信息记录：实体仍带
+  可见窗口，可正常点 ✕ 退出），再杀实体并断言无残留、端口全释放。
+* `_t_exit_residue_apk.py` A5：判据只认「退出/关闭服务/停止服务」，而 Android 主界面
+  的总开关文案是「▶ 开始弱网测试 / 点此停止」。改为同时认真实文案。
+
+**一条被纠正的测试假设**
+`_t_apk_stab.py` 原断言「长稳后 active==0」。`stats.active` 统计的是 VPN 路径上
+**所有**会话，不只是探针；真机实测仅开启 VPN、不跑任何探针，25 秒内 active 也从
+0 涨到 8（后台微信/QQ/系统服务在建连）。改为校验计数自洽（`0 <= active <= total`）
+并记录实际值。另修了源站响应头：设备探针按固定 37+len(N) 字节算预期，Python
+`BaseHTTPRequestHandler` 默认附加的 Server/Date 头让 8 并发多出 592 B 假失败。
+
+### 环境坑（本轮实测，下次直接照用）
+
+* adb server 在本机沙箱里**每条 Bash 命令结束就退出**：`adb forward tcp:18899 tcp:8899`
+  必须与后续测试写在**同一条命令**里，否则下一条命令连接被拒。
+* 访问 `127.0.0.1:18899` / 本机控制接口前必须清掉沙箱代理变量，否则 Python `urllib`
+  会把请求送给 127.0.0.1:1894，表现为所有请求 `status=0`、用例整片假失败：
+  `env -u http_proxy -u https_proxy -u HTTP_PROXY -u HTTPS_PROXY -u all_proxy -u ALL_PROXY …`。
+* 本机没有 `gh` CLI，发版需走 GitHub REST API（token 从 Windows 凭据管理器
+  `git:https://github.com` 取）；推送仍走 `git@github.com` 经 `ssh.github.com:443`。
+
+### 复测结论
+
+修复后重打 EXE/APK：`_t_exe_fresh.py` 内嵌代码与源码一致；`_t_version.py --require-artifacts`
+16/16；pytest 全量、Java 纯 JDK 套件全绿；关闭残留 Win 37/0、APK 29/0；
+tun 12/12、proxy 11/11、stab 11/11、USB E2E 7/7。
+剩余动作：README 下载表回填新资产大小与指纹 → `_t_release.py --strict` →
+提交 / tag / Push / Release。
+
+## v1.1.20 后续（第十四轮）· 2026-11-27 变异测试与崩溃注入
+
+前十三轮有一个共同前提：**证据都在仓库内、都是单次操作、都由被测代码自己产出**。
+这一轮补它的两个反面：测试本身会不会红（变异测试）、进程在两次写之间消失会怎样
+（崩溃注入）。
+
+### ① 变异测试：把实现改坏，测试抓不抓得住
+
+`tests/_t_mutation.py`，零依赖（不需要 mutmut），`ast` + `tokenize` 在 16 个纯函数
+里生成单点变异（比较符 / `and`·`or` / `not` / 整数 ±1 / 布尔 / 四则），临时树里
+替换 `weaknet.py` 后跑对应测试文件。99 个抽样变异体，单轮 4 分钟。
+
+| 轮次 | 得分 | 幸存 | 结论 |
+|---|---|---|---|
+| 首轮 | 58.6% | 41 | 9 个等价变异、**32 个真缺口** |
+| 次轮 | 81.8% | 18 | 补断言与跑测试并行，数据受污染，不作数 |
+| 第三轮（干净） | **89.9%** | 10 | 全部为已判定等价变异，有效得分 89/89 |
+
+32 个缺口里最值得记的三条：
+
+* **令牌刚好够用时仍睡 1ms**（`remain <= 0` 改成 `<`）：这是「take == remain」的
+  最常见路径，不是边角；2G 档位下每条连接每秒多几十次无谓调度。
+* **正延迟走零延迟快路径**（`delay <= 0` 改成 `<= 1`、入队到期时间 `+` 改 `-`）：
+  三个变异体全存活，因为**没有任何用例量过「正延迟到底等了多久」**。
+* **100 Continue 当最终响应**（`100 <= status` 改成 `<`）：`Expect: 100-continue`
+  的客户端等正文、代理等下一个请求，双向挂死。
+
+还查出探针自己的一个缺陷：为省时间用 `-k` 按测试名收窄，新补的
+`test_rewrite_origin_defaults_to_keepalive` 因名字不含关键字**根本没执行**，
+于是「补了断言仍然 SURVIVED」。改成按文件收窄，单轮 2 分钟涨到 4 分钟换「不漏跑」。
+教训与崩溃探针的 `--legacy` 一致：**探针自己也会说谎，改完探针必须拿已知会红的
+变异体验证它真的会红。**
+
+10 个等价变异逐条给了理由（`split(maxsplit=1)` 只取 `[0]`/`[1]`、非 `cl` 模式的
+长度字段调用方不读、`i >= 0` 时状态行不可能匹配逐跳头名等），写在
+`docs/mutation.md`，避免下次换人再怀疑一遍。
+
+### ② 崩溃注入：写注册表途中被杀
+
+`tests/_probe_crash.py` + `tests/_crash_child.py`：子进程用写穿式假注册表，
+在第 N 次写之后直接 `os._exit(9)`，父进程再起一个新进程走启动恢复路径，
+逐字段比对注册表。20 个场景覆盖失败注入 ×5、PAC 删除被拒、接管中崩溃 ×5、
+还原中崩溃 ×5、回滚中崩溃、记账落盘失败、另一实例存活、记账丢失。
+
+`--legacy` 负对照（换回「全字段匹配才还原」的老逻辑）：**20 个场景 10 个 FAIL**，
+说明探针不是空跑。查出并修了三个问题：
+
+| 级别 | 问题 | 后果 |
+|---|---|---|
+| P0 | 部分接管后被强杀，老逻辑「全字段匹配才还原」不成立 → 删掉记账、一个字段都不还原 | `ProxyEnable=1` + 指向死端口，**整机断网**，且记录已删，再启动也救不回来 |
+| P1 | 恢复时用**本次启动端口**探测，而不是记账里的端口 | 上次跑 8899 且仍存活、这次默认 8888 时，会把活实例的代理配置当残留还原掉，界面显示未接管、弱网实际已失效 |
+| P2 | 锁文件只删「pid == 自己」的 | 强杀留下的死 pid 锁永久残留（不拦下次接管，但属明确残留） |
+| P2 | 建 `adb reverse` 映射与写接管记录之间有窗口（Android 侧） | 窗口内被杀 → 映射留在 adb server、磁盘无记录，残留检测看不见，成孤儿 |
+
+修复后的判定改成「逐字段判归属」：仍等于我们写入值的才还原；代理地址已易主则
+路由三字段（开关 / PAC / 自动检测）一个都不动；端口用记录里的端口探测。
+20 个场景全 PASS。孤儿映射改为「记录先于动作」：先写 `pending` 记录再建映射，
+失败路径用 `_restore_record` 退回上一次的记录，`disconnect()` 对 pending 也撤
+映射，记录写不进去则中止接管（`docs/ownership.md` O5，5 条用例）。
+
+### 收尾：三处小修（同日）
+
+- **孤儿反向映射（P2）**：见上表最后一行。`usb_phone.connect` 改为「先写
+  `pending` 记录 → 建映射 → 升级为正式记录」，失败路径用 `_restore_record`
+  退回上一次记录，`disconnect()` 对 pending 也撤映射；记录写不进去则中止接管。
+  5 条假 adb 用例（`tests/test_unit_usb_takeover.py`）。
+- **`Pipe.java` 注释乱码**：v1.1.17（`c09ce68`）引入的双重编码，5 行注释里的中文
+  变成 `æ¡¶å®¹é`。已恢复；`git diff` 恰好 5 增 5 删，未动任何代码。
+- **`docs/precision.md` §4.6 过期标题**：标题仍写「两端不一致（未修，需产品决策）」，
+  正文与代码（`Pipe.Bucket.BURST_SEC = 0.25`、`cap() = rate × BURST_SEC`）早已
+  对齐。改为「两端已对齐（2026-11-14）」，保留对齐前的 +24% / +98% 作历史对照。
+
+### 边界用例：把「已知限制」也钉住（同日）
+
+三条明确不修 / 做不到的边界，之前只在文档里写着。补上 characterization 用例后，
+它们从「口头承诺」变成「改坏了会红」：
+
+- `test_stopped_draft_is_memory_only_across_restart`（W12）：草稿不进 settings、
+  冷启动后 `pending_profile` 为空；设置本身仍保留。
+- `test_takeover_never_writes_connections_blob`：接管 / 还原前后
+  `Connections\DefaultConnectionSettings` 逐字节不变，且不在 `SYSPROXY_REGS`。
+- `test_lost_record_falls_back_to_disable_only`：记账丢失后还原阶段只写
+  `ProxyEnable=0`，原 `ProxyServer` / `ProxyOverride` / PAC / 自动检测不猜、不还原。
+
+这三条不是「证明功能正确」，而是**证明边界没有悄悄移动**：任何一条变红都意味着
+行为变了，必须同步文档、迁移方案或 KNOWN 标记。
+
+### 本轮回归
+
+pytest 收集 563 项 / 562 通过 / 1 失败 —— 仅 `test_golden_script[version]` 的
+C5/C6（EXE/APK 产物比源码旧，按约定本轮不重打产物）；`ruff check` 全绿；
+`_t_expect` 34 模块 1181 条断言全登记；崩溃探针 20/20 PASS；变异 89/99。
+
+### 仍未覆盖
+
+变异测试只覆盖 16 个纯函数，asyncio 转发主循环 / GUI / 注册表接管 / Android 侧
+没有变异体；崩溃注入只覆盖系统代理这一条外部写路径（USB 反向映射的崩溃窗口
+改用假 adb 单测覆盖，不在探针里；adb 转发未做）。两者都写进了 `docs/mutation.md`
+与 `docs/crash.md` 的「局限」。
+
+## v1.1.20 后续（第十三轮）· 2026-11-27 测试期望独立推导（第五件）
+
+前四件分别看操作序列、资源所有权、平台默认值、发布数字。这一件不看代码，
+看**测试自己凭什么算对**。
+
+起因是第八轮复盘里最刺眼的一条：`scene_sequence` 把 `A→B→A` 去重成 `A→B`，
+而测试里写着 `assert seq == ["A", "B"]` —— 实现是怎么做的，期望就怎么写的，
+所以它一直是绿的。测试全绿只能证明「实现与期望一致」，不能证明「实现是对的」。
+
+**盘出来的结果**（34 个 pytest 模块、1071 条断言）：
+
+| 类 | 规模 | 典型 | 能发现「值错了」吗 |
+|---|---|---|---|
+| 常量镜像 | 17 组 | `body["spec_hash"] == W.SPEC_HASH` | 不能；靠锚点用例负责 |
+| 公式镜像 | 1 组 | `step_seconds(x) == STEP_MAX_MINUTES * 60 + ...` | **不能，且没有锚点** |
+| 恒真断言 | 0 条 | `assert x == x` | 不能 |
+| 文案快照 | 292 处（27%） | `assert "下行延迟" in text` | 不适用（措辞契约） |
+| 现状契约 | 1 处 | `drains == 3`（每块都 drain） | 不能；有 A/B 实测背书 |
+
+17 组常量镜像逐组登记了「这个值本身谁保证」：管线回显 5 组、规格真值 6 组、
+跨端对拍 3 组、产品决策 / 不变量 3 组。没有一组是「实现就是这么写的」。
+
+**真修的一处**：`test_unit_profile.py::test_step_duration_helpers` 把上限公式抄了
+一遍 —— `step_seconds(9999, 9999) == STEP_MAX_MINUTES * 60 + STEP_MAX_SECONDS`。
+spec 里的上限从 600 分改成 300 分，这条断言会跟着一起变，永远绿。改成字面量
+`36059`，改上限必须有人来解释为什么。
+
+**机制**：新增 `tests/_t_expect.py`，六条规则 —— X1 覆盖（每个测试模块必须登记
+真值来源）、X2 可解析（来源必须是真实文件 / RFC 编号 / 已定义标签）、X3 恒真、
+X4 未登记的镜像断言、X5 登记表过期、X6 抄实现公式。来源分九类：规格真值、
+协议真值、平台真值、实测真值、跨端对拍、产品决策、文案快照、管线回显、现状契约。
+
+**登记不是豁免**：登记项必须回答「这个值谁保证」，只能答「实现就是这么写的」
+就不该登记，应该改成字面量或从 spec 推导。
+
+**诚实的边界**（已写进 `docs/test-truth.md`）：检查器抓不到照着输出抄的字面量
+（`scene_sequence` 那次就是）、文案快照里的语义错误、两端一起错、以及根本没写的
+断言。这几类只能靠真机抓包、协议栈对照和变异测试，不是加规则能解决的。
+
+**验证**：pytest 收集 528 项 / 527 通过 / 1 失败（仅 `test_golden_script[version]`
+的 C5/C6 产物时效，未重打包属预期）；ruff `All checks passed!`；新增
+`tests/test_unit_expect_truth.py` 15 项，逐条证明 X1–X6 真的会红（含「登记表过期」
+和「字面量期望不该误报」）；`python tests/_t_expect.py --list` 输出 34 个模块的来源
+清单。CI 的 `unit-tests` job 在 pytest 之前先跑一遍该检查。
+
+## v1.1.20 后续（第十二轮）· 2026-11-27 发布真值脚本进 CI（第四件）
+
+前三轮都在读代码找分支不自洽。这一轮对付的是另一种缺陷：**文档里的数字是错的，
+而所有测试都是绿的**。第八轮就是这么发现 README 下载表两个资产的 SHA-256 全错
+（`9d80713c…` / `04e00ff5…`，真实值是 `9229043b…` / `2a9901b6…`）——那会儿 462 项
+回归全过，因为没有任何一条断言碰过 README。这类值的真值只存在于 Release API，
+仓库里没有副本，靠人眼看永远看不出来。
+
+**做法**：新增 `tests/_t_release.py`，分三段。
+
+| 段 | 时机 | 查什么 |
+|---|---|---|
+| R 自洽 | 离线 | 首页版本 == `version.py`；两条下载链接指向同一 tag 且等于该版本；短指纹是 16 位小写 hex 且真是 `<details>` 里完整摘要的前缀；不用 `/releases/latest/download/`（链接会随发版漂移） |
+| L 结构 | 离线 | `_jw/run.sh` 的 `for T in ...` 与磁盘上的 `_*Test.java` **双向**对齐；`docs/testing.md` 声称的套件数 == 实际 |
+| A 真值 | 联网 | Release API 的 tag 非草稿、表格里每个文件都在资产里、字节数与表格大小一致、`digest` 与短指纹和完整摘要都一致、下载链接就是该资产地址 |
+
+L 段的价值不在数字好看：**新增一个 `_*Test.java` 却忘了写进 `run.sh`，它会永远不跑，
+而 CI 依然全绿**。这类静默漏测只能靠双向对齐发现。
+
+**三种模式**：默认只跑 R+L（任何环境都能跑）；`--online` 加跑 A，README 指向的 tag
+尚未发布时记 SKIP —— 「先提版本号、过几天再发版」是正常流程，不该让每次 push 变红；
+`--strict` 要求 tag 已发布且就是最新正式版，供发版清单和 `release: published` 用
+（能发现「发了新版但 README 还指着上一版」）。另有 `--download`：API 不返回
+`digest` 的老 GitHub Enterprise 上直接下载资产算 sha256。
+
+**CI**：新增工作流 `.github/workflows/release-truth.yml`，`push` / `pull_request`
+仅在 README、docs、版本号、run.sh、脚本自身变化时触发（跑离线段）；`release: published`
+与每周定时跑联网段，发版事件额外跑 `--strict`。普通 push 不跑联网段，否则版本号提前
+提升的那几天会天天红。
+
+**上线当次就抓到一处**：`docs/testing.md` 还写「26 套测试类」，实际已是 27 套
+（上一轮新增 `_RunSharePoolTest` 后没同步）。L3 直接判红，已改为 27。
+
+**脚本自己也要能失败**：新增 `tests/test_unit_release_truth.py` 12 项，用拼出来的
+坏 README 逐条验证判定会红——指纹对不上、完整摘要非 hex、缺 `<details>`、短指纹不是
+16 位、链接落后于版本号、`/releases/latest/download/`、大小四舍五入边界。另做了一次
+真实变异：把第八轮那个错值 `9d80713c00000000` 写回 README 第 31 行，R8 与 A5 同时
+判红（`文档 9d80713c00000000 / 资产 9229043b12d93705`），确认它抓得住当初漏掉的那个缺陷。
+
+**本轮验证**：
+
+- `python tests/_t_release.py --online`：**25 通过 / 0 失败 / 0 跳过**
+  （EXE 10.38 MB / `9229043b…`、APK 225 KB / `2a9901b6…` 与 Release 逐项一致）
+- pytest：收集 **512** 项 / **511 通过 / 1 失败**（仍只有
+  `test_golden_script[version]` 的 C5/C6 产物时效，未重打包属预期）
+- ruff：`All checks passed!`
+- Java 纯 JDK：27 套 **433 项 PASS / 0 FAIL**（本轮未改 Java 代码，数字与上轮一致）
+
+**边界**：`digest` 是 GitHub 2025 年才在 Release API 稳定提供的字段；更早的
+GHES 需要 `--download`。联网段在无 token 时会撞 60 次/小时的匿名限流，CI 里已注入
+`GITHUB_TOKEN`。本机若有会改写证书的代理（企业网 / 抓包工具），`urllib` 必然报
+`CERTIFICATE_VERIFY_FAILED` 而 `curl` 正常 —— 这是代理的中间人证书不在 Python 的
+信任库里，脚本给出明确提示并支持 `--no-proxy` 直连，**不提供「跳过证书校验」的开关**。
+
+## v1.1.20 后续（第十一轮）· 2026-11-27 平台默认值清单（第三件）
+
+前两轮看「操作序列」和「资源所有权」，这一轮看**默认值**：凡调平台 API 或依赖协议
+规范，先把「不显式设置时是什么」查成可引用的原文，再对照代码。完整清单（9 项
+`VpnService.Builder`、5 项运行时、10 项 HTTP、3 项 DNS，共 27 条）与来源见
+[`docs/platform-defaults.md`](platform-defaults.md)。
+
+**命中 9 项（HTTP 6 + Android 3）**：
+
+- **H1（P1）请求同时带 TE+CL，CL 原样转给上游**。RFC 9112 §6.3 第 3 步要求中间件
+  **先删 CL 再转发**；原样透传等于把走私形态递给上游——上游按 CL 定界就会把 chunk
+  头当正文、剩余字节当下一个请求。修：转发前删 CL；响应后强制关客户端连接（§6.1）。
+- **H2（P1）`Expect: 100-continue` 被降级成裸隧道，上游不发 100 时双向死锁**。
+  原调用方把带 Expect 的请求交给 `run_tunnel`，注释写「客户端会等 100，先读正文会
+  死等」；但上游若也不主动发 100，客户端等 100、源站等正文，两边互等到超时
+  （集成测试实测 8s 无响应）。修：代理自己承担应答——删 `Expect`、向 HTTP/1.1
+  客户端立即回 `100 Continue`、再读正文。
+- **H3（P2）响应 TE+CL 并存时 CL 原样下传**。客户端按 CL 读完就停，chunked 的结尾
+  留在连接里，下一条响应必然错位。修：响应带 TE 就删 CL。
+- **H4（P2）TE 用子串判定**。`Transfer-Encoding: chunked, gzip` 里 chunked 不是最后
+  一个编码，按 §6.3 第 4 步只能读到关闭；`b"chunked" in te` 会判成分块。
+- **H5（P2）HEAD 与 1xx 判定顺序反了**。先判 `method == HEAD`，对 HEAD 的 103 被当成
+  最终响应发完就等下一条请求，真正的 200 留在上游缓冲。
+- **H6（P2）非法 CL 没有 400**。非数字/负数/多个不一致的值，按 §6.3 第 5 步必须 400；
+  原实现当成「有体」继续，残留字节被当成下一条请求。
+- **H7（P2）`setMetered` 默认把 VPN 标成计费网络**。targetSdk 33，官方文档明确
+  「Q 及以上的 VPN 默认被视为 metered」；App 会据此降码率、推迟后台传输、切
+  Data Saver —— 测出来的是「系统告诉 App 这是计费网」之后的表现。修：
+  `setMetered(false)`，并加 API 29 判断（minSdk 24，否则低版本 `NoSuchMethodError`）。
+- **H8（P2）DNS 首选 8.8.8.8 在国内不可达**。不是 SDK 默认值，而是「8.8.8.8 通用」
+  这个隐含假设：它排第一时，每个未命中缓存的解析都要先等它失败。修：
+  223.5.5.5 + 119.29.29.29。
+- **H9（P2）`ShareNet` 用无界线程池**。`Executors.newFixedThreadPool` 内部是
+  无界 `LinkedBlockingQueue`，慢客户端多时任务无限堆积。修：4 线程 + 64 容量有界
+  队列 + `AbortPolicy`，拒绝时立即关连接。
+
+**同时校正文档两处**：`README` / `docs/precision.md` 原写「部分系统会阻断 IPv6」，
+按 SDK 原文应为「某地址族没有任何地址/路由/DNS 时该族出站被确定性阻断」；
+`docs/verification.md` 第九轮（操作序列矩阵）的章节标题在上一轮插入时被吞掉，
+正文挂在第十轮末尾，已补回。
+
+**本轮验证**：
+
+- pytest：收集 **500** 项 / **499 通过 / 1 失败**（仅
+  `test_golden_script[version]` 的 C5/C6 产物时效，未重打包属预期）。
+  新增 `tests/test_unit_http_framing_rules.py` 13 项，
+  `tests/test_integration_http_framing.py` 增 6 项（真实 socket：TE+CL、响应删 CL、
+  100-continue、HEAD+103、非法 CL、TE 非 chunked）。
+- ruff：`All checks passed!`
+- Java 纯 JDK：**27 套 / 433 项 PASS、0 FAIL**。新增 `_RunSharePoolTest` 6 项。
+- 契约：`_t_spec_parity` 23/23、`_t_api_parity` 12/12。
+- 未做：真机复测（`setMetered` / DNS / IPv6 阻断三项需设备确认）、重打包。
+
+## v1.1.20 后续（第十轮）· 2026-11-27 资源所有权四问（第二件）
+
+第九轮看「操作 × 操作」，这一轮看「资源」。对系统代理注册表、ADB 反向映射 +
+手机代理、TUN 路由、监听端口逐个问四件事：谁写 / 写前存不存原值 / 释放前比对
+不比 / 部分失败怎么回滚。方法、判定表与遗留风险见 [`docs/ownership.md`](ownership.md)。
+
+**TUN 路由与监听端口四问全过，本轮不改**。命中三项：
+
+- **O1 系统代理只中和静态代理，没中和 PAC（P1，静默失效）**。字段清单只有
+  `ProxyEnable / ProxyServer / ProxyOverride`，而 WinINET 用
+  `INTERNET_OPEN_TYPE_PRECONFIG`（Chrome / Edge / .NET 默认）时的解析顺序是
+  `AutoConfigURL（PAC）→ AutoDetect（WPAD）→ ProxyServer`。企业网开 PAC 的用户
+  接管后仍走 PAC，界面显示「已接管」、实际一点弱网都没加，且不报错。
+  修法：`SYSPROXY_REGS` 扩到 5 字段，接管时删 `AutoConfigURL`、置
+  `AutoDetect=0`；释放按所有权还原，代理地址已易主时这组路由决策字段一个都不动。
+- **O2 USB 强杀后重连，把自己写的值当用户原值（P1，原配置永久丢失）**。
+  `connect()` 无条件 `read_proxy` 当快照：重启后读到的是上次写的
+  `127.0.0.1:P`，断开时再还原成它，用户真正的公司代理彻底丢失，现象只是
+  「断开后手机没网」。系统代理早有 `if sysproxy_owned(): prev = 旧 prev`，
+  手机侧没有对应实现。修法：记录的 proxy 与手机当前值一致时沿用旧 `prev`，
+  并继承 `reverse_created`（上次建的映射还活着要认领，否则断开不撤）。
+- **O3 USB 残留没有跨进程发现机制（P2，可观测性）**。系统代理有
+  `release_stale_sysproxy`，手机侧没有。记录加 `pid`，`stale_serials()` 返回
+  死进程的记录，GUI 刷新设备时提示并自动选中在线残留那台；不自动清理
+  （改手机设置必须用户确认，且会拆掉另一实例的接管）。
+
+**兼容处理**：v1.1.20 的记账只有 3 个键。`sysproxy_owned` /
+`release_stale_sysproxy` / `_sysproxy_release` 一律只比对「记录里有的字段」，
+缺的按「当初没动过」跳过；再次接管时用当前注册表值补齐 `prev`，避免把用户
+真实的 PAC 当成自己写的删掉。
+
+**验证**：pytest 收集 481 项 / 480 通过 / 1 失败（仅 `test_golden_script[version]`
+的 C5/C6 产物时效，未重打包属预期）；ruff `All checks passed!`；Java 纯 JDK
+26 套 **428 项 PASS / 0 FAIL**。新增 `tests/test_unit_sysproxy.py` 7 项（PAC
+中和 / PAC 还原 / 易主时不装回 PAC / 旧记账兼容 / PAC 删不掉时报失败并回滚 /
+PAC 下换端口重接管 / 旧记账补齐不误删 PAC）、`tests/test_unit_usb_takeover.py`
+7 项（强杀重连保留原 `prev` / 认领自己的映射 / 不认领别人的 / 三种
+`stale_serials` / pid 记账）。
+
+**遗留**：`DefaultConnectionSettings` 二进制 blob 未纳入记账（实测系统会同步
+散值，但不是契约）；PAC 用户接管期间失去内外网分流；手机残留只提示不自动清理。
+
+
+
+## v1.1.20 后续（第九轮）· 2026-11-27 操作序列矩阵（第一件）
+
+前八轮都是「读函数找分支不自洽」。这轮换提问方式：列出 12 个有副作用的操作，
+按它们共享的资源两两判定「先后执行会怎样」。方法、资源表与逐格结论见
+`docs/op-matrix.md`，探针 `tests/_probe_ops.py` 可复跑。
+
+**命中 3 项（双端同构修复）**：
+
+- **S1 运行中调参 → 停止 → 再开启，参数回退到预设**。实测：`4g` 把延迟调到 800 →
+  关闭 → 再开启，回到预设 60ms，前后两次测的不是同一套参数。修法：`set_limit(False)`
+  关闭前把当前生效参数存成草稿（组合 key 除外，下一段由播放器重新给）。
+  Android `setLimitOn(false)` 同构。
+- **S2 运行中切「直连」，开关仍显示开启**。`select_scene` 末尾无条件
+  `limit_on = True`，而参数已被清成全零 —— 界面/API 显示弱网、实际零限制，
+  导出报告还会把直连流量当成弱网结果。修法：按 `has_limits(prof)` 落开关；
+  Android `selectScene` 同构。
+- **S3 开启时目标组合已失效、又无历史场景可回落，开关停在开启**。兜底分支把
+  `limit_on` 置 True 而 `last_profile` 为空 → 同样的「假开启」。修法：兜底按
+  `has_limits(G.profile)` 落；Android `resumeIfCombo` 同构。
+
+**判定为安全 / 入口已处理的格**（不重复改）：系统代理所有权与残留、USB 按 serial
+记账与退出还原、监听重绑失败恢复、组合播放先 `stop_combo`、并发开关最后一次生效、
+删除组合的两个入口各自停播。
+
+**已知限制**：停止态草稿只在内存（退出即丢）；`delete_combo` 不负责停播，依赖调用方。
+
+**本轮验证**：
+
+- `pytest`：467 项收集，466 通过 / **1 失败**——`test_golden_script[version]` 的
+  C5/C6「产物比源码新」，未重打包属预期。
+- `ruff`：All checks passed。
+- Java 纯 JDK：26 套 / **428 项 PASS、0 FAIL**（新增 8 项序列断言）。
+- 探针：`tests/_probe_ops.py` 12 组序列，S1/S6/S14 三项修复前后对比由红转绿。
+- 未做：EXE/APK 重打、真机复测。
+
+## v1.1.20 后续（第八轮）· 2026-11-27 外部审查（`WeakNet-缺陷审查与优化建议`）修复
+
+外部审查以 `63f8830` / v1.1.20 为基线，覆盖接管与退出、转发、报告与发行。第七轮已落地的
+项目（系统代理记账、USB 回滚、Android 范围与停止竞态、组合空转、HTTP 报文定界、断网门闸、
+UDP 截断/分片、TCP 半关闭与下行池、双水位延迟）本轮逐项复核确认在位；下面是本轮新增修复。
+
+### 报告与发行
+
+- **报告按测试会话统计**：新增会话基线（`test_seq / test_started_at / test_base / test_fault_base`）。
+  `set_profile` 从「未开启」变为「开启」时打点，同一次测试内切场景不重置；`status_payload`
+  输出 `session` 增量，报告的有效性判定、连接/字节统计只读增量，另列引擎累计值作参考。
+  实测：引擎累计 12 条历史连接、本次零流量 → 判「不能用于评估弱网效果」并提示历史不计入。
+- **故障计数脱离环形缓冲**：`log_event` 落事件时按五类故障累计（`G.fault_cum`），
+  `full_fault_counts()` 的故障键改用累计值；报告再按会话基线取本次增量。长测时早期故障
+  不再被 300 条环形缓冲挤掉。Android 端同构（`WeakNet.faultCum` / `sessionMap()`）。
+- **场景序列保留 A→B→A**：`scene_sequence` 只去相邻重复，切回旧场景复测不再被全局去重吞掉。
+- **README 校验值**：按 Release API 的实际资产摘要修正（EXE 10,883,116 B
+  `9229043b…`、APK 230,436 B `2a9901b6…`）；此前贴的是本机重打产物指纹。
+  `_t_version.py` 新增 `--require-artifacts`：正式发版缺产物直接失败；`docs/build.md`
+  补发布前检查清单（回下载重算 SHA-256）。
+
+### 接管与转发
+
+- **局域网监听重绑**：`restart_proxy` 改为先绑新地址、成功后再关旧监听；同端口换绑失败时
+  先关旧再试，仍失败则恢复旧监听并抛错。GUI 按返回值提示，不再「绑失败也说已开启」。
+- **保活下行活动时间**：`_send_down` 每块写成功后 `ctx.touch()`，持续长下载不再被空闲回收
+  当成挂死连接误杀（60s 阈值）。
+- **停止态编辑**：两端保存草稿（`G.pending_profile` / `WeakNet.pendingProfile`），
+  开启时优先按草稿生效，`custom` 不再回落到旧场景或全零；草稿落地后清空，避免旧值覆盖
+  测试中新调的参数。
+- **IPv6 如实声明**：顶栏、README、`docs/precision.md` 与双端报告统一写明「IPv4 TCP/UDP
+  接管；IPv6 不接管、不施加弱网，部分系统会阻断纳管 App 的 IPv6 出站」，不再声称
+  「IPv6 走真实网络」。
+
+### CI 与门禁
+
+- **功能回归独立必过**：新增 `unit-tests` job（windows-latest，全量 pytest），不再塞在
+  `perf-quick` 的 `continue-on-error` 里；性能子集仍只提示、不拦合并。
+
+### 本轮验证
+
+- `pytest`：462 项收集，461 通过 / **1 失败**——`test_golden_script[version]` 的 C5/C6
+  「产物比源码新」。本轮改了源码但按约定未重打包，属预期；其余均通过。
+- `ruff`：All checks passed。
+- Java 纯 JDK：26 套 / **420 项 PASS、0 FAIL**（新增报告会话与停止态草稿断言）。
+- 契约脚本：`_t_spec_parity` 23/23、`_t_api_parity` 12/12。
+- 未做：EXE/APK 重打、真机复测（Android 报告会话与草稿逻辑仅纯 JVM 验证）。
 
 ## v1.1.20 后续（第七轮）· 2026-11-27 第六次从零审查修复（未发版）
 
@@ -287,9 +748,10 @@ PIN 仍随 UDP 广播下发（去掉需用户手动录入，增加门槛）—�
 ## v1.1.20 · 2026-11-20 可解读报告 + 悬浮窗交互修复版
 
 发布页：<https://github.com/45944831/weaknet/releases/tag/v1.1.20>（tag `v1.1.20`）。
-产物 EXE 10,871,576 B / `9d80713c6761e6d4…`、APK 222,244 B / `04e00ff5c3d4526f…`
-（**发布指纹 = Releases v1.1.20 现有资产**，不是本机重打产物；本机重打产物的指纹与大小见
-文首「第六轮」，每次重打都会变，两者不同属正常）。
+产物 EXE 10,883,116 B / `9229043b12d93705…`、APK 230,436 B / `2a9901b698aebf86…`
+（**发布指纹 = Releases v1.1.20 现有资产**，2026-11-27 按 Release API 的实际资产摘要校正；
+此前记录误贴了本机重打产物。本机重打产物的指纹与大小见各轮验证记录，每次重打都会变，
+两者不同属正常）。
 规格 hash 未变（`9990e03d`），版本 v1.1.20 / build 130。
 
 ### 新增：两端测试报告与「解读总结（给开发）」

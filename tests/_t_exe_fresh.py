@@ -27,7 +27,13 @@ import zlib
 
 
 
-EXE = os.path.join(ROOT, "dist", "WeakNet.exe")
+# 正式产物按 docs/build.md 直接落在仓库根（--distpath .）；
+# 旧的 dist/ 是 PyInstaller 默认输出目录，留着兼容老流程。
+_CANDIDATES = [sys.argv[1]] if len(sys.argv) > 1 else [
+    os.path.join(ROOT, "WeakNet.exe"),
+    os.path.join(ROOT, "dist", "WeakNet.exe"),
+]
+EXE = next((p for p in _CANDIDATES if os.path.isfile(p)), _CANDIDATES[0])
 SRC = os.path.join(ROOT, "weaknet.py")
 MAGIC = b"MEI\014\013\012\013\016"
 

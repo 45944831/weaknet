@@ -1034,6 +1034,18 @@ def delete_user_preset(pid):
     left = [it for it in items if it["id"] != pid]
     if len(left) == len(items):
         return False, items
+    # 删之前先看谁在用：这些组合里的对应段会变成空段，循环组合甚至可能整轮无段可播。
+    # 不提示的话，用户只会发现「我的组合播不动了」，却找不到原因。
+    try:
+        hits = combos_using_scene(pid)
+        if hits:
+            log("[WeakNet] 删除场景后，以下组合有段失效：%s"
+                % "；".join("%s（第 %s 段）" % (h["name"], ",".join(map(str, h["steps"])))
+                            for h in hits))
+            log_event("config", "删除场景影响 %d 支组合：%s"
+                      % (len(hits), "、".join(h["name"] for h in hits)))
+    except Exception:
+        pass
     G.user_presets = left
     ok = _dump_user_presets(left)
     if not ok:
@@ -1245,6 +1257,54 @@ def combo_summary(combo):
     return " → ".join(parts) + tail
 
 
+def combo_missing_refs(steps):
+    """列出引用了「不存在场景」的段号（1 起）。空列表 = 每段都能解析。
+
+    自定义场景是按本机 id 存的，换机器、删场景、版本降级都会让 key 悬空。
+    保存时不校验，用户就会存下一支「看着排好了、播起来全是空的」组合。
+    """
+    bad = []
+    for i, s in enumerate(steps or [], 1):
+        try:
+            key = str((s or {}).get("key") or "").strip()
+        except Exception:
+            continue
+        if not key:
+            continue
+        try:
+            scene_profile(key)
+        except Exception:
+            bad.append(i)
+    return bad
+
+
+def combo_playable_steps(combo):
+    """组合里当前还能播的段号（0 起）。场景已被删除的段不在其中。"""
+    out = []
+    for i, st in enumerate((combo or {}).get("steps") or []):
+        try:
+            scene_profile((st or {}).get("key"))
+        except Exception:
+            continue
+        out.append(i)
+    return out
+
+
+def combos_using_scene(pid):
+    """哪些组合引用了这条自定义场景 → [{"id","name","steps":[段号, 1 起]}]。
+
+    删场景前先问这一句：删掉之后那些段会变成空段，循环组合甚至可能整轮无段可播。
+    """
+    key = USER_PRESET_KEY_PREFIX + str(pid)
+    hits = []
+    for c in get_combos():
+        idx = [i for i, s in enumerate(c.get("steps") or [], 1)
+               if str((s or {}).get("key") or "") == key]
+        if idx:
+            hits.append({"id": c["id"], "name": c["name"], "steps": idx})
+    return hits
+
+
 # --------------------------------------------------------------------------
 # 共享契约：一段里引用的场景，对方机器上未必存在
 #
@@ -1358,6 +1418,11 @@ class G:
     # 流量原样转发。用户必须显式开启（点「开启限速」或选一个场景）才生效。
     limit_on = False
     last_profile = None                # 最后一次生效过的场景（「再次开启」时复原用）
+    # 停止态编辑的草稿：没开启限速时选场景 / 调参数只记在这里，点「开启」时
+    # 按它生效。旧实现只记 preset_key，custom 这一类没有预设可查，开启时会
+    # 回落到 last_profile 或默认值，用户刚调好的参数被静默丢掉。
+    pending_profile = None
+    pending_key = ""
     gate_open = True
     events = deque(maxlen=300)
     event_seq = 0               # 事件序号：deque 满了以后 len 不再变化，界面靠它判断有没有新事件
@@ -1365,6 +1430,19 @@ class G:
     conns_active = 0
     bytes_up = 0
     bytes_down = 0
+    # ---- 本次测试会话（报告口径）----
+    # 上面四个是引擎生命周期累计值：直接拿它出报告，会把「开始测试之前的历史
+    # 流量」算成本次样本 —— 引擎跑过一次连接后，哪怕本次开着场景一条新流量
+    # 都没有，报告也会判「有效」。每次从「未开启」变为「开启」时打一份基线，
+    # 报告只读增量；同一次测试里切场景不重置。
+    test_seq = 0                 # 会话号，0 = 还没开始过测试
+    test_open = False            # 当前是否处于一次测试会话内
+    test_started_at = 0.0        # 会话开始的墙上时间（报告里展示）
+    test_base = {}               # total/up/down/bypass 的基线
+    test_fault_base = {}         # type -> 基线（见 fault_cum）
+    # 故障累计：事件环形缓冲只有 300 条，长测时早期故障会被连接/错误事件挤掉，
+    # 从环形缓冲重算会漏报。这里按类型累计，永不回绕。
+    fault_cum = {}
     active = set()            # 在途 writer，整体断网时掐断
     contexts = set()          # 在途连接上下文，空闲回收用（ConnCtx.register/cleanup 维护）
     flap_task = None
@@ -1381,7 +1459,11 @@ class G:
     profile_gen = 0
     # 原先散落在模块级的几个可变状态收进 G，随应用生命周期统一管理/复位。
     proc_name_cache = {"at": 0.0, "map": {}}   # pid -> exe 名，带 TTL
-    prev_proxy = None           # 首次接管前备份的原始系统代理值，解除时还原
+    # 系统代理接管的进程内镜像（权威副本在 weaknet_sysproxy.json，见 set_sysproxy）。
+    # sysproxy_prev 是接管前的原始值，sysproxy_written 是本次写进去的值 ——
+    # 只有后者与注册表当前值完全一致，才认为「这份配置还归我们管」。
+    sysproxy_prev = None
+    sysproxy_written = None
     sysproxy_on = False         # 当前是否是本工具开启的系统代理
     # 接管范围：all=全部程序 / only=仅下列程序 / exclude=排除下列程序
     scope_mode = "all"
@@ -1445,11 +1527,19 @@ def set_scope(mode, names):
     return G.scope_mode, G.scope_list
 
 
+# 会被累计计数的故障类型（与 report_gen.FAULT_TYPES 对齐）。
+# 放在 log_event 之前定义：它要在每条事件落库时就累加，不能等报告阶段
+# 再从 300 条环形缓冲重算——长测时早期故障会被后来的连接事件挤掉。
+_CUM_FAULT_TYPES = ("disconnect", "dns", "timeout", "reject", "flap")
+
+
 def log_event(etype, msg):
     """记一条事件：进内存 deque（GUI/接口实时看）+ 缓冲日志（落盘，事后排查用）"""
     G.event_seq += 1
     G.events.append({"seq": G.event_seq, "t": time.strftime("%H:%M:%S"),
                      "type": etype, "msg": msg})
+    if etype in _CUM_FAULT_TYPES:
+        G.fault_cum[etype] = G.fault_cum.get(etype, 0) + 1
     try:
         if _LOG_SINK is None:
             globals()["_LOG_SINK"] = _LogSink(LOG_FILE)
@@ -1491,80 +1581,498 @@ async def nap(seconds, gen):
 # Windows 系统代理一键接管（免手动设置）
 # --------------------------------------------------------------------------
 
+# --------------------------------------------------------------------------
+# Windows 系统代理一键接管（免手动设置）
+#
+# 注册表里只有「当前代理是谁」，没有「谁改的」。所以接管状态必须自己记账，
+# 否则两个后果都会真实发生：
+#   1) 用户本来开着公司代理，打开本工具随即退出 —— 退出时无条件把 ProxyEnable
+#      置 0，公司代理被关掉，而用户完全不知道是谁干的；
+#   2) 进程被强杀后原始配置只留在内存里 —— 下次启动只能靠「回环地址 + 端口」
+#      的子串去猜残留，猜错就误改别人的代理，猜漏就整机断网。
+# 记账文件 weaknet_sysproxy.json 与 weaknet_settings.json 同目录。
+# --------------------------------------------------------------------------
+
+SYSPROXY_STATE_NAME = "weaknet_sysproxy.json"
+SYSPROXY_LOCK_NAME = "weaknet_sysproxy.lock"
+# 接管要动的字段全集。AutoConfigURL / AutoDetect 看着与我们无关，其实是致命的：
+# WinINET 用 INTERNET_OPEN_TYPE_PRECONFIG 开会话时（Chrome / Edge / .NET 默认都是），
+# 解析顺序是「先自动配置（PAC）→ 再自动检测（WPAD）→ 最后才是静态代理」。
+# 只写 ProxyServer 而不中和这两个，企业网里 PAC 一到手就把流量接管回去，
+# 界面显示「已接管」、实际一点弱网都没加 —— 静默失效，比报错难查得多。
+SYSPROXY_REGS = ("ProxyEnable", "ProxyServer", "ProxyOverride",
+                 "AutoConfigURL", "AutoDetect")
+# 这组是「路由决策」字段：它们决定系统最终走不走我们写的 ProxyServer。
+# 一旦 ProxyServer 被别人改走，说明整套代理配置已经易主，这组字段不能再还原 ——
+# 否则会把别人「PAC 已关」的静态代理重新变成「PAC 优先」，等于让他的配置失效。
+SYSPROXY_ROUTE_REGS = ("ProxyEnable", "AutoConfigURL", "AutoDetect")
+SYSPROXY_OVERRIDE = "localhost;127.*;<local>"
+_REG_PATH = r"Software\Microsoft\Windows\CurrentVersion\Internet Settings"
+
+
+def _sysproxy_sidecar(name):
+    """接管记账 / 锁文件的位置（与自定义场景、设置同一套候选目录）"""
+    try:
+        return _preset_files()[0].with_name(name)
+    except Exception:
+        return Path(name)
+
+
+def _reg_snapshot(k, names):
+    """读一组注册表值 → {name: [值, 类型]}；字段不存在记 None。
+
+    「不存在」与「存在但为空串」必须分开记：还原时前者要 DeleteValue，后者
+    要写回空串。混成一种就会给用户凭空造出一个原本不存在的代理配置。
+    """
+    import winreg
+    out = {}
+    for n in names:
+        try:
+            v, t = winreg.QueryValueEx(k, n)
+            out[n] = [v, int(t)]
+        except OSError:
+            out[n] = None
+    return out
+
+
+def _reg_current(names=SYSPROXY_REGS):
+    """当前注册表快照；打不开键返回 None（与「全是空」区分开）。"""
+    import winreg
+    try:
+        k = winreg.OpenKey(winreg.HKEY_CURRENT_USER, _REG_PATH)
+    except Exception:
+        return None
+    try:
+        return _reg_snapshot(k, names)
+    finally:
+        try:
+            winreg.CloseKey(k)
+        except Exception:
+            pass
+
+
+def _reg_same(a, b, name):
+    """两个快照在同一字段上是否完全一致（值 + 类型；不存在 == 不存在）。"""
+    va = (a or {}).get(name)
+    vb = (b or {}).get(name)
+    if va is None or vb is None:
+        return va is None and vb is None
+    try:
+        return str(va[0]) == str(vb[0]) and int(va[1]) == int(vb[1])
+    except (TypeError, ValueError, IndexError):
+        return False
+
+
+def _reg_same_after_refresh(a, b, name):
+    """回读比较，额外兼容 WinINET 自管字段 AutoDetect。
+
+    `_notify_proxy_changed()` 刷新设置后，Windows 会把刚写进去的 AutoDetect
+    直接删掉（本机实测 REG_DWORD 0 与 REG_SZ "0" 都会被删）。缺失等价于
+    「未开启 WPAD 自动检测」，就是我们写入 0 想达到的效果。若仍按逐字段
+    全等判定：接管的自检会回滚整套配置（api/sysproxy 永远返回 ok=false），
+    解除时也认不出「这个字段其实是我们关掉的」，用户的原值反而丢掉。
+    """
+    if (name == "AutoDetect" and (a or {}).get(name) is None
+            and (b or {}).get(name) is not None):
+        return True
+    return _reg_same(a, b, name)
+
+
+def _notify_proxy_changed():
+    """通知系统立即重新读取代理设置（两个 InternetSetOption 都是必需的）"""
+    try:
+        import ctypes
+        ctypes.windll.wininet.InternetSetOptionW(0, 39, 0, 0)  # SETTINGS_CHANGED
+        ctypes.windll.wininet.InternetSetOptionW(0, 37, 0, 0)  # REFRESH
+    except Exception:
+        pass
+
+
+def _sysproxy_state_read():
+    """读接管记账；不存在 / 损坏 / 版本不认 一律当没有记录。"""
+    try:
+        with open(_sysproxy_sidecar(SYSPROXY_STATE_NAME), "r", encoding="utf-8") as f:
+            st = json.load(f)
+    except Exception:
+        return None
+    if not isinstance(st, dict) or st.get("version") != 1:
+        return None
+    if not isinstance(st.get("written"), dict) or not isinstance(st.get("prev"), dict):
+        return None
+    return st
+
+
+def _sysproxy_state_write(st):
+    """原子写记账（tmp + replace）：强杀时最多丢新记录，不会留半截 JSON。"""
+    p = _sysproxy_sidecar(SYSPROXY_STATE_NAME)
+    try:
+        if p.parent and not p.parent.exists():
+            p.parent.mkdir(parents=True, exist_ok=True)
+        tmp = p.with_name(p.name + ".tmp")
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(st, f, ensure_ascii=False)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, p)
+        return True
+    except Exception as e:
+        log("[WeakNet] 系统代理接管记录写入失败：%r" % (e,))
+        return False
+
+
+def _sysproxy_state_clear():
+    try:
+        _sysproxy_sidecar(SYSPROXY_STATE_NAME).unlink()
+    except Exception:
+        pass
+
+
+def _pid_alive(pid):
+    """进程是否还活着。
+
+    Windows 上**不能**用 os.kill(pid, 0)：CPython 会走到 TerminateProcess，
+    等于把「检查」变成「击杀」。
+    """
+    try:
+        pid = int(pid)
+    except (TypeError, ValueError):
+        return False
+    if pid <= 0:
+        return False
+    if sys.platform != "win32":
+        try:
+            os.kill(pid, 0)
+            return True
+        except Exception:
+            return False
+    try:
+        import ctypes
+        h = ctypes.windll.kernel32.OpenProcess(0x1000, False, pid)  # QUERY_LIMITED_INFORMATION
+        if not h:
+            return False
+        try:
+            code = ctypes.c_ulong()
+            if not ctypes.windll.kernel32.GetExitCodeProcess(h, ctypes.byref(code)):
+                return False
+            return code.value == 259          # STILL_ACTIVE
+        finally:
+            ctypes.windll.kernel32.CloseHandle(h)
+    except Exception:
+        return False
+
+
+def _sysproxy_lock_acquire():
+    """用户级锁：同一用户同一时刻只允许一个实例接管系统代理。
+
+    两个实例各自备份、各自还原时，后还原的会把先还原的结果再改一遍，最终留下
+    一个指向已退出实例端口的代理 —— 表现为整机断网，且看不出是谁造成的。
+    """
+    p = _sysproxy_sidecar(SYSPROXY_LOCK_NAME)
+    try:
+        if p.exists():
+            try:
+                pid = int((p.read_text(encoding="utf-8") or "0").strip() or 0)
+            except Exception:
+                pid = 0
+            if pid and pid != os.getpid() and _pid_alive(pid):
+                log("[WeakNet] 系统代理已由另一个 WeakNet 实例（pid %d）接管，本次不改注册表" % pid)
+                return False
+        if p.parent and not p.parent.exists():
+            p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(str(os.getpid()), encoding="utf-8")
+        return True
+    except Exception as e:
+        # 锁写不了不该让主功能瘫掉：退化到「无锁接管」，进程内还原仍然有效
+        log("[WeakNet] 系统代理接管锁不可用（继续尝试接管）：%r" % (e,))
+        return True
+
+
+def _sysproxy_lock_release():
+    p = _sysproxy_sidecar(SYSPROXY_LOCK_NAME)
+    try:
+        if not p.exists():
+            return
+        try:
+            pid = int((p.read_text(encoding="utf-8") or "0").strip() or 0)
+        except Exception:
+            pid = 0
+        # pid 已死 = 上次强杀留下的锁。留着它虽然会被下次接管覆盖，但恢复流程
+        # 结束时仍应清干净：现场检查（崩溃探针）要求「还原后不留锁」。
+        if pid in (0, os.getpid()) or not _pid_alive(pid):
+            p.unlink()
+    except Exception:
+        pass
+
+
 def sysproxy_enabled():
+    """系统代理当前是否开启 —— **不管是谁开的**。
+
+    这个值只适合展示「本机代理状态」。要判断「是不是本工具在接管」，用
+    sysproxy_owned()。两者混成一个，就会出现：公司代理本来开着 → 界面显示
+    「已接管」→ 用户点一下解除 → 公司代理被关掉。
+    """
     if sys.platform != "win32":
         return False
     try:
         import winreg
-        k = winreg.OpenKey(
-            winreg.HKEY_CURRENT_USER,
-            r"Software\Microsoft\Windows\CurrentVersion\Internet Settings")
-        v, _ = winreg.QueryValueEx(k, "ProxyEnable")
+        k = winreg.OpenKey(winreg.HKEY_CURRENT_USER, _REG_PATH)
+        try:
+            v, _ = winreg.QueryValueEx(k, "ProxyEnable")
+        finally:
+            winreg.CloseKey(k)
         return bool(v)
     except Exception:
         return False
 
 
-def _auto_release_sysproxy():
-    """退出时自动解除接管，避免工具被关掉后系统代理指向已失效的端口"""
-    if G.sysproxy_on:
-        try:
-            set_sysproxy(False)
-            log("[WeakNet] 已自动解除系统代理接管")
-        except Exception as e:
-            log("[WeakNet] 自动解除系统代理接管失败：%r" % (e,))
+def _sysproxy_owned_written():
+    """本实例写进注册表的那组值（先看记账文件，再看进程内备份）。"""
+    st = _sysproxy_state_read()
+    if st:
+        return st.get("written") or {}
+    return G.sysproxy_written or {}
 
 
-def _reg_values(k, names):
+def _sysproxy_owned_prev():
+    """接管前的原始值（同样先看记账文件）。"""
+    st = _sysproxy_state_read()
+    if st:
+        return st.get("prev") or {}
+    return G.sysproxy_prev or {}
+
+
+def sysproxy_owned():
+    """本实例是否仍然拥有系统代理接管。
+
+    判据是「注册表当前值 == 我们写进去的值」。用户中途手动改了代理，所有权即
+    失效 —— 此时既不该显示「已接管」，退出时也不该去动注册表：那份配置已经不
+    是我们的了。
+    """
+    if sys.platform != "win32":
+        return False
+    written = _sysproxy_owned_written()
+    if not written:
+        return False
+    cur = _reg_current()
+    if cur is None:
+        return False
+    # 只比对记录里真实存在的字段：v1.1.20 及更早的记账没有 PAC 两项，
+    # 按全字段比对会把它误判成「已失效」，于是界面显示未接管、退出也不还原。
+    keys = [n for n in SYSPROXY_REGS if n in written]
+    return bool(keys) and all(_reg_same_after_refresh(cur, written, n) for n in keys)
+
+
+def _sysproxy_write(k, name, value):
+    """按快照写一个字段；value 为 None 表示「原来没有这个字段」→ 删掉。"""
     import winreg
-    out = {}
-    for n in names:
+    if value is None:
         try:
-            v, _t = winreg.QueryValueEx(k, n)
-            out[n] = (v, _t)
+            winreg.DeleteValue(k, name)
+        except FileNotFoundError:
+            pass                       # 本来就不存在，正是想要的状态
+        # 其余 OSError（权限被拒 / 值被策略锁定）必须往上抛：吞掉的话
+        # AutoConfigURL 删不掉也当成功，接管看起来生效、实际被 PAC 盖住，
+        # 是本文件里最难查的一种静默失效。
+        return
+    winreg.SetValueEx(k, name, 0, int(value[1]), value[0])
+
+
+def _sysproxy_takeover(k):
+    """接管：备份 → 记账 → 写入；任何一步失败都回滚到接管前的样子。"""
+    import winreg
+    if sysproxy_owned():
+        # 已经拥有：保留原有 prev，只刷新写入值（端口可能变了）。否则会把
+        # 「自己上次写的值」当成用户原值备份下来，退出时还原成 127.0.0.1
+        # 就再也回不去了。
+        prev = dict(_sysproxy_owned_prev())
+        missing = [n for n in SYSPROXY_REGS if n not in prev]
+        if missing:
+            # 旧版记账缺字段（比如没有 PAC 两项）。这几项当初没被改过，当前
+            # 注册表值就是用户的原始值 —— 不补齐的话，这次释放会把用户真实的
+            # PAC 当成「我们自己写的」删掉。
+            prev.update(_reg_snapshot(k, missing))
+    else:
+        if not _sysproxy_lock_acquire():
+            return False
+        prev = _reg_snapshot(k, SYSPROXY_REGS)
+    written = {
+        "ProxyEnable": [1, winreg.REG_DWORD],
+        "ProxyServer": ["127.0.0.1:%d" % G.proxy_port, winreg.REG_SZ],
+        "ProxyOverride": [SYSPROXY_OVERRIDE, winreg.REG_SZ],
+        # None = 原来这个值存在也要删掉（_sysproxy_write 里走 DeleteValue）。
+        # PAC 地址留着的话，WinINET 会优先用脚本，我们写的静态代理直接被忽略。
+        "AutoConfigURL": None,
+        "AutoDetect": [0, winreg.REG_DWORD],
+    }
+    persisted = _sysproxy_state_write({
+        "version": 1, "pid": os.getpid(), "port": int(G.proxy_port),
+        "written": written, "prev": prev, "at": time.time(),
+    })
+    G.sysproxy_prev = prev
+    G.sysproxy_written = written
+    done = []
+    try:
+        for n in SYSPROXY_REGS:
+            _sysproxy_write(k, n, written[n])
+            done.append(n)
+    except Exception as e:
+        # 写到一半失败：把已写进去的字段按 prev 还原，别留半套配置
+        log("[WeakNet] 写入系统代理失败，回滚已写字段：%r" % (e,))
+        for n in done:
+            try:
+                _sysproxy_write(k, n, prev.get(n))
+            except Exception:
+                pass
+        G.sysproxy_prev = None
+        G.sysproxy_written = None
+        _sysproxy_state_clear()
+        _sysproxy_lock_release()
+        _notify_proxy_changed()
+        return False
+    _notify_proxy_changed()
+    # 回读自检：写完必须能证明「当前值 == 我们写的值」。企业策略锁、安全软件
+    # 拦截都可能让 SetValueEx 返回成功但值没落地（PAC 删不掉就是典型）。不校验
+    # 就会「界面显示已接管、实际一点弱网都没加」，用户白测一轮还找不到原因。
+    if not sysproxy_owned():
+        log("[WeakNet] 系统代理写入后回读不一致，已按原值回滚")
+        log_event("error", "系统代理接管失败：注册表可能被策略或安全软件锁定")
+        for n in SYSPROXY_REGS:
+            try:
+                _sysproxy_write(k, n, prev.get(n))
+            except Exception:
+                pass
+        G.sysproxy_prev = None
+        G.sysproxy_written = None
+        G.sysproxy_on = False
+        _sysproxy_state_clear()
+        _sysproxy_lock_release()
+        _notify_proxy_changed()
+        return False
+    G.sysproxy_on = True
+    if not persisted:
+        log("[WeakNet] 接管记录未能落盘：正常退出仍可还原，异常退出将退回端口探测")
+    return True
+
+
+def _sysproxy_release(k):
+    """解除：只还原「当前值仍等于自己写入值」的字段。
+
+    用户在接管期间手动把代理改成了别的（或另一个程序改了），那个字段就不再是
+    我们的，必须原样保留 —— 否则「关闭 WeakNet」会顺手关掉别人刚设好的代理。
+    """
+    written = _sysproxy_owned_written()
+    prev = _sysproxy_owned_prev()
+    if not written:
+        # 从未接管（或记录已被清）：什么都不做。**绝不**无条件写 ProxyEnable=0。
+        _sysproxy_state_clear()
+        G.sysproxy_on = False
+        return True
+    cur = _reg_snapshot(k, SYSPROXY_REGS)
+    # 代理地址已不是我们写的 → 那个代理是别人在用的活配置，此时还原
+    # ProxyEnable（尤其原来为 0）等于把人家刚设好的代理关掉。路由决策字段
+    # （开关 / PAC / 自动检测）一律不动。
+    server_ours = _reg_same(cur, written, "ProxyServer")
+    kept, restored = [], []
+    for n in SYSPROXY_REGS:
+        if n not in written:
+            # 旧版记账只记了 3 个字段：没记 = 当初没动过，跳过而不是当失败
+            continue
+        if n in SYSPROXY_ROUTE_REGS and not server_ours:
+            kept.append(n)
+            continue
+        if _reg_same_after_refresh(cur, written, n):
+            _sysproxy_write(k, n, prev.get(n))
+            restored.append(n)
+        else:
+            kept.append(n)
+    _notify_proxy_changed()
+    # WinINET 的 SETTINGS_CHANGED / REFRESH 会把 AutoDetect 删掉（本机实测写 0/1
+    # 都会被删）。用户原本开着 WPAD 时，必须在刷新之后再写回原值，否则
+    # 「解除接管」顺手把人家的配置弄丢了。
+    if "AutoDetect" in restored:
+        try:
+            _sysproxy_write(k, "AutoDetect", prev.get("AutoDetect"))
+        except Exception as e:
+            log("[WeakNet] 还原 AutoDetect 失败：%r" % (e,))
+    _sysproxy_state_clear()
+    _sysproxy_lock_release()
+    G.sysproxy_prev = None
+    G.sysproxy_written = None
+    G.sysproxy_on = False
+    if kept:
+        log("[WeakNet] 系统代理的 %s 已被其它程序修改，保留现状不还原" % ", ".join(kept))
+    return True
+
+
+def _sysproxy_disable_only():
+    """只把 ProxyEnable 置 0（老版本残留的退化还原路径，没有原值可依）"""
+    import winreg
+    try:
+        k = winreg.OpenKey(winreg.HKEY_CURRENT_USER, _REG_PATH, 0, winreg.KEY_SET_VALUE)
+    except Exception as e:
+        log("[WeakNet] 打开系统代理注册表失败：%r" % (e,))
+        return False
+    try:
+        winreg.SetValueEx(k, "ProxyEnable", 0, winreg.REG_DWORD, 0)
+    except Exception as e:
+        log("[WeakNet] 关闭系统代理失败：%r" % (e,))
+        return False
+    finally:
+        try:
+            winreg.CloseKey(k)
         except Exception:
-            out[n] = None
-    return out
+            pass
+    _notify_proxy_changed()
+    return True
+
+
+def _auto_release_sysproxy():
+    """退出时自动解除接管，避免工具被关掉后系统代理指向已失效的端口。
+
+    判据必须是「所有权」而不是「系统代理是否开着」：用户自己的（或公司策略
+    下发的）代理开着时退出，这里什么都不该做。
+    """
+    try:
+        if not (G.sysproxy_on or sysproxy_owned()):
+            return
+        set_sysproxy(False)
+        log("[WeakNet] 已自动解除系统代理接管")
+    except Exception as e:
+        log("[WeakNet] 自动解除系统代理接管失败：%r" % (e,))
 
 
 def set_sysproxy(enable):
-    """开启/关闭本机系统代理（写入注册表并通知系统立即生效，解除时还原原始配置）"""
+    """开启 / 解除本机系统代理接管。
+
+    enable=True ：备份原值 → 落盘记账 → 写自己的值（部分失败整体回滚）
+    enable=False：只还原「当前值仍等于自己写入值」的字段，然后删掉记账
+
+    返回 True 表示注册表最终处于期望状态。enable=False 时如果本来就不是本实例
+    在接管，直接返回 True —— 无事可做，不是失败。
+    """
     if sys.platform != "win32":
         return False
     try:
         import winreg
-        import ctypes
-        path = r"Software\Microsoft\Windows\CurrentVersion\Internet Settings"
-        names = ("ProxyEnable", "ProxyServer", "ProxyOverride")
-        # 需要同时具备读(备份原值)与写(写入新值)权限
-        k = winreg.OpenKey(winreg.HKEY_CURRENT_USER, path, 0,
+        k = winreg.OpenKey(winreg.HKEY_CURRENT_USER, _REG_PATH, 0,
                            winreg.KEY_READ | winreg.KEY_WRITE)
-        if enable and G.prev_proxy is None:
-            G.prev_proxy = _reg_values(k, names)
+    except Exception as e:
+        log("[WeakNet] 打开系统代理注册表失败：%r" % (e,))
+        return False
+    try:
         if enable:
-            winreg.SetValueEx(k, "ProxyEnable", 0, winreg.REG_DWORD, 1)
-            winreg.SetValueEx(k, "ProxyServer", 0, winreg.REG_SZ,
-                              f"127.0.0.1:{G.proxy_port}")
-            winreg.SetValueEx(k, "ProxyOverride", 0, winreg.REG_SZ,
-                              "localhost;127.*;<local>")
-        else:
-            winreg.SetValueEx(k, "ProxyEnable", 0, winreg.REG_DWORD, 0)
-            if G.prev_proxy:                       # 还原接管前的配置
-                for n in names:
-                    saved = G.prev_proxy.get(n)
-                    if saved:
-                        winreg.SetValueEx(k, n, 0, saved[1], saved[0])
-            G.prev_proxy = None
-        winreg.CloseKey(k)
-        ctypes.windll.wininet.InternetSetOptionW(0, 39, 0, 0)  # SETTINGS_CHANGED
-        ctypes.windll.wininet.InternetSetOptionW(0, 37, 0, 0)  # REFRESH
-        G.sysproxy_on = bool(enable)
-        return True
+            return _sysproxy_takeover(k)
+        return _sysproxy_release(k)
     except Exception as e:
         # 原来这里裸 except 直接 return False：注册表写失败时用户只看到
         # 「接管没生效」，日志里一点线索都没有。保留 False 的返回语义，只补日志。
         log("[WeakNet] %s系统代理失败：%r" % ("开启" if enable else "解除", e))
         return False
+    finally:
+        try:
+            winreg.CloseKey(k)
+        except Exception:
+            pass
 
 
 def release_stale_sysproxy(proxy_port=None):
@@ -1573,10 +2081,13 @@ def release_stale_sysproxy(proxy_port=None):
     正常退出走 atexit（CLI）或窗口关闭（GUI）还原；被强杀时那段代码根本不会
     执行，注册表里就留下 ProxyEnable=1 + ProxyServer=127.0.0.1:8888 —— 指向
     一个已经没有进程在听的端口，表现为整机断网，用户很难看出原因。
-    启动时发现它指向本程序的端口就先还原，并留一行日志说明。
 
-    两道保险避免误伤正在运行的实例：端口上还有人监听时不动（那是活着的
-    WeakNet），端口传 0（由系统分配，测试/嵌入式用法）时也不动。
+    首选路径是读接管记账：只有「记录里的值仍与注册表一致」且「端口上没人监听」
+    才按记录里的原值还原 —— 这是唯一能原样还原的路径。
+    没有记录（v1.1.20 及更早版本留下的残留，或记录被删）时才退回端口探测，
+    并且要求 ProxyServer **精确等于** 127.0.0.1:<本程序端口>，不再用子串匹配：
+    子串会把 127.0.0.1:8888.example 之类误判成自己的。
+
     非 Windows 直接跳过，不 import winreg，也不新增任何依赖。
     """
     if sys.platform != "win32":
@@ -1587,27 +2098,95 @@ def release_stale_sysproxy(proxy_port=None):
         return False
     if port <= 0:
         return False
-    try:
-        import winreg
-        path = r"Software\Microsoft\Windows\CurrentVersion\Internet Settings"
-        k = winreg.OpenKey(winreg.HKEY_CURRENT_USER, path)
-        try:
-            enabled, _t = winreg.QueryValueEx(k, "ProxyEnable")
-            try:
-                server, _t = winreg.QueryValueEx(k, "ProxyServer")
-            except OSError:            # 有 ProxyEnable 但没有 ProxyServer
-                server = ""
-        finally:
-            winreg.CloseKey(k)
-    except Exception:
+    cur = _reg_current()
+    if cur is None:
         return False
-    if not enabled or ("127.0.0.1:%d" % port) not in str(server or ""):
+
+    st = _sysproxy_state_read()
+    if st:
+        written = st.get("written") or {}
+        prev = st.get("prev") or {}
+        # 旧版记账只有 3 个字段：只比对它记过的，缺的视为「当初没动过」。
+        # 按新全集硬比对会把旧记录一律判失效，上次强杀留下的代理就再也清不掉了。
+        keys = [n for n in SYSPROXY_REGS if n in written]
+        if not keys:
+            _sysproxy_state_clear()
+            _sysproxy_lock_release()
+            return False
+        # 端口仍被占用：多半是另一个实例在跑，它的接管是有效的，别动。
+        # 必须用**记录里的端口**判断，不能用本次启动参数：上次跑在 8899、
+        # 这次默认 8888 时，8899 上的实例还活着，用 8888 去探测会误判成残留，
+        # 把活实例的代理配置还原掉。
+        try:
+            rec_port = int(st.get("port") or 0) or port
+        except (TypeError, ValueError):
+            rec_port = port
+        if not can_bind(rec_port, "127.0.0.1"):
+            return False
+        # 逐字段判归属。崩溃可能停在任意两次写之间，现场一定是三种混合：
+        #   还是我们写的 / 已回到原值 / 被用户或别的程序改成了第三个值。
+        # 老实现要求「全部等于写入值」才还原，部分写入过不了这道门，于是
+        # 删掉记录就走 —— ProxyEnable 留在 1、ProxyServer 指向已退出的端口，
+        # 用户表现为整机断网，而且记录已经被删，再启动也救不回来。
+        restore = []
+        for n in keys:
+            if _reg_same(cur, written, n):
+                restore.append(n)
+        # 代理地址已经不是我们的、也不是原值（被用户或别的程序换成了第三个值）：
+        # 那份配置是别人在用的活配置，路由三字段（开关 / PAC / 自动检测）不能再动，
+        # 否则会关掉别人刚设好的代理。注意「等于原值」不算易主 —— 部分接管时
+        # ProxyServer 还没写到，仍是原值，此时必须把已经写进去的开关收回来。
+        server_foreign = (not _reg_same(cur, written, "ProxyServer")
+                          and not _reg_same(cur, prev, "ProxyServer"))
+        if server_foreign:
+            restore = [n for n in restore if n not in SYSPROXY_ROUTE_REGS]
+        if not restore:
+            # 要么已经全部还原（记录没来得及删），要么没有任何字段还属于我们
+            _sysproxy_state_clear()
+            _sysproxy_lock_release()
+            return False
+        try:
+            import winreg
+            k = winreg.OpenKey(winreg.HKEY_CURRENT_USER, _REG_PATH, 0,
+                               winreg.KEY_READ | winreg.KEY_WRITE)
+        except Exception as e:
+            log("[WeakNet] 打开系统代理注册表失败（残留还原）：%r" % (e,))
+            return False
+        try:
+            for n in restore:
+                _sysproxy_write(k, n, prev.get(n))
+        except Exception as e:
+            # 还原也可能失败（策略锁定）：记录保留，下次启动再试，
+            # 不能删记录假装处理过。
+            log("[WeakNet] 残留系统代理还原失败：%r" % (e,))
+            _notify_proxy_changed()
+            return False
+        finally:
+            try:
+                winreg.CloseKey(k)
+            except Exception:
+                pass
+        _notify_proxy_changed()
+        _sysproxy_state_clear()
+        _sysproxy_lock_release()
+        G.sysproxy_prev = None
+        G.sysproxy_written = None
+        G.sysproxy_on = False
+        log("[WeakNet] 检测到上次异常退出残留的系统代理，已按接管记录还原")
+        log_event("config", "检测到上次异常退出残留的系统代理，已还原")
+        return True
+
+    # —— 退化路径：没有记账，只能按端口认领 ——
+    enabled = cur.get("ProxyEnable")
+    server = cur.get("ProxyServer")
+    if not enabled or not server:
+        return False
+    if str(server[0] or "") != "127.0.0.1:%d" % port:
         return False
     if not can_bind(port, "127.0.0.1"):
-        # 端口仍被占用：多半是另一个实例在跑，它的接管是有效的，别动
         return False
-    ok = set_sysproxy(False)
-    log("[WeakNet] 检测到上次异常退出残留的系统代理（%s），已还原" % server)
+    ok = _sysproxy_disable_only()
+    log("[WeakNet] 检测到上次异常退出残留的系统代理（%s，无接管记录），已关闭" % (server[0],))
     log_event("config", "检测到上次异常退出残留的系统代理，已还原")
     return ok
 
@@ -2156,15 +2735,37 @@ async def run_tunnel(ctx, c_reader, s_writer, s_reader, c_writer, prof):
 # 明文 HTTP 的 keep-alive 转发
 # --------------------------------------------------------------------------
 
-def _rewrite_origin_request(method, path, headers):
-    """把代理格式请求改写成源站格式（去代理头，声明 keep-alive）"""
+def _rewrite_origin_request(method, path, headers, keep_alive=True):
+    """把代理格式请求改写成源站格式（去代理头，声明连接意图）
+
+    Upgrade 请求（WebSocket 等）必须原样带上 `Connection: Upgrade`：把它改写成
+    keep-alive 后，源站不会回 101，握手直接失败 —— 表现为「代理开着时网页版
+    聊天/推送全挂」，而关掉代理就正常。
+    """
+    upgrade = _hdr_get(headers, b"upgrade") is not None
+    # RFC 9112 §6.3 第 3 步：同时有 Transfer-Encoding 与 Content-Length 时，中间件
+    # **必须先删掉 Content-Length 再转发**。原样转发等于把走私形态递给上游：上游
+    # 若按 CL 定界，就会把 chunk 头当成正文、把剩余字节当成下一个请求。
+    has_te = bool(_hdr_tokens(headers, b"transfer-encoding"))
     out = [f"{method} {path} HTTP/1.1".encode()]
     for h in headers:
         k = h.split(b":", 1)[0].strip().lower()
         if k in (b"proxy-connection", b"connection", b"keep-alive"):
             continue
+        if has_te and k == b"content-length":
+            continue
+        # Expect 由代理应答（见 http_keepalive_relay）：把 100-continue 继续传给
+        # 上游、自己却卡在读正文上，客户端要等自己的 1s 超时才发体（RFC 9110 §10.1.1
+        # 要求「收到 100-continue 必须回 100 或最终状态」）。
+        if k == b"expect":
+            continue
         out.append(h.rstrip(b"\r\n"))
-    out.append(b"Connection: keep-alive")
+    if upgrade:
+        out.append(b"Connection: Upgrade")
+    elif keep_alive:
+        out.append(b"Connection: keep-alive")
+    else:
+        out.append(b"Connection: close")
     return b"\r\n".join(out) + b"\r\n\r\n"
 
 
@@ -2176,15 +2777,64 @@ def _hdr_get(headers, name):
     return None
 
 
+def _hdr_values(headers, name):
+    """取某个头的**全部**取值（同名多行各算一个）。
+
+    `_hdr_get` 只取第一行，用来判 Content-Length 会漏掉「重复头 + 值不一致」
+    这种请求走私形态（RFC 9112 §6.3 第 5 步要求按不可恢复错误处理）。
+    """
+    out = []
+    for h in headers:
+        k, sep, v = h.partition(b":")
+        if sep and k.strip().lower() == name:
+            out.append(v.strip())
+    return out
+
+
+def _hdr_tokens(headers, name):
+    """把某个头按逗号拆成小写 token 列表（跨多行合并）。
+
+    Connection / Transfer-Encoding 都是 `#token` 语法（RFC 9110 §5.6.1），
+    用子串匹配会把 `x-close`、`chunked, gzip` 这类值判错 —— 前者假关闭，
+    后者把「chunked 不是最后一个编码」误当成 chunked。定界判错不会报错，
+    只会让连接错位，所以这里按 token 精确比较。
+    """
+    out = []
+    for v in _hdr_values(headers, name):
+        for t in v.split(b","):
+            t = t.strip().lower()
+            if t:
+                out.append(t)
+    return out
+
+
 def _resp_frame(status, resp_headers, method):
     """响应体怎么算读完。返回 (mode, length)：
-    mode: 'nobody' 无体 / 'cl' 定长 / 'chunked' 分块 / 'eof' 读到 EOF 为止。
-    只有边界明确才能复用上游连接 —— 'eof' 意味着这一响应读完上游就该关。"""
-    if method == "HEAD" or status in (204, 304) or 100 <= status < 200:
+
+    mode:
+      'nobody'  —— 无正文（HEAD / 204 / 304）：头就是全部内容
+      'interim' —— 1xx 临时响应：转发完还要继续读最终响应
+      'cl'      —— 定长
+      'chunked' —— 分块
+      'eof'     —— 读到 EOF 为止；这一响应读完，上游与客户端都必须关
+                    （RFC 9112 §6.3：没有 CL/TE 的响应靠连接关闭定界）
+
+    老实现把 1xx 直接归进 'nobody'，于是转发完 103 Early Hints 就去等下一个
+    请求了 —— 客户端还停在「等最终响应」上，两边状态机从此错位。
+    """
+    # 1xx 必须排在最前：对 HEAD 的 103 仍然是「过渡响应」，后面还有最终响应。
+    # 先判 HEAD 会把 103 当成最终响应发完就等下一条请求，真正的 200 留在上游
+    # 缓冲里，两边状态机从此错位（RFC 9112 §6.3 第 1 步针对的是**最终**响应）。
+    if 100 <= status < 200 and status != 101:
+        return "interim", 0
+    if method == "HEAD" or status in (204, 304):
         return "nobody", 0
-    te = (_hdr_get(resp_headers, b"transfer-encoding") or b"").lower()
-    if b"chunked" in te:
-        return "chunked", 0
+    te = _hdr_tokens(resp_headers, b"transfer-encoding")
+    if te:
+        # 只有 chunked 是**最后一个**编码时才按块读；`chunked, gzip` 这种
+        # chunked 不在末尾的响应，长度只能靠连接关闭定界（§6.3 第 4 步）。
+        last = te[-1].split(b";", 1)[0].strip()
+        return ("chunked", 0) if last == b"chunked" else ("eof", 0)
     cl = _hdr_get(resp_headers, b"content-length")
     if cl is not None:
         try:
@@ -2196,9 +2846,9 @@ def _resp_frame(status, resp_headers, method):
 
 def _resp_keepalive(status_line, resp_headers, mode):
     """这个响应读完后，上游连接还能给下一个请求用吗"""
-    if mode == "eof":
+    if mode in ("eof", "interim"):
         return False
-    conn = (_hdr_get(resp_headers, b"connection") or b"").lower()
+    conn = _hdr_tokens(resp_headers, b"connection")
     if b"close" in conn:
         return False
     if status_line.startswith(b"HTTP/1.0") and b"keep-alive" not in conn:
@@ -2206,13 +2856,50 @@ def _resp_keepalive(status_line, resp_headers, mode):
     return True
 
 
-def _client_keepalive(headers):
+def _client_keepalive(headers, version="HTTP/1.1"):
     """客户端是否希望这条连接继续用（决定响应发完是否关客户端侧）。
-    HTTP/1.1 默认保持，除非显式 Connection: close；HTTP/1.0 默认不保持。"""
-    conn = (_hdr_get(headers, b"connection") or b"").lower()
+
+    HTTP/1.1 默认保持，除非显式 Connection: close；HTTP/1.0 默认不保持，
+    除非显式 keep-alive。只判 close 会把 HTTP/1.0 客户端当成愿意复用，
+    于是我们留着连接等下一个请求，它却在等 FIN。
+    """
+    conn = _hdr_tokens(headers, b"connection")
     if b"close" in conn:
         return False
+    if str(version or "").upper().startswith("HTTP/1.0"):
+        return b"keep-alive" in conn
     return True
+
+
+def _req_framing_error(headers):
+    """按 RFC 9112 §6.3 校验请求定界；合法返回 None，否则返回错误说明。
+
+    请求永远不能用「连接关闭」定界（§6.3 第 7 步）：没有 TE 也没有 CL 就是无体。
+    两条硬规则：
+
+    - TE 存在但 chunked 不是最后一个编码 → 长度无法可靠确定，服务器 MUST 回 400；
+    - CL 无效（非数字 / 负数 / 多个不一致的值）→ MUST 视为不可恢复错误。
+
+    同时带 TE 和 CL **不算错**：TE 优先，但转发前要删掉 CL，且响应后必须关闭
+    连接（§6.1）。这个「删 + 关」由调用方处理。
+    """
+    te = _hdr_tokens(headers, b"transfer-encoding")
+    if te:
+        last = te[-1].split(b";", 1)[0].strip()
+        if last != b"chunked":
+            return "transfer-encoding 必须以 chunked 结尾"
+        return None
+    vals = []
+    for v in _hdr_values(headers, b"content-length"):
+        vals.extend(x.strip() for x in v.split(b","))
+    vals = [v for v in vals if v]
+    if not vals:
+        return None
+    if any(not v.isdigit() for v in vals):
+        return "content-length 不是合法十进制数"
+    if len(set(vals)) > 1:
+        return "多个 content-length 取值不一致"
+    return None
 
 
 async def _read_msg_head(reader, timeout):
@@ -2221,7 +2908,11 @@ async def _read_msg_head(reader, timeout):
     while True:
         try:
             h = await asyncio.wait_for(reader.readline(), timeout=timeout)
-        except (asyncio.TimeoutError, TimeoutError, ConnectionError, OSError):
+        except (asyncio.TimeoutError, TimeoutError, ConnectionError, OSError,
+                ValueError):
+            # ValueError = 单行超过 StreamReader.limit（start_server 设了 1MB）。
+            # 不接住的话会冒出 handler 的兜底，日志里是一条无上下文的栈，
+            # 现场只知道「代理把连接断了」。
             return None
         if not h:
             return lines if lines else None
@@ -2230,8 +2921,157 @@ async def _read_msg_head(reader, timeout):
             return lines
 
 
+def _down_head(head_lines, force_close=False, drop_content_length=False):
+    """响应头下行前的整理：必要时把 Connection 改成 close / 去掉 CL。
+
+    响应没有长度边界（EOF 定界）时，客户端只能靠连接关闭判断正文结束。此时若
+    还告诉它 keep-alive，它会一直等下去 —— 浏览器表现就是「一直转圈」。
+
+    `drop_content_length` 用于上游同时给了 TE 和 CL 的响应：RFC 9112 §6.3 第 3 步
+    要求中间件先删掉 CL 再转发。留着它，下游会按 CL 读完就停，chunked 的结尾
+    留在连接里，下一个响应必然错位。
+    """
+    if not force_close and not drop_content_length:
+        return b"".join(head_lines)
+    skip = {b"connection", b"proxy-connection"}
+    if drop_content_length:
+        skip.add(b"content-length")
+    out = []
+    for i, h in enumerate(head_lines):
+        if i > 0 and h.split(b":", 1)[0].strip().lower() in skip:
+            continue
+        out.append(h if h.endswith(b"\r\n") else h + b"\r\n")
+    while out and out[-1] in (b"\r\n", b"\n"):
+        out.pop()
+    out.append(b"Connection: close\r\n")
+    out.append(b"\r\n")
+    return b"".join(out)
+
+
+# RFC 9110 §9.2.2：只有幂等方法才能在「请求可能已经被处理」时安全重放。
+# 带请求体的请求即便方法幂等，也要正文还能重放才行 —— 这里保守地不重试。
+_IDEMPOTENT_METHODS = frozenset(("GET", "HEAD", "OPTIONS", "TRACE", "PUT", "DELETE"))
+
+
+async def _client_502(writer):
+    """上游给不出响应时明确回 502。
+
+    旧实现在这里直接 return：客户端收不到任何字节，只能挂到自己的超时，
+    排查时看起来像「代理没响应」，而不是「上游连不上」。
+    """
+    try:
+        writer.write(UPSTREAM_502)
+        await writer.drain()
+    except Exception:
+        pass
+
+
+def _split_host_port(target, default_port=443):
+    """把 `host:port` / `[v6]:port` / `host` 拆成 (host, port)。
+
+    CONNECT 的目标可以是方括号包起来的 IPv6 字面量（RFC 3986 §3.2.2）：
+    `[::1]:443`。老实现按第一个冒号切分，得到 host="["、port 解析失败 ——
+    整条 IPv6 隧道路径直接不可用。
+    """
+    t = str(target or "").strip()
+    if t.startswith("["):
+        end = t.find("]")
+        if end < 0:
+            return t, default_port
+        host = t[1:end]
+        rest = t[end + 1:]
+        if rest.startswith(":"):
+            try:
+                return host, int(rest[1:] or default_port)
+            except ValueError:
+                return host, default_port
+        return host, default_port
+    if t.count(":") == 1:
+        h, _, p = t.partition(":")
+        try:
+            return h, int(p or default_port)
+        except ValueError:
+            return h, default_port
+    # 0 个冒号（裸主机名）或 ≥2 个（没有方括号的 IPv6 字面量）：没有端口可拆
+    return t, default_port
+
+
+async def _forward_req_body(c_reader, s_writer, headers, ctx):
+    """把客户端请求体原样转给上游（定长 / 分块两种边界）。
+
+    旧实现只写请求头就往下走：带体的 POST/PUT 在 keep-alive 路径上会被截断，
+    剩下的正文还会被当成「下一个请求」解析 —— 整条连接从此错位，后续请求
+    全部返回垃圾。边界按 RFC 9112 §6.3 处理：有 Transfer-Encoding: chunked
+    就按块读，否则按 Content-Length 读。
+    """
+    te = _hdr_tokens(headers, b"transfer-encoding")
+    chunked = bool(te) and te[-1].split(b";", 1)[0].strip() == b"chunked"
+    cl = _hdr_get(headers, b"content-length")
+
+    async def _emit(block):
+        if not block:
+            return
+        if not ctx.fixed:
+            bucket = G.bucket_up
+            if bucket is not None:
+                bucket.sync(G.profile.get("up_kbps", 0))
+                await bucket.consume(len(block))
+            G.bytes_up += len(block)
+        s_writer.write(block)
+        await s_writer.drain()
+
+    if te:
+        # RFC 9112 §6.3 第 3 步：有 Transfer-Encoding 就不再按 Content-Length 读。
+        # chunked 不是末尾编码的请求已由 _req_framing_error 挡成 400，走到这里
+        # 只剩「按块读」；读完必须 return —— 旧实现落进下面的 CL 分支，从下一条
+        # 请求里又读走 CL 个字节，keep-alive 连接从此整条错位。
+        if not chunked:
+            return
+        while True:
+            line = await c_reader.readline()
+            if not line:
+                raise ConnectionError("client closed while sending chunk header")
+            await _emit(line)
+            try:
+                sz = int(line.split(b";")[0].strip() or b"0", 16)
+            except ValueError:
+                raise ConnectionError("bad chunk size")
+            if sz == 0:
+                while True:                    # trailer
+                    t = await c_reader.readline()
+                    if not t:
+                        return
+                    await _emit(t)
+                    if t in (b"\r\n", b"\n"):
+                        return
+            remain = sz
+            while remain > 0:
+                blk = await c_reader.read(min(65536, remain))
+                if not blk:
+                    raise ConnectionError("client closed while sending body")
+                await _emit(blk)
+                remain -= len(blk)
+            crlf = await c_reader.readline()
+            if not crlf:
+                raise ConnectionError("client closed after chunk data")
+            await _emit(crlf)
+    if cl is None:
+        return
+    try:
+        remain = int(cl.split(b",")[0])
+    except ValueError:
+        return
+    while remain > 0:
+        blk = await c_reader.read(min(65536, remain))
+        if not blk:
+            raise ConnectionError("client closed while sending body")
+        await _emit(blk)
+        remain -= len(blk)
+
+
 async def http_keepalive_relay(ctx, c_reader, c_writer, s_reader, s_writer,
-                               prof, method, target, headers):
+                               prof, method, target, headers,
+                               req_version="HTTP/1.1"):
     """明文 HTTP 的 keep-alive 转发。
 
     原来的实现是「单请求短连接」：客户端每请求一个资源就重开一条上游 TCP，
@@ -2240,14 +3080,14 @@ async def http_keepalive_relay(ctx, c_reader, c_writer, s_reader, s_writer,
 
     这里在一条客户端连接上串行处理多个请求：响应边界明确
     （Content-Length / chunked / 无体）就复用上游连接，否则这一请求
-    结束后关掉上游、下个请求重连。只接「无请求体的 GET/HEAD/DELETE」——
-    带体的 POST 请求体边界要另一个状态机，不冒险，继续走单请求路径。
+    结束后关掉上游、下个请求重连。请求体按 CL / chunked 边界完整转发。
 
     延迟/限速/丢包的注入与 pipe() 同规则：请求头吃上行延迟，响应按块吃
     下行延迟 + 下行带宽，切场景对已在途的连接立即生效（每块重读 G.profile）。
     """
     dl = DelayLine(c_writer, ctx.label).start()
     cur_target = None
+    client_keep = True
 
     async def _reconnect(host, port):
         """换一条上游连接（返回 False 表示失败、已回 502）"""
@@ -2267,17 +3107,16 @@ async def http_keepalive_relay(ctx, c_reader, c_writer, s_reader, s_writer,
             return True
         except Exception as e:
             log_event("error", f"{host}:{port} 上游连接失败：{type(e).__name__}")
-            try:
-                c_writer.write(UPSTREAM_502)
-                await c_writer.drain()
-            except Exception:
-                pass
+            await _client_502(c_writer)
             return False
 
     async def _send_down(block):
         """一块响应数据：丢包停顿 + 断连 + 下行带宽 + 下行延迟（与 pipe() 同规则）"""
         if ctx.fixed:
             await dl.submit(block, 0, G.gen)
+            # 持续下行也是「有进展」：不刷新的话，一个长下载在空闲回收看来
+            # 和挂死连接没区别，60s 后被误杀（请求已发完、正文还在传）。
+            ctx.touch()
             return
         p = G.profile
         # 与 pipe() 相同的丢包/断连判定：明文 keep-alive 的 GET/HEAD/DELETE
@@ -2296,11 +3135,13 @@ async def http_keepalive_relay(ctx, c_reader, c_writer, s_reader, s_writer,
             await bucket.consume(len(block))
         G.bytes_down += len(block)
         await dl.submit(block, _latency_delay(p, "down"), G.gen)
+        ctx.touch()
 
     try:
         first = True
         while True:
             # ---------- 取一个请求（第一个由调用方读好传入） ----------
+            req_has_body = False
             if first:
                 first = False
                 u = urllib.parse.urlsplit(target)
@@ -2312,7 +3153,7 @@ async def http_keepalive_relay(ctx, c_reader, c_writer, s_reader, s_writer,
                     return
                 ctx.touch()
                 try:
-                    method, target, _ver = head[0].decode("latin1").split()
+                    method, target, req_version = head[0].decode("latin1").split()
                 except ValueError:
                     return
                 method = method.upper()
@@ -2322,6 +3163,16 @@ async def http_keepalive_relay(ctx, c_reader, c_writer, s_reader, s_writer,
                 headers = [h for h in head[1:] if h.strip()]   # 去掉结尾空行
                 path = (u.path or "/") + (("?" + u.query) if u.query else "")
                 new_target = (u.hostname, u.port or (443 if u.scheme == "https" else 80))
+                # 目标限制必须与首请求同一套判据：否则客户端只要在同一条连接上
+                # 发第二个请求，就能绕过「不许打到控制口/回环」的检查。
+                if _proxy_target_blocked(new_target[0], new_target[1]):
+                    log_event("reject", "拒绝转发到本机/控制口目标：%s:%d" % new_target)
+                    try:
+                        c_writer.write(UPSTREAM_403)
+                        await c_writer.drain()
+                    except Exception:
+                        pass
+                    return
                 if s_writer.is_closing() or new_target != cur_target:
                     if not await _reconnect(new_target[0], new_target[1]):
                         return
@@ -2343,6 +3194,34 @@ async def http_keepalive_relay(ctx, c_reader, c_writer, s_reader, s_writer,
                         await c_writer.drain()
                         return
 
+            # ---------- 请求定界校验（RFC 9112 §6.3） ----------
+            framing_bad = _req_framing_error(headers)
+            if framing_bad:
+                log_event("error", "请求定界不合法（%s），已回 400" % framing_bad)
+                try:
+                    c_writer.write(b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n"
+                                   b"Connection: close\r\n\r\n")
+                    await c_writer.drain()
+                except Exception:
+                    pass
+                return
+
+            # 请求体边界：TE 优先于 CL（§6.3 第 3 步）。两者都有时按 TE 读、
+            # 转发前删掉 CL（见 _rewrite_origin_request），响应后关客户端连接（§6.1）。
+            te_tokens = _hdr_tokens(headers, b"transfer-encoding")
+            cl = _hdr_get(headers, b"content-length")
+            framing_ambiguous = bool(te_tokens) and cl is not None
+            req_has_body = bool(te_tokens)
+            if not req_has_body and cl is not None:
+                try:
+                    req_has_body = int(cl.split(b",")[0]) > 0
+                except ValueError:
+                    req_has_body = True      # 已被上面的校验挡掉，这里只做兜底
+            # Expect: 100-continue 要由我们应答，不能「转给上游、自己卡在读正文」。
+            expect_continue = (req_has_body
+                               and b"100-continue" in _hdr_tokens(headers, b"expect")
+                               and not str(req_version).upper().startswith("HTTP/1.0"))
+
             ctx.label = f"{cur_target[0]}:{cur_target[1]}"
 
             # ---------- 转发请求头（吃上行延迟） ----------
@@ -2354,92 +3233,145 @@ async def http_keepalive_relay(ctx, c_reader, c_writer, s_reader, s_writer,
                     prof = G.profile        # 期间切换了场景/停止：按新参数重算
                     d = _latency_delay(prof, "up")
 
-            # ---------- 读响应头（上游可能在写后断开：幂等方法重试一次） ----------
+            # ---------- 发请求 + 读响应头（幂等且无体时才允许重试） ----------
+            # RFC 9110 §9.2.2：请求一旦可能已被处理，只有幂等方法能重放；
+            # 带体的请求连重放所需的正文都没留着，一律不重试。
+            retryable = (method in _IDEMPOTENT_METHODS and not req_has_body
+                         and not ctx.fixed)
             head = None
+            body_sent = False
+            continue_sent = False
             for attempt in (0, 1):
                 try:
                     s_writer.write(hdr)
                     await s_writer.drain()
+                    if expect_continue and not continue_sent:
+                        # 由代理承担「应答 100-continue」的责任（RFC 9110 §10.1.1：
+                        # 收到 100-continue MUST 回 100 或最终状态）。旧实现把它
+                        # 原样转给上游，自己却立刻阻塞在读正文上 —— 客户端要等
+                        # 自己的超时（curl 默认 1s）才肯发体，每个大 POST 白亏 1s。
+                        continue_sent = True
+                        c_writer.write(b"HTTP/1.1 100 Continue\r\n\r\n")
+                        await c_writer.drain()
+                    if req_has_body:
+                        body_sent = True
+                        await _forward_req_body(c_reader, s_writer, headers, ctx)
                 except (ConnectionError, OSError):
-                    if attempt == 0 and not ctx.fixed:
+                    if attempt == 0 and retryable:
                         # 连接已死：必须真正重连再重试。旧实现直接 continue，
                         # 用的是同一个已死的 s_writer，重试必然再次抛错后 return，
                         # 注释承诺的「重连」从未发生。
                         if not await _reconnect(cur_target[0], cur_target[1]):
                             return
                         continue
+                    await _client_502(c_writer)
                     return
                 head = await _read_msg_head(s_reader, 60)
                 if head:
                     break
-                # 服务端可能刚关掉这条空闲 keep-alive：GET/HEAD/DELETE 幂等，
+                # 服务端可能刚关掉这条空闲 keep-alive：幂等且没发过正文时，
                 # 重连后重试一次是安全的（这也正是复用上游必须处理的竞态）
-                if attempt == 0 and not ctx.fixed:
+                if attempt == 0 and retryable and not body_sent:
                     if not await _reconnect(cur_target[0], cur_target[1]):
                         return
                     continue
+                await _client_502(c_writer)
                 return
             log_event("connect", f"HTTP 代理 {cur_target[0]}:{cur_target[1]}{path[:60]}")
 
-            status = 0
-            try:
-                status = int(head[0].split(b" ", 2)[1])
-            except Exception:
-                pass
-            resp_headers = [h for h in head[1:] if h.strip()]
-            mode, length = _resp_frame(status, resp_headers, method)
-            upstream_keep = _resp_keepalive(head[0], resp_headers, mode)
+            # ---------- 响应头（含 1xx 临时响应） ----------
+            upgrade = False
+            while True:
+                try:
+                    status = int(head[0].split(b" ", 2)[1])
+                except Exception:
+                    status = 0
+                resp_headers = [h for h in head[1:] if h.strip()]
+                mode, length = _resp_frame(status, resp_headers, method)
+                if mode == "interim":
+                    # 1xx 只是过渡：原样转发后继续读最终响应
+                    await _send_down(b"".join(head))
+                    head = await _read_msg_head(s_reader, 60)
+                    if not head:
+                        return
+                    continue
+                if status == 101:
+                    upgrade = True
+                break
 
-            # ---------- 转发响应体 ----------
-            if mode != "nobody":
-                # 响应头本身也走下行通道（和 pipe() 一致：每块都吃延迟）
-                await _send_down(b"".join(head))
-                if mode == "cl":
-                    remain = length
+            upstream_keep = _resp_keepalive(head[0], resp_headers, mode)
+            if mode == "eof":
+                # 没有长度边界：上游读完后必须关，客户端也只能靠关闭判断结束
+                upstream_keep = False
+                client_keep = False
+            elif not _client_keepalive(headers, req_version):
+                client_keep = False
+            else:
+                client_keep = True
+            if framing_ambiguous:
+                # RFC 9112 §6.1：处理过 TE+CL 并存的请求后 MUST 关闭连接，
+                # 否则残留字节会被当成下一条请求 —— 请求走私的经典载体。
+                client_keep = False
+
+            # ---------- 转发响应 ----------
+            # 头必须**无条件**发出去：老实现只在「有正文」的分支里写头，
+            # HEAD / 204 / 304 的客户端连状态行都收不到，只能挂到超时。
+            await _send_down(_down_head(
+                head, force_close=not client_keep,
+                drop_content_length=bool(_hdr_tokens(resp_headers,
+                                                     b"transfer-encoding"))))
+            if upgrade:
+                # 101 Switching Protocols：此后这条连接是裸流（WebSocket 等），
+                # 不能再按 HTTP 报文解析。先把已排队的响应头发完，再交给隧道。
+                await dl.aclose(timeout=30.0)
+                await run_tunnel(ctx, c_reader, s_writer, s_reader, c_writer, prof)
+                return
+            if mode == "cl":
+                remain = length
+                while remain > 0:
+                    blk = await s_reader.read(min(65536, remain))
+                    if not blk:
+                        return
+                    remain -= len(blk)
+                    await _send_down(blk)
+            elif mode == "chunked":
+                while True:
+                    line = await s_reader.readline()
+                    if not line:
+                        return
+                    await _send_down(line)
+                    try:
+                        sz = int(line.split(b";")[0].strip() or b"0", 16)
+                    except ValueError:
+                        return
+                    if sz == 0:
+                        # 最后一个 chunk：把 trailer 读到空行为止
+                        while True:
+                            t = await s_reader.readline()
+                            if not t:
+                                return
+                            await _send_down(t)
+                            if t in (b"\r\n", b"\n"):
+                                break
+                        break
+                    remain = sz
                     while remain > 0:
                         blk = await s_reader.read(min(65536, remain))
                         if not blk:
                             return
                         remain -= len(blk)
                         await _send_down(blk)
-                elif mode == "chunked":
-                    while True:
-                        line = await s_reader.readline()
-                        if not line:
-                            return
-                        await _send_down(line)
-                        try:
-                            sz = int(line.split(b";")[0].strip() or b"0", 16)
-                        except ValueError:
-                            return
-                        if sz == 0:
-                            # 最后一个 chunk：把 trailer 读到空行为止
-                            while True:
-                                t = await s_reader.readline()
-                                if not t:
-                                    return
-                                await _send_down(t)
-                                if t in (b"\r\n", b"\n"):
-                                    break
-                            break
-                        remain = sz
-                        while remain > 0:
-                            blk = await s_reader.read(min(65536, remain))
-                            if not blk:
-                                return
-                            remain -= len(blk)
-                            await _send_down(blk)
-                        crlf = await s_reader.readline()   # chunk 数据后的 CRLF
-                        if not crlf:
-                            return
-                        await _send_down(crlf)
-                else:  # eof：读到上游 EOF 为止，之后必须关上游
-                    while True:
-                        blk = await s_reader.read(65536)
-                        if not blk:
-                            break
-                        await _send_down(blk)
-                    upstream_keep = False
+                    crlf = await s_reader.readline()   # chunk 数据后的 CRLF
+                    if not crlf:
+                        return
+                    await _send_down(crlf)
+            elif mode == "eof":
+                while True:
+                    blk = await s_reader.read(65536)
+                    if not blk:
+                        break
+                    await _send_down(blk)
+            # mode == "nobody"：头就是全部内容，没有正文要读
 
             # ---------- 决定连接去向 ----------
             if not upstream_keep:
@@ -2447,7 +3379,7 @@ async def http_keepalive_relay(ctx, c_reader, c_writer, s_reader, s_writer,
                     s_writer.close()
                 except Exception:
                     pass
-            if not _client_keepalive(headers):
+            if not client_keep:
                 return
     except Abort:
         dl.abort()
@@ -2699,10 +3631,10 @@ async def handle_proxy(reader, writer):
 
         # ---- CONNECT 隧道（HTTPS 主流量）----
         if method == "CONNECT":
-            host, _, port_s = target.partition(":")
-            try:
-                port = int(port_s or 443)
-            except ValueError:
+            # 支持方括号 IPv6 字面量（[::1]:443）：按第一个冒号切分会得到
+            # host="["、端口解析失败，整条 IPv6 隧道路径直接不可用
+            host, port = _split_host_port(target, 443)
+            if not host:
                 return
             label = f"{host}:{port}"
             ctx.label = label
@@ -2743,7 +3675,6 @@ async def handle_proxy(reader, writer):
             port = u.port or (443 if u.scheme == "https" else 80)
             label = f"{host}:{port}"
             ctx.label = label
-            path = (u.path or "/") + ("?" + u.query if u.query else "")
             if _proxy_target_blocked(host, port):
                 # 与 CONNECT 同一套判据：普通 HTTP 绝对地址同样能打到本机端口
                 log_event("reject", "拒绝转发到本机/控制口目标：" + label)
@@ -2766,44 +3697,15 @@ async def handle_proxy(reader, writer):
                 return
             ctx.register(writer)
             ctx.register(s_writer)
-            # 无请求体的 GET/HEAD/DELETE 走 keep-alive 转发（一条客户端连接
-            # 串行多个请求，上游能复用就复用）；带体的请求走单请求短连接 ——
-            # 请求体边界是另一个状态机，不在这条路径上冒险。
-            req_has_body = False
-            cl = _hdr_get(headers, b"content-length")
-            if cl is not None:
-                try:
-                    req_has_body = int(cl.split(b",")[0]) > 0
-                except ValueError:
-                    req_has_body = True
-            if _hdr_get(headers, b"transfer-encoding") is not None:
-                req_has_body = True
-            if method in ("GET", "HEAD", "DELETE") and not req_has_body:
-                await http_keepalive_relay(ctx, reader, writer, s_reader,
-                                           s_writer, prof, method, target, headers)
-                return
-            log_event("connect", f"HTTP 代理 {label}{path[:60]}")
-            # 重写为源站请求，去代理头，单请求短连接（简单可靠）
-            out = [f"{method} {path} HTTP/1.1".encode()]
-            for h in headers:
-                k = h.split(b":", 1)[0].strip().lower()
-                if k in (b"proxy-connection", b"connection", b"keep-alive"):
-                    continue
-                out.append(h.rstrip(b"\r\n"))
-            out.append(b"Connection: close")
-            hdr = b"\r\n".join(out) + b"\r\n\r\n"
-            # 请求头也要吃上行延迟。请求行/请求头是 readline() 逐行读的，读到的
-            # 瞬间就离开管道，不经过 DelayLine——正文为空的 GET 因此只能吃到单向
-            # 延迟，实测 RTT 只有设定值的一半（各 400ms 设定实测 430ms）。
-            # 头只有一块、体量极小，按建连的方式直接等一次即可，不影响吞吐
-            # （吞吐走 pipe 里的延迟队列，多块同时在途）。
-            d = _latency_delay(prof, "up")
-            while d > 0 and await nap(d, G.gen):
-                prof = G.profile        # 期间切换了场景/停止：按新参数重算
-                d = _latency_delay(prof, "up")
-            s_writer.write(hdr)
-            await s_writer.drain()
-            await run_tunnel(ctx, reader, s_writer, s_reader, writer, prof)
+            # 报文层能正确处理的请求全部交给 keep-alive 转发：
+            #   * Expect: 100-continue 由 relay 自己应答（RFC 9110 §10.1.1），
+            #     不再依赖「上游一定会发 100」——上游不发时，客户端等 100、
+            #     源站等正文，两边互等到超时（旧实现的裸隧道正是这个死锁）；
+            #   * TE 不以 chunked 结尾的请求由 _req_framing_error 回 400
+            #     （RFC 9112 §6.3 第 4 步），不能把长度不明的报文原样放行。
+            await http_keepalive_relay(ctx, reader, writer, s_reader,
+                                       s_writer, prof, method, target, headers,
+                                       req_version=_ver)
     except Abort:
         pass
     except (ConnectionError, OSError) as e:
@@ -2925,7 +3827,16 @@ async def set_profile(prof, key):
     # 应用带内容的场景即视为「开启限速」，回到全零（直连）即视为「关闭」
     G.limit_on = has_limits(prof)
     if G.limit_on:
+        ensure_test_session()
         G.last_profile = dict(prof)     # 记住最后一次生效的场景，供「再次开启」复原
+        # 草稿已落地：清掉，否则「测试中改参数 → 停止 → 再开启」会拿测试前的
+        # 旧草稿覆盖刚调好的值。
+        G.pending_profile = None
+        G.pending_key = ""
+    else:
+        # 回到直连 = 本次测试结束。基线留着不动，下次开启时重新打点，
+        # 这样「停止后再导出」仍能读到刚结束那次测试的增量。
+        G.test_open = False
     if prof["flap_sec"] > 0:
         G.flap_task = asyncio.create_task(flap_loop())
 
@@ -2943,12 +3854,18 @@ async def select_scene(prof, key):
         # 用户手动点了别的场景：正在播放的组合必须停下，否则它会到点把场景抢回去
         await stop_combo()
     # 没开启限速时只改 preset_key，不能把「只是选中」的 prof 记成
-    # last_profile（报告兜底会据此谎报测过）。真正生效时由 set_profile
-    # 里的 has_limits 分支统一记录，语义就是「最后一次生效的场景」。
+    # last_profile（报告兜底会据此谎报测过）。但参数要留成草稿：用户停止后
+    # 调好的值，点「开启」时必须原样生效，不能回落到旧场景或默认值。
     if not G.limit_on:
+        G.pending_profile = dict(prof)
+        G.pending_key = key
         return False
     await set_profile(prof, key)
-    G.limit_on = True
+    # 开关只跟「参数是否真的会动流量」走，不能无条件置 True：运行中点「直连」
+    # 这一档时 set_profile 已把参数清成全零，再置 True 就是「界面/API 显示弱网
+    # 已开启，实际一个限制都没施加」，导出报告还会把直连流量当弱网结果。
+    # 显式「开启」按钮的意图由 set_limit 负责，这里不越权。
+    G.limit_on = has_limits(prof)
     return True
 
 
@@ -2965,6 +3882,11 @@ async def _combo_runner(combo):
     steps = combo["steps"]
     try:
         while True:
+            # 这一轮真正播出去的段数。全失效时必须主动退出：循环组合会每轮跳过
+            # 唯一的等待点（_sleep_step），for 循环空转、while 里没有一次 await，
+            # 整个 asyncio 事件循环被占住 —— 代理和控制接口一起失去响应，
+            # 表现是「点了开始弱网，界面和 App 全卡死」。
+            played = 0
             for i, st in enumerate(steps):
                 try:
                     prof = scene_profile(st["key"])
@@ -2972,6 +3894,7 @@ async def _combo_runner(combo):
                     # 这一段的场景被删了 / key 不认识：跳过它，别把整个组合带崩
                     log("组合「%s」第 %d 段的场景不可用，已跳过" % (combo["name"], i + 1))
                     continue
+                played += 1
                 dur = step_seconds(st)
                 G.combo_step = i
                 G.combo_deadline = time.time() + dur
@@ -2982,6 +3905,11 @@ async def _combo_runner(combo):
                     # 播放途中被删掉了：到这里就停，不能再替它改参数
                     log("组合「%s」已被删除，停止播放" % combo["name"])
                     return
+            if played == 0:
+                log("[WeakNet] 组合「%s」的所有段都已失效，停止播放" % combo["name"])
+                log_event("config", "组合「%s」里的场景都已不可用（可能已被删除），已停止播放"
+                          % combo["name"])
+                return
             if not combo.get("loop"):
                 G.combo_deadline = 0             # 播完了：界面上的倒计时收掉
                 log_event("config", "组合「%s」播放完毕，停在最后一段" % combo["name"])
@@ -3013,10 +3941,17 @@ async def _sleep_step(dur, cid):
 
 
 async def start_combo(cid):
-    """立刻按这个组合开始播放（弱网必须已经开着，否则给组合对象会让流量被偷偷限住）"""
+    """立刻按这个组合开始播放（弱网必须已经开着，否则给组合对象会让流量被偷偷限住）
+
+    整支组合一段都播不了时抛 ValueError —— 让调用方明确告诉用户，而不是启动一个
+    每轮什么都不做、还占着事件循环的空播放器。
+    """
     combo = find_combo(cid)
     if combo is None:
         raise KeyError(cid)
+    if not combo_playable_steps(combo):
+        raise ValueError("组合「%s」里的场景都已不可用（可能已被删除），无法播放"
+                         % combo["name"])
     await stop_combo()                    # 换组合时先掐掉上一支，避免两个 Task 抢着改参数
     G.combo_id = combo["id"]
     G.combo_step = -1
@@ -3030,6 +3965,9 @@ async def select_combo(cid):
     combo = find_combo(cid)
     if combo is None:
         raise KeyError(cid)
+    if not combo_playable_steps(combo):
+        # 先校验再改 preset_key：否则会留下一个指向「播不了的组合」的选中态
+        raise ValueError("组合「%s」里的场景都已不可用（可能已被删除）" % combo["name"])
     G.preset_key = COMBO_KEY_PREFIX + combo["id"]
     if not G.limit_on:
         # 还没开始测试：把组合的末段参数记下来没意义，这里只记「选了它」，
@@ -3088,34 +4026,107 @@ async def set_limit(on):
             except KeyError:
                 log("选中的组合已不存在，已切回上一次的场景")
                 await set_profile(G.last_profile or default_profile(), "custom")
-                G.limit_on = True
+                # 兜底换来的场景可能本来就是全零（从没测过 / 用户上次选的是直连）：
+                # 这时再置 True 就是「显示已开启、实际直连」。开关按实际参数落，
+                # 与 select_scene 同口径；用户显式点开启的意图由下面的 else 分支保留。
+                G.limit_on = has_limits(G.profile)
+                return G.limit_on
+            except ValueError as e:
+                # 组合还在，但里面的场景全被删了：不能开一个空播放器
+                log("[WeakNet] %s；已切回上一次的场景" % (e,))
+                log_event("config", "组合里的场景都已不可用，已切回上一次的场景")
+                await set_profile(G.last_profile or default_profile(), "custom")
+                G.limit_on = has_limits(G.profile)
                 return G.limit_on
         else:
-            try:
-                prof = build_preset_profile(key)
-            except Exception:
-                # key 是 "custom"（自定义参数）一类没有预设可查的情况：
-                # 用最后一次生效过的场景复原，避免开启时把用户调好的参数冲掉
-                prof = G.last_profile or default_profile()
+            # 停止态调过的参数优先：key 相同才认，避免拿上一次的草稿套到
+            # 另一支场景上。没有草稿时才按预设 / 最后生效场景复原。
+            if G.pending_profile is not None and G.pending_key == key:
+                prof = dict(G.pending_profile)
+            else:
+                try:
+                    prof = build_preset_profile(key)
+                except Exception:
+                    # key 是 "custom"（自定义参数）一类没有预设可查的情况：
+                    # 用最后一次生效过的场景复原，避免开启时把用户调好的参数冲掉
+                    prof = G.last_profile or default_profile()
             await set_profile(prof, key)
     else:
+        # 关闭前把「运行中调过的参数」记成草稿：否则再开启会按预设重建，
+        # 用户刚调好的值被静默覆盖（真机路径：选 4G → 把延迟调到 800 →
+        # 停一下再开，回到预设的 60ms，前后两次测的不是同一套参数）。
+        # 停止态调参已由 select_scene 存草稿，这里补上「运行中调参」那一半。
+        # 组合 key 不存：下一段会由播放器重新给参数，草稿反而会盖掉它。
+        if not str(key).startswith(COMBO_KEY_PREFIX) and has_limits(G.profile):
+            G.pending_profile = dict(G.profile)
+            G.pending_key = key
         await stop_combo()                 # 关掉限速时组合不能继续在后台换场景
         await set_profile(default_profile(), key)
     G.limit_on = on                     # 覆盖 set_profile 的推断：自定义全零也算「已开启」
+    if G.limit_on:
+        # 自定义全零（显式选择）时 set_profile 不认为「有弱网」，不会开会话；
+        # 只要用户点了开启，本次测试仍要有个基线，报告才不会被历史流量污染。
+        ensure_test_session()
+    else:
+        G.test_open = False
     return G.limit_on
 
 
 async def restart_proxy(host):
+    """切换监听地址：优先「先绑新的、成功后再关旧的」，失败时保持旧监听可用。
+
+    旧实现先 close 再 bind：端口被占用 / 权限不足时 bind 抛错，旧监听已经没了，
+    而 G.proxy_host 也被改成目标值 —— 界面显示新地址，实际哪都连不上。
+    这里先尝试直接绑；Windows 上同端口换绑可能因旧监听占用而失败，再退回
+    「关旧→绑新」，若新地址仍绑不上，就把旧地址重新绑回来再抛错。
+    """
     old = G.proxy_server
-    if old:
-        old.close()
-        await old.wait_closed()
+    old_host = G.proxy_host
+    port = G.proxy_port
+
+    async def _bind(h):
+        return await asyncio.start_server(handle_proxy, h, port, limit=1 << 20)
+
+    new = None
+    try:
+        new = await _bind(host)
+    except OSError:
+        if old is None:
+            raise
+        try:
+            old.close()
+            await old.wait_closed()
+        except Exception:
+            pass
+        G.proxy_server = None
+        try:
+            new = await _bind(host)
+        except OSError:
+            # 新地址绑不上：把旧监听恢复回来，别让用户「切一下就不能用」
+            try:
+                G.proxy_server = await _bind(old_host)
+                G.proxy_host = old_host
+                log_event("error", "切换监听为 %s:%d 失败，已恢复 %s:%d"
+                          % (host, port, old_host, port))
+            except OSError:
+                G.proxy_server = None
+                log_event("error", "切换监听为 %s:%d 失败，且无法恢复 %s:%d"
+                          % (host, port, old_host, port))
+            raise
+    G.proxy_server = new
     G.proxy_host = host
-    G.proxy_server = await asyncio.start_server(
-        handle_proxy, host, G.proxy_port, limit=1 << 20)
+    if old is not None:
+        try:
+            old.close()
+            await old.wait_closed()
+        except Exception:
+            pass
     if host not in ("127.0.0.1", "localhost", "::1"):
         log_event("config", "局域网代理已开启（同网段设备可直连 %s:%d）"
                   % (host, G.proxy_port))
+    # 返回**实际**监听地址：失败路径会把旧监听恢复回来，调用方不能假设
+    # 「传什么就成什么」——GUI 要按这个值决定提示文案。
+    return G.proxy_host
 
 
 # --------------------------------------------------------------------------
@@ -3799,7 +4810,7 @@ async def start_sharing():
 
 
 # 故障类型：与 report_gen.FAULT_TYPES 对齐（本模块不 import 报告层，避免反向依赖）。
-FAULT_EVENT_TYPES = ("disconnect", "dns", "timeout", "reject", "flap")
+FAULT_EVENT_TYPES = _CUM_FAULT_TYPES
 # Android ReportGen.summarizeEvents 拿到 fault_counts_full 后是「全量整体替换」，
 # 不是只取关心的五类。这里也按全类型出快照（至少含 config/connect/error），
 # 否则 Android 报告里的其他事件计数会被这份五类快照抹成 0。
@@ -3807,10 +4818,11 @@ ALL_EVENT_TYPES = FAULT_EVENT_TYPES + ("config", "connect", "error", "idle", "sh
 
 
 def full_fault_counts():
-    """从全量环形缓冲（300 条）统计所有事件类型，不受 GUI 只看最近 60 条影响。
+    """按类型汇总事件计数，供报告使用。
 
-    未知类型（含老快照里的 '?'）也照实计入；report_gen 仍只取 FAULT_TYPES，
-    不会被多出来的键影响。
+    故障类（disconnect/dns/timeout/reject/flap）取**累计计数**：事件环形缓冲
+    只有 300 条，长测时早期的故障会被后续连接/错误事件挤出去，从环形缓冲重算
+    会漏报。其余类型（config/connect/error…）没有独立累计器，仍按环形缓冲算。
     """
     counts = dict.fromkeys(ALL_EVENT_TYPES, 0)
     for e in G.events:
@@ -3818,7 +4830,67 @@ def full_fault_counts():
         if t is None:              # 与 report_gen.summarize_events 的 '?' 口径一致
             t = "?"
         counts[t] = counts.get(t, 0) + 1
+    for k in _CUM_FAULT_TYPES:
+        counts[k] = G.fault_cum.get(k, 0)
     return counts
+
+
+def ensure_test_session():
+    """确保当前有一次测试会话：没有就开一次，已在测试中则保持原基线。
+
+    两个调用点（set_profile 与 set_limit）都可能先看到「开启」，用 test_open
+    去重，避免同一次开启被记成两个会话、把基线打成刚开的那一瞬间。
+    """
+    if G.test_open:
+        return
+    G.test_open = True
+    begin_test_session()
+
+
+def begin_test_session():
+    """开启一次测试会话：给累计计数打基线，报告只统「本次」的增量。
+
+    调用点只有一处（set_profile 里从「未开启」变为「开启」），所以同一次测试
+    中途切场景不会重置基线 —— 切场景仍属于同一次测试。
+    """
+    G.test_seq += 1
+    G.test_started_at = time.time()
+    G.test_base = {"total": G.conns_total, "up": G.bytes_up,
+                   "down": G.bytes_down, "bypass": G.bytes_bypass}
+    G.test_fault_base = dict(G.fault_cum)
+    log_event("config", "测试会话 #%d 开始（报告只统计本次增量）" % G.test_seq)
+
+
+def test_session_payload():
+    """本次测试的增量快照；还没开始过测试时返回 None（老报告逻辑兜底）。"""
+    if G.test_seq <= 0:
+        return None
+    base = G.test_base if isinstance(G.test_base, dict) else {}
+    fbase = G.test_fault_base if isinstance(G.test_fault_base, dict) else {}
+
+    def _delta(cur, key):
+        try:
+            return max(0, int(cur) - int(base.get(key, 0) or 0))
+        except (TypeError, ValueError):
+            return 0
+
+    faults = {}
+    for k in _CUM_FAULT_TYPES:
+        try:
+            faults[k] = max(0, int(G.fault_cum.get(k, 0)) - int(fbase.get(k, 0) or 0))
+        except (TypeError, ValueError):
+            faults[k] = 0
+    started = float(G.test_started_at or 0)
+    return {
+        "seq": G.test_seq,
+        "started_at": int(started),
+        "elapsed": max(0, int(time.time() - started)) if started else 0,
+        "total": _delta(G.conns_total, "total"),
+        "up": _delta(G.bytes_up, "up"),
+        "down": _delta(G.bytes_down, "down"),
+        "bypass": _delta(G.bytes_bypass, "bypass"),
+        "faults": faults,
+    }
 
 
 def status_payload():
@@ -3840,7 +4912,11 @@ def status_payload():
         "gate_open": G.gate_open,
         "listen": {"host": G.proxy_host, "port": G.proxy_port},
         "lan_ip": G.lan_ip,
+        # sysproxy = 系统代理当前是否开启（不区分谁开的）；
+        # sysproxy_owned = 是否由本实例接管。报告与界面必须用后者，
+        # 否则「公司代理开着」会被写成「本次已接管」，是错的归因。
         "sysproxy": sysproxy_enabled(),
+        "sysproxy_owned": sysproxy_owned(),
         "stats": {
             "total": G.conns_total,
             "active": G.conns_active,
@@ -3849,6 +4925,9 @@ def status_payload():
             "bypass": G.bytes_bypass,
             "uptime": int(time.time() - G.started_at),
         },
+        # 本次测试的增量（连接/字节/故障）。报告优先读它：累计值会把开始测试
+        # 之前的历史流量算进本次样本。老快照没有这个键时，报告退回累计口径。
+        "session": test_session_payload(),
         "events": ev,
         # 事件时间线仍是最近 60 条，但故障计数单独从全量缓冲算，
         # report_gen 优先读它，避免早期故障被后来的连接/错误事件挤出后漏报。
@@ -4139,6 +5218,12 @@ async def _h_combo_save(writer, method, body):
         steps.append({"key": str(s.get("key") or ""),
                       "minutes": max(0, int(s.get("minutes", 0) or 0)),
                       "seconds": max(0, int(s.get("seconds", 0) or 0))})
+    # 保存前校验引用：存下一支「每段都指向已删除场景」的组合，播的时候只会空转
+    missing = combo_missing_refs(steps)
+    if missing:
+        _json_err(writer, 400, "第 %s 段引用的场景不存在，请先在编辑器里改掉"
+                  % "、".join(str(i) for i in missing))
+        return
     combo, _all = upsert_combo(data.get("name") or "", steps,
                                loop=bool(data.get("loop")),
                                cid=data.get("id"))
@@ -4224,7 +5309,12 @@ async def _h_preset_select(writer, method, body):
         if find_combo(cid) is None:
             _json_err(writer, 400, "bad request")
             return
-        applied = await select_combo(cid)
+        try:
+            applied = await select_combo(cid)
+        except ValueError as e:
+            # 组合还在但场景全没了：如实报错，别回一个 applied=false 让人以为只是没开限速
+            _json_err(writer, 400, str(e))
+            return
         _json_ok(writer, {"ok": True, "applied": bool(applied),
                           "kind": "combo"})
         return
@@ -4309,7 +5399,11 @@ async def _h_sysproxy(writer, method, body):
         _json_err(writer, 400, "bad request")
         return
     ok = set_sysproxy(enable)
-    log_event("config", "一键" + ("接管本机流量（系统代理已开启）" if enable else "解除接管（系统代理已关闭）"))
+    if ok:
+        log_event("config", "一键" + ("接管本机流量（系统代理已开启）" if enable else "解除接管（系统代理已关闭）"))
+    else:
+        # 失败也照样记「已开启」的话，日志和现实对不上，排查时会被带偏
+        log_event("error", ("开启" if enable else "解除") + "系统代理接管失败（注册表写入被拒或被策略锁定）")
     send_response(writer, 200, JSON_CT,
                   ('{"ok":%s}' % ("true" if ok else "false")).encode())
 

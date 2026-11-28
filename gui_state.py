@@ -50,7 +50,9 @@ def header_view(proxy_host, proxy_port, lan_ip, ctrl_port, sysproxy_on):
     """
     lan = proxy_host == "0.0.0.0"
     addr = f"{lan_ip}:{proxy_port}" if lan else f"127.0.0.1:{proxy_port}"
-    proxy = f"代理地址：{addr}　（App / 设备把代理指向它）"
+    # 覆盖范围写在地址后面：代理只接 HTTP/HTTPS，IPv6 不经过 WeakNet。
+    # 不写清楚的话，用户会拿 IPv6 直连或 QUIC 的测速结果当「弱网没生效」。
+    proxy = f"代理地址：{addr}　（HTTP/HTTPS；IPv6 不接管）"
     return {
         "proxy": proxy,
         "ctrl": f"控制接口：http://127.0.0.1:{ctrl_port}/"

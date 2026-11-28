@@ -83,7 +83,7 @@ javac -encoding UTF-8 -nowarn \
       _jw/com/weaknet/app/_*Test.java
 
 FAIL=0
-for T in _PortIdxTest _FlowMatchTest _ScopeTest _BucketConcTest _PresetNotesTest _ParamNotesTest _NoteWrapTest _ComboNewAgainTest _PauseResumeTest _DelayLineTest _NameLimitTest _ComboCardTest _TabSyncTest _MainStatusSyncTest _FloatSettingsTest _MssClampTest _TunWriteQueueTest _MtuAbTest _FrameStatsTest _UiScreenAdaptTest _RunToggleRestoreTest _ValueClampTest _ReportGenTest _CtrlHostCheckTest _SafePageUrlTest _ShareAuthTest; do
+for T in _PortIdxTest _FlowMatchTest _ScopeTest _BucketConcTest _PresetNotesTest _ParamNotesTest _NoteWrapTest _ComboNewAgainTest _PauseResumeTest _DelayLineTest _NameLimitTest _ComboCardTest _TabSyncTest _MainStatusSyncTest _FloatSettingsTest _MssClampTest _TunWriteQueueTest _MtuAbTest _FrameStatsTest _UiScreenAdaptTest _RunToggleRestoreTest _ValueClampTest _ReportGenTest _CtrlHostCheckTest _SafePageUrlTest _ShareAuthTest _RunSharePoolTest; do
   echo ""
   echo "== $T =="
   if java -cp "$OUT$CPSEP$AJAR" "com.weaknet.app.$T"; then

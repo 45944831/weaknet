@@ -113,11 +113,11 @@ public class Pipe {
 
     /** 令牌桶限速器（字节/秒） */
     public static class Bucket {
-        /** æ¡¶å®¹é = rate Ã BURST_SECï¼æ¶é´é¢åº¦ï¼ä¸æ¯åºå®å­èï¼ã
-         *  ä¸ Windows ç«¯ Bucket.BURST_SEC=0.25 åæºï¼æ¡¶æ¯å¨å±å±äº«çï¼ç©ºé²ææ»¡å
-         *  ä¸ä¸ª 4MB ä¸è½½è½ä¸å£æ°åææ´ç§éé¢ãæ¾ç»ç¨ 1.0sï¼ä¸ Windows
-         *  ç 0.25s å·® 4 åï¼è¿å precision.md Â§5 ãä¸¤ç«¯ä¸è´ãæ¿è¯ºï¼å¤æµ Â§4.4ï¼ã
-         *  æé æ¶èµ·å§ä¸ºç©ºï¼å Windowsï¼ï¼é¢åº¦éç©ºé²æ¶é´æ cap æã */
+        /** 桶容量 = rate × BURST_SEC（时间额度，不是固定字节）。
+         *  与 Windows 端 Bucket.BURST_SEC=0.25 同源：桶是全局共享的，空闲攒满后
+         *  一个 4MB 下载能一口气吃掉整秒配额。曾经用 1.0s，与 Windows
+         *  的 0.25s 差 4 倍，违反 precision.md §5 「两端一致」承诺（复测 §4.4）。
+         *  构造时起始为空（同 Windows）：额度随空闲时间按 cap 攒。 */
         static final double BURST_SEC = 0.25;
         private double rate;
         private double tokens;

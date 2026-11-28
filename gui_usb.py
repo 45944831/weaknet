@@ -148,6 +148,14 @@ class UsbMixin:
             self.usb_serial = None
             self.usb_combo.set("")
 
+        stale, hot = self._usb_stale_hint(devs)
+        if stale:
+            W.log_event("usb", stale)
+            # 只有一台在线残留时自动选中它：否则用户点「断开」清的是下拉框里
+            # 那台正常的设备，残留那台还在断网。
+            if len(hot) == 1 and hot[0] in serials:
+                self.usb_serial = hot[0]
+                self.usb_combo.current(serials.index(hot[0]))
         if blocked:
             b = blocked[0]
             self._usb_state("有 %d 台设备不可用：%s（%s）" % (len(blocked), b["serial"],
@@ -159,8 +167,11 @@ class UsbMixin:
                     "（必要时先在开发者选项里撤销授权、重新插线），再点「🔄 刷新设备」。"
                     % (b["serial"], b["state"]))
         elif not devs:
-            self._usb_state("没有检测到手机 —— 插好 USB 线（要能传数据）、打开"
-                            "「开发者选项 → USB 调试」并允许本机调试后刷新。", MUTED)
+            if stale:
+                self._usb_state(stale, WARN)
+            else:
+                self._usb_state("没有检测到手机 —— 插好 USB 线（要能传数据）、打开"
+                                "「开发者选项 → USB 调试」并允许本机调试后刷新。", MUTED)
             if not quiet:
                 messagebox.showinfo(
                     "没有可用设备",
@@ -168,9 +179,42 @@ class UsbMixin:
                     "1. USB 线能传数据（不是纯充电线）\n"
                     "2. 手机上「开发者选项 → USB 调试」已打开\n"
                     "3. 手机上已点过「允许 USB 调试」（本机）")
+        elif stale:
+            self._usb_state(stale, WARN)
         else:
             self._usb_state("已发现 %d 台设备，选一台点「连接手机」。" % len(devs), MUTED)
             W.log_event("usb", "刷新设备：发现 %d 台" % len(devs))
+
+    def _usb_stale_hint(self, devs):
+        """上次进程被强杀时留下的接管记录 —— 手机可能还指着已经死掉的端口。
+
+        系统代理有 release_stale_sysproxy 在启动时还原，手机侧一直没有对应物：
+        记录留在磁盘上、代理字段留在手机里，而 WeakNet 已经不在了。用户看到的
+        只是「手机突然上不了网」，而且重启电脑也不一定好（adb server 活着时反向
+        映射还在，手机侧监听看着是通的）。
+
+        这里**只提示、不自动清理**：清理要改手机设置，必须让用户看见并自己确认；
+        两个实例同时跑时自动清理还会拆掉另一个实例正在用的接管。
+
+        返回 (提示文案, 在线残留的 serial 列表)。
+        """
+        try:
+            stale = UP.stale_serials()
+        except Exception:
+            return "", []
+        if not stale:
+            return "", []
+        online = set(d["serial"] for d in (devs or []))
+        hot = [s for s, _r in stale if s in online]
+        cold = [s for s, _r in stale if s not in online]
+        parts = []
+        if hot:
+            parts.append("检测到上次未清理的接管：%s（手机可能仍指向已关闭的端口）。"
+                         "选中它点「断开」即可恢复直连。" % "、".join(hot))
+        if cold:
+            parts.append("上次接管过 %s，但那台设备现在没连上；插回后点「断开」清理。"
+                         % "、".join(cold))
+        return " ".join(parts), hot
 
     def _usb_pick(self, _event=None):
         i = self.usb_combo.current()
@@ -194,9 +238,23 @@ class UsbMixin:
         def job():
             # 换机 / 换端口前先把上一台还原：账本记的是「已接管的那台」，不是下拉框
             # 当前选项。不这么做的话，旧机、旧端口的映射都会留到拔线为止。
+            # 上一台没还原成功就不能往下走 —— 否则用户会同时有两台手机指着本机代理，
+            # 而界面只记得后一台，先那台再也清不掉。
+            warn = ""
             if prev[0]:
-                UP.disconnect(adb, prev[0], prev[1] or port)
-            return UP.connect(adb, serial, port)
+                r = UP.disconnect(adb, prev[0], prev[1] or port)
+                if r.get("state") == "failed":
+                    return {"ok": False, "stage": "prev-cleanup",
+                            "msg": ("上一台手机（%s）没能还原：%s\n\n"
+                                    "请把它插回来点「断开」，确认已恢复直连后再连接新设备。"
+                                    % (prev[0], r.get("msg") or "未知错误"))}
+                if r.get("state") == "pending":
+                    warn = ("上一台（%s）无法回读确认，插回后请再点一次「断开」。"
+                            % prev[0])
+            res = UP.connect(adb, serial, port)
+            if warn and res.get("ok"):
+                res["warn"] = warn
+            return res
 
         self._usb_run(job, lambda res: self._usb_on_connect(res, serial, port))
 
@@ -210,10 +268,16 @@ class UsbMixin:
             stage = res.get("stage", "")
             msg = res.get("msg", "未知错误")
             if stage in ("settings", "verify"):
-                # 端口映射已经建好了但代理没写上，留着就是残骸 —— 撤掉
-                self._usb_run(lambda: UP.disconnect(self.usb_adb, serial, port), None)
+                # connect() 内部已经回滚过了（映射 + 代理字段），这里不再重复清理，
+                # 否则会把「刚还原好的原代理」又清一遍
                 title = "手机拒绝了代理设置"
                 body = ("写入失败：\n\n" + msg + "\n\n" + self._usb_alt_help(port))
+            elif stage == "prev-cleanup":
+                title = "上一台手机未还原"
+                body = msg
+            elif stage == "preflight":
+                title = "读不到手机状态"
+                body = msg + "\n\n请确认 USB 线仍然连着、手机没有锁屏断开，然后重试。"
             elif stage == "reverse":
                 title = "端口映射失败"
                 body = (msg + "\n\n请确认：手机已允许 USB 调试、USB 线能传数据"
@@ -232,17 +296,24 @@ class UsbMixin:
         self.usb_conn_serial = res.get("serial") or serial
         self.usb_conn_port = port
         W.log_event("usb", "USB 手机已接管：%s → %s" % (serial, res.get("proxy")))
+        if res.get("warn"):
+            W.log_event("usb", res["warn"])
         if res.get("watch"):
             W.log_event("usb", "已装拔线守护：反向端口消失后手机自动恢复直连")
         else:
             W.log_event("usb", "拔线守护未装上（%s）：拔线后手机可能仍指向本地代理，需插回清理"
                         % (res.get("watch_msg") or "未知原因"))
+        if not res.get("persisted", True):
+            W.log_event("usb", "接管记录未能落盘：本次进程内仍可还原，重启后将退回「清空代理」")
+        restore_to = (res.get("restore_to") or "").strip()
         if W.G.limit_on:
             self._usb_state("已接管 %s → %s" % (serial, res.get("proxy")), OK)
         else:
             self._usb_state("已接管 %s → %s，但限速未开启（当前等同直连）"
                             % (serial, res.get("proxy")), WARN)
             W.log_event("usb", "提示：限速未开启，手机流量只是经过代理，还没施加弱网")
+        if restore_to:
+            W.log_event("usb", "断开时将还原手机原代理：%s" % restore_to)
         self._usb_sync_btns()
 
     def _usb_alt_help(self, port):
@@ -264,7 +335,9 @@ class UsbMixin:
         if self.usb_on and self.usb_conn_serial:
             serial, port = self.usb_conn_serial, self.usb_conn_port or W.G.proxy_port
         else:
-            serial, port = self.usb_serial, W.G.proxy_port
+            # 没接管过也可能有残留（上次异常退出）：端口交给接管记录决定，
+            # 硬套当前代理端口会去删一条不属于我们的映射
+            serial, port = self.usb_serial, None
         if not serial:
             return
         adb = self.usb_adb or self._usb_load_adb()
@@ -289,12 +362,22 @@ class UsbMixin:
 
     def _usb_on_disconnect(self, res, reason=""):
         prefix = (reason + "：") if reason else ""
-        if res.get("ok"):
+        state = res.get("state") or ("restored" if res.get("ok") else "failed")
+        if state == "restored":
             self.usb_on = False
             self.usb_conn_serial = None
             self.usb_conn_port = None
             self._usb_state("已断开，手机恢复直连", MUTED)
             W.log_event("usb", prefix + "已断开手机代理，恢复直连")
+        elif state == "pending":
+            # 命令下发了但读不回来（手机多半已经拔掉）：不能报「已恢复」，
+            # 也不能报「失败」—— 如实说「待重连确认」，并把记录留着
+            self.usb_on = False
+            self.usb_conn_serial = None
+            self.usb_conn_port = None
+            self._usb_state("已下发还原，但无法回读确认（手机可能已断开）——插回后请再点一次「断开」",
+                            WARN)
+            W.log_event("usb", prefix + "手机还原结果待重连确认：" + (res.get("msg") or ""))
         else:
             msg = res.get("msg") or "未知错误"
             self._usb_state("还原手机失败：" + msg[:70] + "（请手动检查手机代理！）", WARN)
@@ -375,7 +458,7 @@ class UsbMixin:
         if self.usb_on and self.usb_conn_serial:
             serial, port = self.usb_conn_serial, self.usb_conn_port or W.G.proxy_port
         else:
-            serial, port = self.usb_serial, W.G.proxy_port
+            serial, port = self.usb_serial, None
         if not serial:
             return
         adb = self.usb_adb or self._usb_load_adb()

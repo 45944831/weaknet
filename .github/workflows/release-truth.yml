@@ -1,0 +1,75 @@
+name: release-truth
+
+# README 的发布数字（版本号 / 字节数 / SHA-256 / 套件数）原先没有任何测试碰过：
+# 第八轮审查发现下载表里两个资产的 SHA-256 全错，而当时 462 项回归全绿。
+#
+# 这个工作流把它们钉到真值来源上：
+#   * 离线段（R 自洽 + L 结构）任何时候都能跑，本地 `python tests/_t_release.py`；
+#   * 联网段（A 真值）比对 GitHub Release 资产的字节数与 digest。
+#
+# 联网段每次都跑：README 指向的 tag 若尚未发布，记 SKIP 而不是 FAIL ——
+# 「先提版本号、过几天再发版」是正常流程，那几天不该天天红。真正会红的只有
+# 「tag 已发布，但文档里的数字/链接和资产对不上」。
+# 只有发版事件额外跑 --strict（要求该 tag 就是最新正式版），用来发现
+# 「发了新版但 README 还指着上一版」。
+
+on:
+  push:
+    paths:
+      - "README.md"
+      - "docs/**"
+      - "tests/_t_release.py"
+      - "tests/test_unit_release_truth.py"
+      - "version.py"
+      - "android/_jw/run.sh"
+      - ".github/workflows/release-truth.yml"
+  pull_request:
+    paths:
+      - "README.md"
+      - "docs/**"
+      - "tests/_t_release.py"
+      - "tests/test_unit_release_truth.py"
+      - "version.py"
+      - "android/_jw/run.sh"
+      - ".github/workflows/release-truth.yml"
+  release:
+    types: [published]
+  schedule:
+    - cron: "0 3 * * 1"        # 每周一 03:00 UTC = 北京时间 11:00
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  PYTHONIOENCODING: utf-8
+
+jobs:
+  truth:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      # 不联网也能查的：README 三处版本号是否对齐、短指纹是否真是全指纹前缀、
+      # run.sh 的套件清单与磁盘上的 _*Test.java 是否双向对齐。
+      - name: 离线自洽与结构
+        run: python tests/_t_release.py
+
+      # 离线段查不出「文档写 A、资产是 B」—— 那个值只存在于 Release API 里。
+      - name: 联网比对 Release 资产（字节数 / digest / 下载链接）
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python tests/_t_release.py --online
+
+      # 发版事件才做「必须是最新正式版」的强校验：它能发现「发了新版但
+      # README 还指着上一版」—— 这类漏改在 check 全绿时最难自己发现。
+      - name: 发版事件：tag 已发布且就是最新正式版
+        if: github.event_name == 'release'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python tests/_t_release.py --strict

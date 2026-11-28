@@ -214,10 +214,11 @@ public class _ReportGenTest {
         String[] caveats = {
             "延迟是**逐包注入**的，不是只在建连时加一次；一次往返约等于上行延迟 + 下行延迟。",
             "丢包由停顿（`stall_ms`）实现，**不是 TCP 重传语义**——别按重传模型去推断吞吐。",
-            "上下行字节是引擎对**已接管连接**的计数，不含直通（未接管）流量。",
-            "事件日志是内存环形缓冲（上限 300 条），GUI 只展示最近 60 条；"
-                    + "故障计数取全量缓冲（fault_counts_full），本报告导出的是点击那一刻的快照。",
-            "运行时长是**引擎本次启动**至今的时间，不是单个场景的持续时间。"
+            "上下行字节是引擎对**已接管连接**的计数，不含直通（未接管）流量；"
+                    + "有会话基线时只统计本次测试的增量。",
+            "五类故障（断连 / DNS / 超时 / 拒连 / 网络切换）取**累计计数**，"
+                    + "不受 300 条事件环形缓冲影响；其余事件仍是最新 300 条的快照。",
+            "运行时长是**引擎本次启动**至今的时间；「测试会话」的已运行时间才是本次测试的时长。"
         };
         for (int i = 0; i < caveats.length; i++) {
             ck("口径说明第 " + (i + 1) + " 条与桌面版逐字一致",
@@ -287,6 +288,43 @@ public class _ReportGenTest {
         ck("build() 输出已脱敏，不含完整对端 IP",
                 !r13.contains("93.184.216.34") && !r13.contains("10.1.2.3")
                         && has(r13, "10.1.x.x", "93.184.x.x"), null);
+
+        // 14) 测试会话：历史连接不能冒充本次样本（外部审查）
+        Map<String, Object> s14 = status();
+        s14.put("limit_on", true);
+        s14.put("last_profile", profile("4G LTE"));
+        s14.put("events", events("测试会话 #3 开始"));
+        statsOf(s14).put("total", 12L);      // 引擎累计：全是开始测试前的
+        statsOf(s14).put("up", 1000L);
+        statsOf(s14).put("down", 2000L);
+        s14.put("session", map("seq", 3, "started_at", 1700000000L, "elapsed", 20L,
+                "total", 0L, "up", 0L, "down", 0L, "bypass", 0L,
+                "faults", map("timeout", 0)));
+        Map<String, Integer> c14 = ReportGen.summarizeEvents(s14);
+        String i14 = ReportGen.join(ReportGen.interpretation(s14, c14,
+                ReportGen.sceneSequence(s14), ReportGen.testedProfile(s14)), "\n");
+        ck("本次零流量：历史连接不算有效样本",
+                i14.contains("不能用于评估弱网效果") && i14.contains("历史连接"), null);
+        String r14 = ReportGen.build(s14);
+        ck("流量表标本次增量并另列累计",
+                r14.contains("本次测试增量") && r14.contains("本次连接数")
+                        && r14.contains("引擎累计连接"), null);
+
+        // 15) 会话增量：结论/有效性只看本次
+        Map<String, Object> s15 = status();
+        s15.put("limit_on", true);
+        s15.put("last_profile", profile("4G LTE"));
+        s15.put("events", events("测试会话 #4 开始", "切换场景：4G LTE"));
+        statsOf(s15).put("total", 100L);
+        s15.put("session", map("seq", 4, "started_at", 1700000100L, "elapsed", 30L,
+                "total", 7L, "up", 300L, "down", 400L, "bypass", 0L,
+                "faults", map("timeout", 2)));
+        Map<String, Integer> c15 = ReportGen.summarizeEvents(s15);
+        String i15 = ReportGen.join(ReportGen.interpretation(s15, c15,
+                ReportGen.sceneSequence(s15), ReportGen.testedProfile(s15)), "\n");
+        ck("会话增量进结论与故障计数",
+                i15.contains("捕获 7 条连接") && i15.contains("黑洞超时×2")
+                        && !i15.contains("100 条连接"), null);
 
         System.out.println("\n结果: " + pass + " 通过 / " + fail + " 失败");
         if (fail > 0) System.exit(1);

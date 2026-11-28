@@ -8,9 +8,12 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Date;
 import java.util.Enumeration;
+import java.util.HashMap;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
@@ -25,6 +28,11 @@ public class WeakNet {
     // 用户必须显式开启（控制台点「开启限速」或选一个场景）才生效
     public volatile boolean limitOn = false;
     public volatile Profile lastProfile = null;    // 最后一次生效的场景（再次开启时复原）
+    // 停止态选中的草稿：没开启限速时选场景只记这里，点「开始」时按它生效。
+    // 旧实现只记 presetKey，custom 没有预设可查，开启时会回落到 lastProfile
+    // 或全零直连，用户刚选好的参数被静默丢掉。
+    public volatile Profile pendingProfile = null;
+    public volatile String pendingKey = "";
     public volatile boolean gateOpen = true;
 
     // ---- 暂停 ----
@@ -47,11 +55,31 @@ public class WeakNet {
     public final AtomicLong bytesDown = new AtomicLong();
     /** UDP 延迟队列满导致丢弃的包数：供事件日志观察，不参与 /api 契约 */
     public final AtomicLong udpDropped = new AtomicLong();
+    /** 超出 MTU 收缓冲被整包丢弃的 UDP 报文数（旧实现是静默截断后照常写回） */
+    public final AtomicLong udpTruncated = new AtomicLong();
 
     public final List<String[]> events = Collections.synchronizedList(new ArrayList<String[]>());
     public final Set<Object> active = Collections.synchronizedSet(new HashSet<Object>());
 
     public long startedAt = System.currentTimeMillis();
+
+    // ---- 本次测试会话（报告口径）----
+    //
+    // connTotal / bytesUp / bytesDown 是引擎生命周期累计值：报告直接用它们，
+    // 会把「开始测试之前的历史流量」算成本次样本 —— 只要跑过一条连接，之后
+    // 开着场景一条新流量都没有，报告也会判「有效」。所以每次从「未开启」变为
+    // 「开启」时打一份基线，报告只读增量；同一次测试内切场景不重置。
+    public volatile int testSeq = 0;          // 会话号，0 = 还没开始过测试
+    public volatile long testStartedAt = 0L;   // 会话开始的墙上时间（毫秒）
+    private int testBaseTotal = 0;
+    private long testBaseUp = 0L;
+    private long testBaseDown = 0L;
+    private final Map<String, Integer> testFaultBase = new HashMap<String, Integer>();
+
+    /** 五类故障的累计计数：事件环形缓冲只有 300 条，长测时早期故障会被挤掉 */
+    public final Map<String, Integer> faultCum = new HashMap<String, Integer>();
+    public static final String[] FAULT_TYPES =
+            {"disconnect", "dns", "timeout", "reject", "flap"};
 
     /** 整机共享的上/下行令牌桶（手机只有一条无线链路，所有连接共享带宽） */
     public volatile Pipe.Bucket upBucket = new Pipe.Bucket(0);
@@ -166,6 +194,17 @@ public class WeakNet {
             events.add(new String[]{t, type, msg});
             while (events.size() > 300) events.remove(0);
         }
+        // 故障类在落事件时就累计：报告阶段不能再从 300 条环形缓冲重算，
+        // 长测时早期故障会被后来的连接/错误事件挤出，导致漏报。
+        for (String f : FAULT_TYPES) {
+            if (f.equals(type)) {
+                synchronized (faultCum) {
+                    Integer v = faultCum.get(type);
+                    faultCum.put(type, v == null ? 1 : v.intValue() + 1);
+                }
+                break;
+            }
+        }
         // 同时输出到 logcat：事件日志在 App 里能看，但排查「连接建上了数据却没过去」
         // 这类问题时，adb logcat 是唯一能实时观察的窗口
         try {
@@ -173,6 +212,48 @@ public class WeakNet {
         } catch (Exception e) {
             // ignore
         }
+    }
+
+    /** 开始一次测试会话：给累计计数打基线。调用方保证只在「关 → 开」时调。 */
+    public synchronized void beginSession() {
+        testSeq++;
+        testStartedAt = System.currentTimeMillis();
+        testBaseTotal = connTotal.get();
+        testBaseUp = bytesUp.get();
+        testBaseDown = bytesDown.get();
+        synchronized (faultCum) {
+            testFaultBase.clear();
+            testFaultBase.putAll(faultCum);
+        }
+        log("config", "测试会话 #" + testSeq + " 开始（报告只统计本次增量）");
+    }
+
+    /** 本次测试的增量快照；还没开始过测试时返回 null（老逻辑兜底）。 */
+    public Map<String, Object> sessionMap() {
+        if (testSeq <= 0) return null;
+        int seq = testSeq;
+        long started = testStartedAt;
+        Map<String, Object> m = new LinkedHashMap<String, Object>();
+        m.put("seq", Integer.valueOf(seq));
+        m.put("started_at", Long.valueOf(started / 1000));
+        m.put("elapsed", Long.valueOf(Math.max(0L,
+                (System.currentTimeMillis() - started) / 1000)));
+        m.put("total", Integer.valueOf(Math.max(0, connTotal.get() - testBaseTotal)));
+        m.put("up", Long.valueOf(Math.max(0L, bytesUp.get() - testBaseUp)));
+        m.put("down", Long.valueOf(Math.max(0L, bytesDown.get() - testBaseDown)));
+        m.put("bypass", Integer.valueOf(0));     // Android 没有按进程旁路统计
+        Map<String, Object> faults = new LinkedHashMap<String, Object>();
+        synchronized (faultCum) {
+            for (String k : FAULT_TYPES) {
+                Integer cur = faultCum.get(k);
+                Integer base = testFaultBase.get(k);
+                faults.put(k, Integer.valueOf(Math.max(0,
+                        (cur == null ? 0 : cur.intValue())
+                                - (base == null ? 0 : base.intValue()))));
+            }
+        }
+        m.put("faults", faults);
+        return m;
     }
 
     public synchronized void setProfile(Profile p, String key) {
@@ -241,13 +322,6 @@ public class WeakNet {
      * 没在点总开关之前，引擎参数保持原样（否则选一下场景流量就被限住了，等于偷偷
      * 开始了测试）：这里只记下 presetKey，等用户点「▶ 开始弱网测试」时由
      * applyLimitOn() 按这个 key 复原出场景再施加。已经在测试中时，切场景照旧立即生效。
-     */
-    /**
-     * 只「选中」一支场景，不启动弱网。
-     *
-     * 没在点总开关之前，引擎参数保持原样（否则选一下场景流量就被限住了，等于偷偷
-     * 开始了测试）：这里只记下 presetKey，等用户点「▶ 开始弱网测试」时由
-     * applyLimitOn() 按这个 key 复原出场景再施加。已经在测试中时，切场景照旧立即生效。
      *
      * 这里会掐掉正在播放的组合：点内置/自定义场景＝「我不要按序列走了，就用这支」，
      * 留着组合线程继续跑会反过来把刚点的场景又覆盖掉。
@@ -268,12 +342,19 @@ public class WeakNet {
             return;
         }
         if (!limitOn) {
-            // 没开启时参数不会落地，但「已选中哪一支」变了，飘窗标题要立刻改过来
+            // 没开启时参数不会落地，但要把「选中了哪一支」的完整参数留成草稿：
+            // 只记 key 的话，custom 在开启时会回落到 lastProfile / 全零。
+            pendingProfile = p;
+            pendingKey = key;
             fireUiChange();
             return;
         }
         setProfile(p, key);             // 里面也会 fire 一次
-        limitOn = true;             // setProfile 不再推断开关，测试中切场景要保持开着
+        // 开关只跟「参数是否真的会动流量」走：运行中点「直连」这一档时
+        // setProfile 已把参数清成全零，再置 true 就是「界面/API 显示弱网已开启、
+        // 实际一个限制都没施加」，导出报告还会把直连流量当成弱网结果。
+        // 显式「开启」按钮的意图由 setLimitOn 负责，这里不越权。
+        limitOn = p != null && p.hasLimits();
     }
 
     /**
@@ -283,6 +364,7 @@ public class WeakNet {
      * @param restore 开启时要应用的场景（由调用方按 presetKey 解析好；为 null 则用直连）
      */
     public synchronized void setLimitOn(boolean on, Profile restore) {
+        boolean wasOn = limitOn;
         // 总开关一动，暂停就失去意义：暂停快照必须清掉。
         // 否则「暂停 → 停止 → 再开始」会带着 paused=true 起来，界面显示「已暂停」、
         // 按钮显示暂停态，而实际参数已经施加、流量正在被限速 —— 状态与事实相反。
@@ -291,10 +373,31 @@ public class WeakNet {
         if (on) {
             setProfile(restore != null ? restore : new Profile(), presetKey);
         } else {
+            // 关闭前把「运行中调过的参数」记成草稿：否则再开启会按预设重建，
+            // 用户刚调好的值被静默覆盖（选 4G → 把延迟调到 800 → 停一下再开，
+            // 回到预设的 60ms，前后两次测的不是同一套参数）。停止态调参已由
+            // selectScene 存草稿，这里补上「运行中调参」那一半。组合 key 不存：
+            // 下一段由播放器重新给参数，草稿反而会盖掉它。
+            if (presetKey != null && !presetKey.startsWith(MyCombos.KEY_PREFIX)
+                    && profile.hasLimits()) {
+                pendingProfile = profile;
+                pendingKey = presetKey;
+            }
             stopComboLocked();        // 停止测试当然也不该留着组合继续按序列改参数
             setProfile(new Profile(), presetKey);
         }
         limitOn = on;      // 开关只认这里：自定义场景哪怕全零，用户点开了就算「已开启」
+        if (on) {
+            // 草稿已落地：清掉，避免「测试中改参数 → 停止 → 再开启」拿旧草稿
+            // 覆盖刚调好的值。
+            pendingProfile = null;
+            pendingKey = "";
+        }
+        if (on && !wasOn) {
+            // 只有真正的「关 → 开」才开新会话；测试中切场景 / 重复下发 enable
+            // 都不能重置基线，否则报告只统计最后一次切换之后的流量。
+            beginSession();
+        }
         fireUiChange();    // setProfile 那次 fire 时开关还是旧值，这里按最终状态再推一次
     }
 
@@ -317,6 +420,12 @@ public class WeakNet {
      * 「全零自定义」想要的效果用「直连」场景就能达成，而假开启是更危险的错。
      */
     public synchronized Profile resolveEnableRestore(Profile presetResolved) {
+        // 停止态选过的草稿优先：那是用户「开启前最后一次选择」，比上一次测试
+        // 留下的 lastProfile 更贴近意图。key 相同才认，避免错配到别的场景。
+        Profile draft = pendingProfile;
+        if (draft != null && pendingKey != null && pendingKey.equals(presetKey)) {
+            return draft;
+        }
         return resolveEnable(presetResolved, presetKey, profile, lastProfile);
     }
 
@@ -516,6 +625,13 @@ public class WeakNet {
         MyCombos.Item c = MyCombos.find(k.substring(MyCombos.KEY_PREFIX.length()));
         if (c == null) {
             presetKey = "direct";    // 组合已被删除：别留一个解析不出来的 key
+            // 调用方（/api/run enable 会先 setLimitOn(true, restore)）可能刚把
+            // 开关置开，但组合没了、restore 又可能是全零：不按实际参数回落就是
+            // 「显示已开启、实际直连」。与桌面端 set_limit 的兜底分支同口径。
+            if (profile == null || !profile.hasLimits()) {
+                limitOn = false;
+                fireUiChange();
+            }
             return false;
         }
         return selectCombo(c);
@@ -545,6 +661,22 @@ public class WeakNet {
      *   恢复时原样传进来，换算统一走 {@link PauseState#remainWait}。
      */
     private void startComboLocked(final MyCombos.Item c, int startStep, long firstRemain) {
+        // 开始播放前先确认这支组合还有段可播：场景被删光后仍然起线程，
+        // 只会得到一个「每轮空转、什么都不做」的播放器（详见 runCombo 里的 played 计数）。
+        int playable = 0;
+        for (MyCombos.Step st : c.steps) {
+            if (profileOfStep(st.key) != null) playable++;
+        }
+        if (playable == 0) {
+            log("error", "组合「" + c.name + "」里的场景都已不可用（可能已被删除），未播放");
+            comboId = null;
+            comboName = null;
+            comboTotal = 0;
+            comboStep = -1;
+            comboDeadline = 0;
+            fireUiChange();
+            return;
+        }
         final String key = comboKey(c.id);
         comboId = c.id;
         comboName = c.name;
@@ -578,6 +710,7 @@ public class WeakNet {
             int i = startStep > 0 ? startStep : 0;
             long remain = firstRemain;           // 起步段还剩多久；往后的段都是整段
             while (true) {
+                int played = 0;                  // 这一轮真正播出去的段数
                 for (; i < c.steps.size(); i++) {
                     MyCombos.Step st = c.steps.get(i);
                     long waitMs = 0;              // 这一段实际要等多久（下面在锁里算）
@@ -609,12 +742,21 @@ public class WeakNet {
                         // 会把正在跑的自己给停掉
                         setProfile(p, key);
                         limitOn = true;
+                        played++;
                     }
                     if (!sleepOwning(waitMs, key)) return;
                     if (MyCombos.find(c.id) == null) {
                         log("config", "组合「" + c.name + "」已被删除，停止播放");
                         return;
                     }
+                }
+                if (played == 0) {
+                    // 整轮没有一个可用段。循环组合会在这里无限空转：每轮都在锁内
+                    // 重复取锁 + 写日志，唯一的等待点（sleepOwning）永远走不到，
+                    // 结果是 CPU 被吃满、界面卡顿，而且「组合还在播」的状态一直挂着。
+                    log("error", "组合「" + c.name + "」的所有段都已失效，停止播放");
+                    comboDeadline = 0;
+                    return;
                 }
                 int n = ComboPlan.nextIndex(c.steps.size() - 1, c.steps.size(), c.loop);
                 if (n < 0) {
@@ -739,6 +881,42 @@ public class WeakNet {
 
     public void register(Object o) {
         if (o != null) active.add(o);
+    }
+
+    /**
+     * 断网窗口最长等待。超过这个时长还关着，说明会话已经没必要等了
+     * （场景被换掉 / 服务在收尾），调用方应当放弃这条会话。
+     */
+    public static final long GATE_WAIT_MAX_MS = 120000L;
+
+    /**
+     * 断网窗口（周期场景的「断网中」）：在**实际投递处**等门闸重新打开。
+     *
+     * 旧实现只在建连时看一眼 gateOpen，已建立的连接在断网窗口里照常收发 ——
+     * 「网络切换」对长连接等于没发生，测出来的曲线自然与真实换网对不上。
+     *
+     * TCP 在这里选择「停住」而不是「丢弃」：本实现没有重传队列，丢掉的字节
+     * 永远不会再来，客户端会收到一个缺口的流（校验必然失败）；停住则等价于
+     * 链路拥塞，窗口恢复后接着送，长连接的恢复过程才能被真实观测到。
+     * UDP 的语义不同，见 UdpSession：那边直接丢，与真实断网一致。
+     *
+     * 计时用单调时钟（elapsedRealtime）：用户改系统时间不该让等待提前结束，
+     * 也不该让它永不结束。
+     *
+     * @return true = 门闸已开，可以投递；false = 等太久，调用方应放弃这条会话
+     */
+    public boolean awaitGate(long maxMs) {
+        if (gateOpen) return true;
+        long end = android.os.SystemClock.elapsedRealtime() + maxMs;
+        while (!gateOpen) {
+            if (android.os.SystemClock.elapsedRealtime() > end) return false;
+            try {
+                Thread.sleep(20);
+            } catch (InterruptedException e) {
+                return false;
+            }
+        }
+        return true;
     }
 
     public void unregister(Object o) {

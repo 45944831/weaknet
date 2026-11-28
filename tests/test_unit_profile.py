@@ -56,8 +56,10 @@ def test_norm_combo_steps_drops_nested_combo_and_clamps():
 
 def test_step_duration_helpers():
     assert W.step_seconds({"minutes": 2, "seconds": 30}) == 150
-    assert W.step_seconds({"minutes": 9999, "seconds": 9999}) == \
-        W.STEP_MAX_MINUTES * 60 + W.STEP_MAX_SECONDS
+    # 上限是 600 分 59 秒（spec combo.max_minutes / max_seconds）→ 36059 秒。
+    # 这里写死数字，不写成 STEP_MAX_MINUTES * 60 + STEP_MAX_SECONDS：后者在
+    # 上限被改动时两边一起变，测试永远绿，等于没验。
+    assert W.step_seconds({"minutes": 9999, "seconds": 9999}) == 36059
     assert W.step_text({"minutes": 2, "seconds": 30}) == "2 分 30 秒"
     assert W.step_text({"minutes": 5}) == "5 分"
     assert W.step_text({"seconds": 30}) == "30 秒"

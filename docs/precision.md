@@ -35,7 +35,7 @@ if ((pkt[0] >> 4) != 4) { dlog("hp: not ipv4"); return; }
 | 流量类型 | 是否受弱网控制 | 采集后果 |
 |---|---|---|
 | IPv4（TCP/UDP，含经 tun 的 DNS） | 是 | 正常 |
-| IPv6（双栈 App 的 AAAA 路径） | **否**，走物理网 | 测出来是真实网速，看起来「弱网没生效」 |
+| IPv6（双栈 App 的 AAAA 路径） | **否**，不经过 WeakNet | 不施加弱网；按 `VpnService` 默认语义，未添加某地址族的地址/路由/DNS 时该族出站被阻断，因此纳管 App 的 IPv6 会被确定性阻断，IPv6-only 环境会断网 |
 | DoH / DoT（Private DNS） | **可能否**（netd 按 Network Score 选出口） | DNS 阶段不吃延迟/丢包，首字节偏小 |
 
 **不要直接加 `addRoute("::/0", 0)`**：解析器只支持 IPv4，加了会让 IPv6 包进 tun 后被
@@ -456,19 +456,17 @@ B 随速率**线性增长**、B/速率恒定 → 是时间额度。把 B 折算�
 超发比例 ≈ min(空闲时长, BURST_SEC) / 理想时长，理想时长 = S×8/R
 ```
 
-**两端不一致（未修，需产品决策）**：Windows `Bucket.BURST_SEC = 0.25`，
-Android `Pipe.Bucket` 原容量是 `rate`（1.0 s），2026-11-14 已对齐为
-`rate × BURST_SEC = 0.25 s`（真机 A/B：短样本超发 1.463× → 1.014×）。
-同一 1 MB / 8000 kbps 样本，Windows 理论上限 +24%，Android 理论上限 **+98%**。
-`Bucket` 的类注释里明确写了「不能给到 1 秒：4 MB 下载会一口气吃掉整秒配额，
-测出来变成两倍多」——**这条结论只落在 Windows 侧**，Android 仍是我行我素。
-这与 §5「同一份配置在两端行为一致」的承诺直接冲突。
+**两端已对齐（2026-11-14）**：Windows `Bucket.BURST_SEC = 0.25`；Android
+`Pipe.Bucket` 原容量是 `rate`（1.0 s），已改为 `rate × BURST_SEC = 0.25 s`
+（真机 A/B：短样本超发 1.463× → 1.014×）。对齐前，同一 1 MB / 8000 kbps 样本
+Windows 理论上限 +24%、Android 上限 **+98%**，两端差 4 倍，与 §5「同一份配置
+在两端行为一致」直接冲突 —— 这是当时必须改的理由，留下作历史对照。
 
-改动点（Android，各一处）：`Pipe.java` 的 `setKbps` 与 `refill` 里
-`tokens > rate → tokens = rate` 改为 `rate * BURST_SEC`，并让构造函数初值同源。
-**未改**：Android 只能真机量化，本轮无设备，且改桶容量会改变真实链路的突发容忍度，
-需先 A/B。`tests/_t_spec_parity.py` 的 A11 已锁住「按时间计」这一语义，
-并把两端的秒数差打在 PASS 行里，防止再被写成字节额度。
+改动点（Android，各一处，提交 `c09ce68`）：`Pipe.java` 的 `setKbps` 与
+`refill` 里 `tokens > rate → tokens = rate` 改为 `rate * BURST_SEC`；构造函数
+初值同为 0（与 Windows 一致：额度随空闲时间按 cap 攒）。`tests/_t_spec_parity.py`
+的 A11 锁住「按时间计」这一语义，并把两端的秒数差打在 PASS 行里，防止再被写成
+字节额度。
 
 **采集侧建议**：任何 `< 1 s` 理想时长的样本都不该直接引用；要么预热丢弃前 0.3 s，
 要么在结果里标注 `burst_credit_s`。

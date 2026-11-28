@@ -178,10 +178,14 @@ def test_tested_profile_prefers_last_profile():
 def test_scene_sequence_dedup_and_order():
     # 按 status_payload 的口径：最新在前。函数内部翻回正序，
     # 让报告里「依次测过」按真实发生顺序呈现。
+    #
+    # 只去相邻重复：A → B → A 是「切回去复测」，全局去重会把它压成 A → B，
+    # 报告就丢了最后那段。这里正序是 4G → 4G → DNS → 4G → 4G，
+    # 相邻合并后应为 4G → DNS → 4G。
     ev = [{"msg": "切换场景：4G LTE"}, {"msg": "停止限速（恢复直连）"},
           {"msg": "切换场景：DNS 故障"}, {"msg": "开启限速：4G LTE"},
           {"msg": "切换场景：4G LTE"}]
-    assert R.scene_sequence(ev) == ["4G LTE", "DNS 故障"]
+    assert R.scene_sequence(ev) == ["4G LTE", "DNS 故障", "4G LTE"]
 
 
 def test_scene_sequence_recognizes_main_entry_and_combos():
@@ -195,9 +199,10 @@ def test_scene_sequence_recognizes_main_entry_and_combos():
         {"msg": "飘窗切换场景：高丢包（30% 丢包）"},
         {"msg": "开始弱网测试：5G（良好覆盖）"},  # 去重
     ]
-    # 最新在前，翻回正序：5G → 高丢包 → 组合
+    # 最新在前，翻回正序：5G → 高丢包 → 5G → 组合。
+    # 只合并相邻重复，所以中间的 5G 会保留（切回去复测要如实呈现）。
     assert R.scene_sequence(ev) == [
-        "5G（良好覆盖）", "高丢包（30% 丢包）", "弱网三连"]
+        "5G（良好覆盖）", "高丢包（30% 丢包）", "5G（良好覆盖）", "弱网三连"]
 
 
 def test_scene_name_rejects_unapplied_selection():
@@ -564,3 +569,51 @@ def test_redact_fullwidth_period_and_digits():
 def test_redact_fullwidth_normal_text_untouched():
     assert R.redact_text("正常文本，没有地址") == "正常文本，没有地址"
     assert R.redact_text("v1.2.3.4 与 14:44:18") == "v1.2.3.4 与 14:44:18"
+
+
+def _payload_with_session(total, faults=None):
+    """构造一份带会话基线的快照：stats 是引擎累计，session 是本次增量。"""
+    return {
+        "version": "1.1.20",
+        "build": 130,
+        "stats": {"total": 12, "active": 0, "up": 1000, "down": 2000,
+                  "bypass": 0, "uptime": 900},
+        "session": {"seq": 3, "started_at": 1700000000, "elapsed": 20,
+                    "total": total, "up": 300, "down": 400, "bypass": 0,
+                    "faults": faults or dict.fromkeys(R.FAULT_TYPES, 0)},
+        "limit_on": True,
+        "profile": {"name": "4G LTE"},
+        "last_profile": {"name": "4G LTE"},
+        "events": [],
+    }
+
+
+def test_report_flags_history_only_traffic_as_invalid():
+    """有历史连接、但本次零流量：不能判有效，还要点明历史不计入。"""
+    payload = _payload_with_session(0)
+    text = "\n".join(R.interpretation(payload, {}, None, []))
+    assert "**不能用于评估弱网效果**" in text
+    assert "本次测试开始后没有新流量" in text
+    assert "12 条历史连接" in text
+    # 一句话结论同样不能用累计值
+    assert "本次尚未捕获到经过代理的连接" in R.conclusion(payload, {})
+
+
+def test_report_counts_only_session_delta():
+    payload = _payload_with_session(7, {"timeout": 2})
+    counts = R.merge_fault_counts(payload, {})
+    text = "\n".join(R.interpretation(payload, counts, None, []))
+    assert "捕获 7 条连接" in text
+    assert "超时×2" in text
+    assert "12 条连接" not in text
+    assert "计数 12" not in R.conclusion(payload, counts)
+
+
+def test_fault_counts_prefer_session_delta_over_lifetime():
+    payload = {
+        "fault_counts_full": {"timeout": 99, "error": 5},
+        "session": {"seq": 2, "faults": {"timeout": 2}},
+    }
+    counts = R.merge_fault_counts(payload, {})
+    assert counts["timeout"] == 2, counts       # 本次增量
+    assert counts["error"] == 5, counts         # 其余类型仍取引擎快照

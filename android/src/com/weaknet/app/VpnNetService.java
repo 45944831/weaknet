@@ -19,7 +19,7 @@ import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
-import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.SynchronousQueue;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ThreadPoolExecutor;
@@ -32,6 +32,8 @@ import java.util.concurrent.TimeUnit;
 public class VpnNetService extends VpnService {
     public static final String ACTION_STOP = "com.weaknet.app.STOP_VPN";
     public static final String ACTION_START = "com.weaknet.app.START_VPN";
+    /** 重建启动携带的代次，用来识别「排队的重启在停止之后才到」 */
+    static final String EXTRA_GEN = "weaknet.start_gen";
 
     /**
      * tun 的 MTU —— **单一真值**。
@@ -137,6 +139,39 @@ public class VpnNetService extends VpnService {
      *  而它 5 秒内没调用 startForeground，Android 8+ 会直接报错。 */
     private static volatile VpnNetService instance = null;
 
+    /**
+     * 重建代次：每次 stop() 与每次 rebuild() 都 +1。
+     *
+     * rebuild 是「stop → 等 700ms → ACTION_START」的两步动作，中间这 700ms 里
+     * 用户完全可能点停止。没有代次时，那个已经排队的重启任务照跑，而且它带的是
+     * ACTION_START —— 会顺手清掉 userStopped，于是「刚停掉的 VPN 自己又起来了」，
+     * 界面上还显示已停止。现在停止会推进代次，排队的任务发现自己过期就自己作废。
+     */
+    private static volatile int startGen = 0;
+    /** 排队中的重建任务；停止时取消它，避免 700ms 后凭空多出一次启动 */
+    private static Runnable pendingRebuild = null;
+    /** rebuild 的延迟：等上一个 tun 完全释放再建，避免路由/端口冲突 */
+    static final long REBUILD_DELAY_MS = 700L;
+
+    /**
+     * 最近一次「仅接管」实际生效的范围说明，例如「仅选定：2/3 生效（无效：a,b）」。
+     * 白名单里的包可能已被卸载 —— 不把生效数说清楚，用户会以为三个 App 都在弱网里。
+     */
+    private static volatile String scopeNote = "";
+
+    /** 被整包拒绝的 IP 分片数（数据面不做重组，见 noteFragDropped） */
+    private final java.util.concurrent.atomic.AtomicLong fragDropped =
+            new java.util.concurrent.atomic.AtomicLong();
+    /** 因并发上限被拒绝的下行读循环数：过载的可见证据，进日志与报告 */
+    final java.util.concurrent.atomic.AtomicLong poolRejected =
+            new java.util.concurrent.atomic.AtomicLong();
+    private final java.util.concurrent.atomic.AtomicBoolean poolWarned =
+            new java.util.concurrent.atomic.AtomicBoolean();
+
+    static String scopeNote() {
+        return scopeNote;
+    }
+
     private ParcelFileDescriptor tun;
     private FileInputStream tunIn;
     private FileOutputStream tunOut;
@@ -158,11 +193,25 @@ public class VpnNetService extends VpnService {
      */
     private static final int OUTQ_CAP = 1024;
     /**
-     * 下游读循环线程池：固定 32 + 有界队列 256（权衡见 {@link #runOnPool}）。
+     * 下游读循环线程池上限（权衡见 {@link #runOnPool}）。
      * 常量放在这里，改上限时不必翻到 startVpn 里找。
+     *
+     * 旧值是「固定 32 + 队列 256」。问题不在 32 本身，而在**队列**：
+     * 32 条 keep-alive 连接把线程占满后，第 33 条及以后的会话会把读循环任务
+     * 排进队列干等 —— 工具侧握手已经完成，客户端却一个字节都收不到，看起来
+     * 像「连接成功但服务端不响应」，实际是被排队。队列里排着的任务没有任何
+     * 线程会去执行，只能等其他连接断开，最长要等到空闲回收的 300s。
+     *
+     * 现在改成「不排队，直接扩线程到上限，超限立刻拒绝并说明原因」：
+     *   - 上限 96：远高于单机弱网测试的典型并发；每个阻塞读线程的栈是虚拟
+     *     内存，实际只碰到几十 KB，96 条对手机毫无压力。
+     *   - 用 SynchronousQueue：没有队列，任务要么马上有线程，要么当场被拒。
+     *   - 拒绝即 RST + 关会话 + 记日志，用户立刻能看到「并发连接超限」，
+     *     而不是对着一个永远不响的连接猜。
      */
-    private static final int DOWN_POOL_SIZE = 32;
-    private static final int DOWN_QUEUE_CAP = 256;
+    private static final int DOWN_POOL_MAX = 96;
+    /** 线程数到这里就记一条警告：还没到上限，但已经该怀疑是不是连接泄漏了 */
+    private static final int DOWN_POOL_WARN = 64;
     /** 抽成纯 JDK 类是为了让「有界 / FIFO / 停止清空」能被单测覆盖，见 _TunWriteQueueTest */
     private final TunWriteQueue outQ = new TunWriteQueue(OUTQ_CAP);
     private volatile boolean writerRunning = false;
@@ -227,9 +276,22 @@ public class VpnNetService extends VpnService {
         }
         try {
             e.execute(r);
+            warnPoolIfCrowded(e);
         } catch (RejectedExecutionException ex) {
-            WeakNet.I.log("error", "并发连接超限（" + name + "），已关闭该会话");
+            poolRejected.incrementAndGet();
+            WeakNet.I.log("error", "并发连接超限（" + name + "，上限 " + DOWN_POOL_MAX
+                    + " 条），已关闭该会话");
             rejectSession(onReject);
+        }
+    }
+
+    /** 池线程数越过警戒线时记一条（只记一次，避免刷屏） */
+    private void warnPoolIfCrowded(ExecutorService e) {
+        if (!(e instanceof ThreadPoolExecutor)) return;
+        int n = ((ThreadPoolExecutor) e).getPoolSize();
+        if (n >= DOWN_POOL_WARN && poolWarned.compareAndSet(false, true)) {
+            WeakNet.I.log("error", "下行线程数已达 " + n + "（上限 " + DOWN_POOL_MAX
+                    + "），接近并发上限");
         }
     }
 
@@ -272,6 +334,11 @@ public class VpnNetService extends VpnService {
      */
     public static void stop(Context ctx, boolean resetMtuTier) {
         userStopped = true;
+        // 停止优先于任何排队的重建：推进代次 + 取消任务，双保险。
+        // 只取消任务不够 —— 任务可能已经开始执行，它会在 onStartCommand 里
+        // 凭 gen 判断自己过期。
+        startGen++;
+        cancelPendingRebuild();
         if (resetMtuTier && tunMtu != DEFAULT_TUN_MTU) {
             tunMtu = DEFAULT_TUN_MTU;
             try {
@@ -310,24 +377,43 @@ public class VpnNetService extends VpnService {
      * 改了「接管范围」后重建通道。VpnService 的「哪些 App 走 tun」只在 establish() 时生效，
      * 不停掉重建的话，新范围对已经建立的连接无效（表现就是「加了名单却没生效」）。
      *
-     * 用 ACTION_START 重启：它会清掉 userStopped，避免被上一轮的「不复活」逻辑挡住。
+     * 重启走 ACTION_START（它会清掉 userStopped，避免被上一轮的「不复活」逻辑挡住），
+     * 但启动命令带上代次；停止会推进代次，因此「排队的重启」在停止后自动作废。
      */
     public static void rebuild(Context ctx) {
         boolean was = active;
         stop(ctx, false);      // 重建就是为用新档建 tun，复位会把刚选的档冲掉
         if (!was) return;
-        new android.os.Handler(ctx.getMainLooper()).postDelayed(new Runnable() {
+        final int gen = startGen;      // stop() 刚刚推进过，本次重建就用这个代次
+        final Context app = ctx.getApplicationContext();
+        Runnable task = new Runnable() {
             public void run() {
+                if (gen != startGen) return;        // 期间又被停止 / 又换了一次范围
+                pendingRebuild = null;
                 try {
-                    Intent i = new Intent(ctx, VpnNetService.class);
+                    Intent i = new Intent(app, VpnNetService.class);
                     i.setAction(ACTION_START);
-                    if (android.os.Build.VERSION.SDK_INT >= 26) ctx.startForegroundService(i);
-                    else ctx.startService(i);
+                    i.putExtra(EXTRA_GEN, gen);
+                    if (Build.VERSION.SDK_INT >= 26) app.startForegroundService(i);
+                    else app.startService(i);
                 } catch (Exception e) {
                     WeakNet.I.log("error", "重建 VPN 失败：" + e.getMessage());
                 }
             }
-        }, 700);      // 等上一个 tun 完全释放再建，避免路由/端口冲突
+        };
+        pendingRebuild = task;
+        new android.os.Handler(ctx.getMainLooper()).postDelayed(task, REBUILD_DELAY_MS);
+    }
+
+    private static void cancelPendingRebuild() {
+        Runnable r = pendingRebuild;
+        pendingRebuild = null;
+        if (r == null) return;
+        try {
+            new android.os.Handler(android.os.Looper.getMainLooper()).removeCallbacks(r);
+        } catch (Exception e) {
+            // 没有主线程 Looper（极少见）时任务本身会凭 gen 作废
+        }
     }
 
     public int onStartCommand(Intent intent, int flags, int startId) {
@@ -366,6 +452,15 @@ public class VpnNetService extends VpnService {
             return START_NOT_STICKY;
         }
         if (ACTION_START.equals(act)) {
+            // 带代次的启动来自 rebuild：只要期间发生过停止/再次重建，就作废。
+            // 这一条是「停止后 700ms 内被重启任务复活」的直接修复点。
+            if (intent.hasExtra(EXTRA_GEN)) {
+                int gen = intent.getIntExtra(EXTRA_GEN, -1);
+                if (gen != startGen) {
+                    dlog("start: 忽略过期的重建启动（gen " + gen + " ≠ " + startGen + "）");
+                    return START_NOT_STICKY;
+                }
+            }
             // 用户显式启动：清除「已停止」意图，保证停止后能再次接管
             userStopped = false;
             if (!running) startVpnGuarded();
@@ -446,10 +541,14 @@ public class VpnNetService extends VpnService {
                 .setSession("WeakNet 弱网模拟")
                 .addAddress("10.8.0.2", 24)
                 .addRoute("0.0.0.0", 0)
-                .addDnsServer("8.8.8.8")
-                .addDnsServer("114.114.114.114")
+                // DNS 列表不能凭「8.8.8.8 通用」这种假设：国内网络到 8.8.8.8:53
+                // 基本不可达，它排第一时，每个未命中缓存的解析都要先等它失败，
+                // 这段等待会被当成「网络慢」写进报告。用两个国内可达的地址；
+                // 查询内容原样转发，不做劫持也不改写入参。
+                .addDnsServer("223.5.5.5")
+                .addDnsServer("119.29.29.29")
                 .setMtu(tunMtu())
-                .setBlocking(true);
+                .setBlocking(true);   // establish() 默认非阻塞，必须显式改（SDK 文档）
         // ---- 按接管范围决定哪些 App 的流量进 tun ----
         // 注意：addAllowedApplication 与 addDisallowedApplication 互斥，二者只能取其一，
         // 同一个 Builder 上同时调用会抛异常，所以这里必须走 if/else 而不是都调用。
@@ -461,6 +560,7 @@ public class VpnNetService extends VpnService {
                 // 若照样建 tun，allowed 集合为空等于没有任何 App 能出网，表现是全网断网，
                 // 与用户「没选 = 还没开始接管」的预期相反。
                 WeakNet.I.log("error", "接管范围=仅选定，但未选择任何 App，暂不接管");
+                scopeNote = "仅选定：未选择 App，未接管";
                 return;
             }
             // 把自己排除掉：一旦 WeakNet 自己的流量也进 tun，控制台 8899 就跟着被接管，
@@ -471,15 +571,32 @@ public class VpnNetService extends VpnService {
             }
             if (allow.isEmpty()) {
                 WeakNet.I.log("error", "接管范围只剩 WeakNet 自身，已忽略，暂不接管");
+                scopeNote = "仅选定：只剩 WeakNet 自身，未接管";
                 return;
             }
+            // 逐个添加并**数成功的个数**。Builder 的语义是「没有成功添加任何允许应用
+            // 时默认允许所有应用」—— 选中的 App 全被卸载后，原来的写法会静默把
+            // 「仅接管 3 个 App」变成「接管全机」，正好与用户的限制意图相反。
+            int okCount = 0;
+            StringBuilder bad = new StringBuilder();
             for (String p : allow) {
                 try {
                     b.addAllowedApplication(p);
+                    okCount++;
                 } catch (Exception e) {
+                    if (bad.length() > 0) bad.append(",");
+                    bad.append(p);
                     WeakNet.I.log("error", "无法接管 " + p + "：" + e.getMessage());
                 }
             }
+            if (okCount == 0) {
+                WeakNet.I.log("error", "接管范围=仅选定，但选中的 App 全部无效（可能已卸载），"
+                        + "已拒绝建立 VPN —— 否则会静默扩大成接管全部应用");
+                scopeNote = "仅选定：0/" + allow.size() + " 生效，已拒绝建立（避免扩大接管）";
+                return;
+            }
+            scopeNote = "仅选定：" + okCount + "/" + allow.size() + " 生效"
+                    + (bad.length() == 0 ? "" : "（无效：" + bad + "）");
         } else {
             // 排除自身，保证控制台页面（127.0.0.1:8899）与代理通道不被自己捕获
             try {
@@ -488,15 +605,36 @@ public class VpnNetService extends VpnService {
                 // ignore
             }
             if ("exclude".equals(mode)) {
+                int okCount = 0;
+                StringBuilder bad = new StringBuilder();
                 for (String p : pkgs) {
                     if (getPackageName().equals(p)) continue;
                     try {
                         b.addDisallowedApplication(p);
+                        okCount++;
                     } catch (Exception e) {
+                        if (bad.length() > 0) bad.append(",");
+                        bad.append(p);
                         WeakNet.I.log("error", "无法排除 " + p + "：" + e.getMessage());
                     }
                 }
+                scopeNote = "排除：" + okCount + "/" + pkgs.size() + " 生效"
+                        + (bad.length() == 0 ? "" : "（无效：" + bad + "）");
+            } else {
+                scopeNote = "全部应用";
             }
+        }
+        // targetSdk >= Q 的 VPN 会被系统**默认标记为计费网络**（SDK 文档
+        // setMetered 条目原文）。这个默认值会让 App 主动降码率、推迟后台传输、
+        // 切到 Data Saver 行为 —— 测出来的就不再是这条网络的真实表现，而是
+        // 「系统告诉 App 这是计费网」之后的表现。setMetered(false) 的语义是
+        // 沿用底层网络的真实计费属性，正是透明测量想要的。
+        //
+        // API 29 才有这个方法，而 minSdk 是 24：必须带版本判断，否则低版本
+        // 一开 VPN 就 NoSuchMethodError。Q 之前的系统本来也不会自动标记计费，
+        // 低版本不调用即可。
+        if (Build.VERSION.SDK_INT >= 29) {
+            b.setMetered(false);
         }
         try {
             tun = b.establish();
@@ -514,31 +652,32 @@ public class VpnNetService extends VpnService {
         active = true;
         effectiveTunMtu = tunMtu;   // 采集/脚本的就绪判据（见 effectiveTunMtu 注释）
         userStopped = false;
-        ThreadPoolExecutor pool = new ThreadPoolExecutor(DOWN_POOL_SIZE, DOWN_POOL_SIZE,
+        // core=0 + SynchronousQueue：来一个读循环就给一个线程，给不出就拒绝，
+        // 不排队。空闲 30s 的线程自动回收，所以常驻线程数≈真正在传数据的连接数。
+        ThreadPoolExecutor pool = new ThreadPoolExecutor(0, DOWN_POOL_MAX,
                 30L, TimeUnit.SECONDS,
-                new LinkedBlockingQueue<Runnable>(DOWN_QUEUE_CAP),
+                new SynchronousQueue<Runnable>(),
                 new ThreadPoolExecutor.AbortPolicy());
-        // 空闲连接不读数据时线程照样阻塞着，这里让核心线程也能超时回收：
-        // 池大小是上限，不是常驻 32 个线程（手机上空闲线程也是成本）。
-        pool.allowCoreThreadTimeOut(true);
         exec = pool;
         sched = Executors.newSingleThreadScheduledExecutor();
         // 写线程必须早于 readLoop 起来：readLoop 处理完第一个包就会开始回写
         startWriter();
         WeakNet.onProfileChange = new Runnable() {
             public void run() {
-                // 恢复直连 / 停止模拟时不要掐断：连接会自然按新参数继续（限速桶已归零）
+                // 切场景**不再**重置已有连接。
+                //
+                // 旧实现切到任何非直连场景都会对全部 TCP 会话发 RST、清空 UDP 表，
+                // 理由是「让已有连接按新参数重建」。但每个包都会重读 WeakNet.I.profile，
+                // 参数本来就是立即生效的，重建纯属多余 —— 代价却是把「长连接在换档后
+                // 能否恢复」这件事整个抹掉：测出来的永远是「重连成功」，而不是恢复过程。
+                // 需要重建的只有 MTU 这类只能在 establish() 时确定的量，那条路径走
+                // rebuild()，与这里无关。
                 if ("direct".equals(WeakNet.I.presetKey)) return;
-                // 切到弱网场景：让已有连接按新参数重建。
-                // 与清理线程的「遍历 + remove」互斥，避免 stop→restart 时
-                // 旧代次的 cleanup() 把新会话误清（详见 cleanup 注释）。
-                synchronized (tcpSessions) {
-                    for (TcpSession s : tcpSessions.values()) s.abort();
-                    tcpSessions.clear();
-                }
-                synchronized (udpSessions) {
-                    for (UdpSession s : udpSessions.values()) s.close();
-                    udpSessions.clear();
+                int n = 0;
+                synchronized (tcpSessions) { n += tcpSessions.size(); }
+                synchronized (udpSessions) { n += udpSessions.size(); }
+                if (n > 0) {
+                    WeakNet.I.log("config", "场景已切换，保留 " + n + " 条在途会话按新参数继续");
                 }
             }
         };
@@ -667,11 +806,20 @@ public class VpnNetService extends VpnService {
         dlog("readLoop: EXIT running=" + running);
     }
 
-    /** 快路径查表：一次进入监视器，命中且 IP 对得上才返回（miss 才走慢路径） */
+    /**
+     * 快路径查表：一次进入监视器，命中且 IP 对得上才返回（miss 才走慢路径）。
+     *
+     * 已关闭的会话一律当作 miss 并清槽。旧实现只看 sameFlow：一条会话关闭后，
+     * 它的快表槽位要等到 300s 定时清理才失效，这段时间里同四元组的新 SYN 会
+     * 被交给已停用的串行执行器 —— 任务被静默丢弃，新连接永远建不起来，
+     * 表现就是「断开重连要等好几分钟」。
+     */
     private TcpSession tcpFastGet(int idx, byte[] pkt) {
         synchronized (tcpFast) {
             TcpSession s = tcpFast[idx];
-            return (s != null && s.sameFlow(pkt)) ? s : null;
+            if (s == null) return null;
+            if (s.isClosed()) { tcpFast[idx] = null; return null; }
+            return s.sameFlow(pkt) ? s : null;
         }
     }
 
@@ -684,6 +832,14 @@ public class VpnNetService extends VpnService {
     private UdpSession udpFastGet(int idx) {
         synchronized (udpFast) {
             return udpFast[idx];
+        }
+    }
+
+    /** 从会话表摘除（仅当表里还是它自己，避免把同 4 元组的新会话误删） */
+    void removeUdp(UdpSession s) {
+        synchronized (udpSessions) {
+            UdpSession cur = udpSessions.get(s.key);
+            if (cur == s) udpSessions.remove(s.key);
         }
     }
 
@@ -701,6 +857,18 @@ public class VpnNetService extends VpnService {
         }
     }
 
+    /**
+     * 分片报文丢弃计数 + 指数退避提示。
+     *
+     * 本数据面不做 IP 重组：分片报文一律整包拒绝（明确语义，而不是「解析出半截」）。
+     * 但拒绝必须**可见** —— 否则「大 UDP 报文收不到」会被误判成弱网丢包。
+     */
+    private void noteFragDropped() {        long n = fragDropped.incrementAndGet();
+        if ((n & (n - 1)) == 0) {
+            dlog("hp: 分片报文已整包拒绝（累计 " + n + "），数据面不做 IP 重组");
+        }
+    }
+
     private void handlePacket(final byte[] pkt, int len) {
         try {
             if ((pkt[0] >> 4) != 4) { dlog("hp: not ipv4, first=0x" + Integer.toHexString(pkt[0] & 0xFF)); return; }  // 仅处理 IPv4
@@ -708,7 +876,13 @@ public class VpnNetService extends VpnService {
             int totalLen = IpUtil.u16(pkt, 2);
             if (totalLen > len || totalLen <= ihl) { dlog("hp: bad totalLen=" + totalLen + " len=" + len + " ihl=" + ihl); return; }
             int frag = IpUtil.u16(pkt, 6);
-            if ((frag & 0x1FFF) != 0) { dlog("hp: frag=0x" + Integer.toHexString(frag)); return; }     // 分片包：丢弃
+            // 0x3FFF = MF(0x2000) + 片偏移(0x1FFF)。只查偏移会漏掉「MF=1 且偏移=0」
+            // 的首片：那是一片不完整的报文，交给传输层解析会得到半截 TCP/UDP 头
+            // （UDP 的 length 字段对不上、TCP 的 payload 少一截），比直接丢弃更糟。
+            if ((frag & 0x3FFF) != 0) {
+                noteFragDropped();
+                return;
+            }
             int proto = pkt[9] & 0xFF;
             if (DIAG) dlog("hp: len=" + len + " totalLen=" + totalLen + " proto=" + proto);
 
@@ -742,7 +916,11 @@ public class VpnNetService extends VpnService {
                     String src = IpUtil.ipToString(pkt, 12);
                     String dst = IpUtil.ipToString(pkt, 16);
                     String key = src + ":" + srcPort + ">" + dst + ":" + dstPort;
-                    s = tcpSessions.get(key);
+                    // 与 stopVpn 的 clear 共用同一把锁：不锁时，新建的会话可能
+                    // 刚好在 clear 之后入表，VPN 已停却没人关它，connActive 永久 +1。
+                    synchronized (tcpSessions) {
+                        s = tcpSessions.get(key);
+                    }
                     if (s != null) tcpFastSet(idx, s);
                 }
                 if (s == null) {
@@ -761,18 +939,34 @@ public class VpnNetService extends VpnService {
                         String dst = IpUtil.ipToString(pkt, 16);
                         final TcpSession ns = new TcpSession(this, src, srcPort, dst, dstPort,
                                 src + ":" + srcPort + ">" + dst + ":" + dstPort, seq, mss);
-                        tcpSessions.put(ns.key, ns);
-                        tcpFastSet(idx, ns);
-                        WeakNet.I.connTotal.incrementAndGet();
-                        dlog("hp: NEW TCP SESSION " + ns.key + " total=" + WeakNet.I.connTotal.get());
-                        // 必须走会话自己的串行队列：保证 start() 先于后续数据包执行，
-                        // 否则首批数据包会在上游连好之前到达，被当成「上游未就绪」全部丢弃。
-                        ns.submit(new Runnable() {
-                            public void run() {
-                                ns.start();
-                                if (ns.isClosed()) removeTcp(ns);
+                        TcpSession winner;
+                        synchronized (tcpSessions) {
+                            winner = tcpSessions.putIfAbsent(ns.key, ns);
+                            if (winner == null) {
+                                winner = ns;
+                                WeakNet.I.connTotal.incrementAndGet();
                             }
-                        });
+                        }
+                        if (winner != ns) {
+                            // 同 key 的两个 SYN 并发：输的那个从未参与转发，必须关掉。
+                            // 它在构造时已经 connActive+1，直接 put 覆盖会让旧会话
+                            // 永远没人 close —— 压测里残留的 active 就是这么来的。
+                            // 放在锁外关，避免 close 里的队列清理占着会话表锁。
+                            ns.close();
+                        }
+                        tcpFastSet(idx, winner);
+                        s = winner;
+                        if (winner == ns) {
+                            dlog("hp: NEW TCP SESSION " + ns.key + " total=" + WeakNet.I.connTotal.get());
+                            // 必须走会话自己的串行队列：保证 start() 先于后续数据包执行，
+                            // 否则首批数据包会在上游连好之前到达，被当成「上游未就绪」全部丢弃。
+                            ns.submit(new Runnable() {
+                                public void run() {
+                                    ns.start();
+                                    if (ns.isClosed()) removeTcp(ns);
+                                }
+                            });
+                        }
                     } else {
                         // 未知会话：回 RST
                         if (DIAG) dlog("hp: RST unknown " + IpUtil.ipToString(pkt, 12) + ":" + srcPort + ">"
@@ -813,11 +1007,22 @@ public class VpnNetService extends VpnService {
                 System.arraycopy(pkt, off + 8, payload, 0, payloadLen);
                 int idx = PortIdx.of(srcPort, dstPort);
                 UdpSession us = udpFastGet(idx);
+                if (us != null && us.isClosed()) {
+                    // 关闭到定时清理之间有一段窗口：不在这里清掉的话，同一个 UDP
+                    // socket 隔一会儿再发首包，会被交回这条已关闭的会话，
+                    // 任务扔进已 shutdown 的执行器后静默消失 —— 首包永远收不到响应。
+                    clearUdpFast(idx, us);
+                    us = null;
+                }
                 if (us == null || !us.sameFlow(pkt)) {
                     String src = IpUtil.ipToString(pkt, 12);
                     String dst = IpUtil.ipToString(pkt, 16);
                     String key = src + ":" + srcPort + ">" + dst + ":" + dstPort;
                     us = udpSessions.get(key);
+                    if (us != null && us.isClosed()) {
+                        removeUdp(us);
+                        us = null;
+                    }
                     if (us == null) {
                         UdpSession nus = new UdpSession(this, src, srcPort, dst, dstPort, key);
                         UdpSession exist = udpSessions.putIfAbsent(key, nus);
@@ -833,6 +1038,7 @@ public class VpnNetService extends VpnService {
                     }
                     udpFastSet(idx, us);
                 }
+                if (us.isClosed()) return;      // 刚被清理线程关掉：这一包按丢包处理
                 final UdpSession fus = us;
                 final byte[] fp = payload;
                 // 每个包都往共享池扔一个任务，在 DNS/QUIC 这种高包率下会让 cached 池

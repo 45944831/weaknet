@@ -2,7 +2,7 @@
 
 把设备流量接管到本地通道，按场景施加**带宽限速、延迟抖动、丢包卡顿、随机断连、黑洞超时、DNS 故障、周期断网**等网络损伤，用来验证 App 在真实弱网下的表现。
 
-**v1.1.20** · Windows（EXE） · Android 7.0+ · [下载最新版](https://github.com/45944831/weaknet/releases/latest)
+**v1.1.21** · Windows（EXE） · Android 7.0+ · [下载最新版](https://github.com/45944831/weaknet/releases/latest)
 
 ## 功能
 
@@ -19,6 +19,8 @@
 
 两端共用同一套场景、参数与文案规格（`spec/spec.json` 是**数据规格**唯一真源；API 路由/状态码由两端控制层实现并通过 `tests/_t_api_parity.py` 校验一致性），Windows ↔ Android 结果可直接对照。
 
+> **覆盖范围**：Windows / USB 走 HTTP 代理，只影响遵循系统代理的 HTTP/HTTPS 流量；Android 走 TUN 用户态转发，覆盖 IPv4 TCP/UDP。直连 socket、QUIC、ICMP 与 IPv6 不在接管范围（IPv6 不施加弱网），三类接入方式的差异见 [docs/precision.md](docs/precision.md)。
+
 ## 下载
 
 > 源码仓库不含 EXE / APK 产物：二者由本机构建 / 发布流程生成，已加入 `.gitignore` 不入库。
@@ -26,16 +28,19 @@
 
 | 文件 | 平台 | 大小 | SHA-256（前 16 位，发布资产） |
 |---|---|---|---|
-| [`WeakNet.exe`](https://github.com/45944831/weaknet/releases/latest/download/WeakNet.exe) | Windows GUI，免装 Python，无 DOS 黑框 | 10.37 MB | `9d80713c6761e6d4` |
-| [`WeakNet.apk`](https://github.com/45944831/weaknet/releases/latest/download/WeakNet.apk) | Android 7.0+ | 217 KB | `04e00ff5c3d4526f` |
+| [`WeakNet.exe`](https://github.com/45944831/weaknet/releases/download/v1.1.21/WeakNet.exe) | Windows GUI，免装 Python，无 DOS 黑框 | 10.40 MB | `f4703278e037636f` |
+| [`WeakNet.apk`](https://github.com/45944831/weaknet/releases/download/v1.1.21/WeakNet.apk) | Android 7.0+ | 229 KB | `ec9cf8354337e9ef` |
 
-> 上表是 **Releases v1.1.20 现有资产**的发布指纹。本机重打的产物与发布资产不是同一份文件，
-> 指纹必然不同（每次重打都会变，记录见 [验证记录](docs/verification.md) 文首「第六轮」的
-> 「本机重打产物」）。校验下载完整性时请只与 Release 页公布的值比对，不要拿本机重打值套发布资产。
+> 上表是 **Releases v1.1.21 发布资产**的指纹，由 `tests/_t_release.py --strict` 从 Release API
+> 取回字节数与 SHA-256 逐项比对。本机重打的产物与发布资产不是同一份文件，指纹必然不同
+> （每次重打都会变，见 [验证记录](docs/verification.md)）。校验下载完整性时只与 Release 页
+> 公布的值比对，不要拿本机重打值套发布资产。
 
 发布页：<https://github.com/45944831/weaknet/releases/latest>
 
-> **v1.1.20 重点**：可解读报告 + 悬浮窗交互修复版。两端新增「测试报告」导出（9 段结构，含给开发的「解读总结」——有效性判定 / 测过场景 / 参数变更 / 关注点 / 下一步），场景序列识别补齐主界面「开始弱网测试」与组合播放文案，并修掉场景事件被环形缓冲挤出后误判「全程直连」的问题。Android 设置界面新增悬浮窗显示内容多选（勾选即时重建飘窗）；移除没有输入入口的「自定义文本」勾选项，底层 `/api/float` 的 custom 参数仍保留给脚本。悬浮窗暂停/切场景后主界面状态即时同步，总开关在暂停态改为橙色「⏸ 已暂停 · 点此停止」；同时修复 `paused` 标志残留（暂停→停止→再开会误报暂停）、暂停中切场景静默恢复限速、组合线程竞态清掉暂停态三个缺陷。
+> **v1.1.21 重点**：发版前加固版。修复 Windows 系统代理接管恒失败——WinINET 刷新会删掉 `AutoDetect`，旧的自检按逐字段全等判定，把整套接管回滚（`ProxyEnable` 永远写不进去）；现在按「缺失即未开启 WPAD」判定，并在解除接管时把用户原值在最后一次刷新后还原。另补齐 Android TCP 会话创建的并发竞态（同 key 并发 SYN 会留下永不关闭的会话）。新增变异测试（99 变异体、有效得分 100%）与崩溃注入（20 场景）两套探针，以及发布真值校验进入 CI；双端全量实测：真机 tun 数据面 12/12、代理路径 11/11、并发长稳 11/11、USB 联调 7/7、Win 关闭残留 37/0、APK 关闭残留 29/0。
+>
+> 上一版 **v1.1.20 重点**：可解读报告 + 悬浮窗交互修复版。两端新增「测试报告」导出（9 段结构，含给开发的「解读总结」——有效性判定 / 测过场景 / 参数变更 / 关注点 / 下一步），场景序列识别补齐主界面「开始弱网测试」与组合播放文案，并修掉场景事件被环形缓冲挤出后误判「全程直连」的问题。Android 设置界面新增悬浮窗显示内容多选（勾选即时重建飘窗）；移除没有输入入口的「自定义文本」勾选项，底层 `/api/float` 的 custom 参数仍保留给脚本。悬浮窗暂停/切场景后主界面状态即时同步，总开关在暂停态改为橙色「⏸ 已暂停 · 点此停止」；同时修复 `paused` 标志残留（暂停→停止→再开会误报暂停）、暂停中切场景静默恢复限速、组合线程竞态清掉暂停态三个缺陷。
 >
 > 上一版 **v1.1.19 重点**：参数采集修复版 —— 修掉一个会「静默关掉限速」的越界解析缺陷。Android 侧 `POST /api/profile` 对整数型超 int 上限的值（`2147483648`、`3000000000`、脚本下发的 `10^18`）用 `optInt` 解析，溢出截断后回落 0，`hasLimits()==false` 直接把限速关掉却仍返回 `ok:true`，用户以为在限速、实际是全速直连；Windows 侧同请求会夹到上限，两端语义不一致。现统一按 `Number/String` 解析并夹取到 spec 上限，新增 22 项纯 JDK 单测覆盖 `2^31` / `3e9` / `1e18` / 负值 / 字符串 / 布尔。同时把采集精度验证补成可复跑的真机七相位回归（`cfg` / `rate` / `delay` / `mtu` / `premise` / `integrity` / `resource`），并把 delay 判定从「首字节 = 2 跳往返」的错误假设改成数据驱动线性拟合——真机上新建 HTTPS 首字节实际 ≈ `3.2×(up+down)`（k=3.23、R²=0.989），旧口径会把准确注入误判成缺陷。
 >
@@ -53,16 +58,16 @@
 <summary>完整 SHA-256</summary>
 
 ```text
-9d80713c6761e6d46317bd1863bb17191e254ef87d90fdcb9cc4bf550ae00d04  WeakNet.exe
-04e00ff5c3d4526fbf9ae77dcd1333e6c3bd42d2eb4dbbe89e85104b6558a08c  WeakNet.apk
+f4703278e037636fece8dc6ae6f40cd06c1dac6dddfcea7c426ae021aef42251  WeakNet.exe
+ec9cf8354337e9efaa76e73ea6802225d12b45863e7286b34440d84b661f90a4  WeakNet.apk
 ```
 
-以上两项是 Releases v1.1.20 **发布资产**的完整指纹，与本机重打产物（见验证记录）不同。
+以上两项是 Releases v1.1.21 **发布资产**的完整指纹，与本机重打产物（见验证记录）不同。
 
 </details>
 
 > GitHub 下载慢时可在链接前加 `https://ghfast.top/` 走镜像，例如
-> `https://ghfast.top/https://github.com/45944831/weaknet/releases/latest/download/WeakNet.exe`。
+> `https://ghfast.top/https://github.com/45944831/weaknet/releases/download/v1.1.21/WeakNet.exe`。
 
 ## 快速开始
 
@@ -110,6 +115,7 @@ python weaknet.py         # 无界面引擎：代理 8888 / 控制接口 8899
 ## 工作原理
 
 - **Windows**：`weaknet.py` 是一个 `asyncio` 本地 HTTP/HTTPS 代理。双向令牌桶全局共享带宽，延迟、抖动、丢包、断连、黑洞、DNS 故障与周期断网都在转发链路上注入；接管系统代理通过注册表 + `InternetSetOptionW` 完成，退出自动还原。
+  - 接管时会临时摘掉「自动配置脚本（PAC）」和「自动检测设置」。Windows 的解析顺序是 PAC → WPAD → 静态代理，不摘掉这两项的话，写进去的代理地址会被直接忽略（企业网里很常见）。退出时按原值还原，且只还原仍是我们写的那部分。
 - **Android**：`VpnService` 建立 tun 接口，用户态 TCP 状态机解析并转发 IPv4 / TCP / UDP，限速统一收敛到 `vpn.write` 一个出口，保证整机共享带宽不叠加。仅接管 IPv4。
 - **USB 手机弱网**：`adb reverse` 把手机的 `localhost:8888` 映射到电脑代理端口，再 `settings put global http_proxy` 指向它；连接时在手机侧装一个拔线守护，反向端口消失后自动清掉代理。
 
@@ -251,7 +257,7 @@ spec 规则、场景与组合、名字限长、更新检查的版本比较与静
 （iperf3 外部真值）、adb 写全局代理与部分 ROM 的拒绝路径。这些没有可注入替身，CI 绿灯
 不能替代真机回归，也不代表限速精度已达标。
 
-v1.1.20 为可解读报告 + 悬浮窗交互修复版：版本一致性 **16/16**、pytest 全量通过、Java 纯 JDK **26** 套件全过；真机逐项验证三项功能（报告解读总结 / 悬浮窗多选 / 暂停态按钮同步），并修复暂停标志残留、暂停中切场景静默限速、组合线程竞态三个缺陷；产物（**发布资产**，非本机重打）EXE 10,871,576 B / `9d80713c…`、APK 222,244 B / `04e00ff5…`；本机重打产物的指纹与大小见验证记录「第六轮」，两者不同属正常。规格 hash 未变，仍 `9990e03d`。
+v1.1.21 为发版前加固版：版本一致性 **16/16**、pytest 全量通过、Java 纯 JDK 套件全过；真机 tun 12/12、代理 11/11、长稳 11/11、USB 7/7；产物（**发布资产**）EXE 10,907,448 B / `f4703278…`、APK 234,532 B / `ec9cf835…`。v1.1.20 为可解读报告 + 悬浮窗交互修复版：版本一致性 **16/16**、pytest 全量通过、Java 纯 JDK **26** 套件全过；真机逐项验证三项功能（报告解读总结 / 悬浮窗多选 / 暂停态按钮同步），并修复暂停标志残留、暂停中切场景静默限速、组合线程竞态三个缺陷；产物（**发布资产**，非本机重打）EXE 10,883,116 B / `9229043b…`、APK 230,436 B / `2a9901b6…`；本机重打产物的指纹与大小见验证记录「第六轮」，两者不同属正常。规格 hash 未变，仍 `9990e03d`。
 v1.1.19 为参数采集修复版：版本一致性 **16/16**、pytest **241** 通过、Java 纯 JDK **20** 套件、跨端一致性 **22/22**、数据全量复检 **0 错误 / 0 遗漏 / 0 重复**（24 条提示）；真机七相位（某国产 Android 12 机型）**44/47 → delay 口径修正后全部通过**，限速稳态偏差 **−0.97% ~ −2.75%**（阈值 ±8%）、MTU/MSS 四档全对（1280/1500/9000/16384，MSS=MTU−40）、8 MB 定长下载直连与 4000 kbps 限速 sha 完全一致；产物 EXE 10,862,736 B / `8b23f552…`、APK 214,052 B / `56220dca…`。v1.1.17 为两端限速对齐版：版本一致性 **16/16**（新增 C5/C6 产物新鲜度检查）、pytest **228** 通过、Java 纯 JDK **19** 套件、跨端一致性 **22/22**、真机契约 **13**、TUN 数据面 **11/11**（透明转发逐字节一致、限速 4,223 kbps、800 ms RTT 首字节 2,070 ms、5% 丢包正文完整、100% 拒连 80 ms、100% 黑洞 17.8 s 挂住、撤掉后 400 ms 恢复）、真机 10 并发限速 8000 聚合 **7,995 kbps**（一份全局桶）、1–10 Mbps 限速精度 **±0.3%**；产物 EXE 10,862,443 B / `9c223357…`、APK 214,052 B / `dd506aa4…`。v1.1.16 为采集数据修复版（产品功能无变化）：版本一致性 14/14、pytest 138 通过、EXE 冒烟与 APK 真机版本校验通过、数据复检 0 错误；产物 EXE 10,839,282 B / `c9948caa…`、APK 205,860 B / `6c268eb8…`。v1.1.15 真机回归 **68/68**（深度 34 + 组合 11 + 默认项 12 + UI 11），EXE 冒烟 7/7，pytest 138 通过，版本一致性 14/14、规格 hash 一致。另做了关闭残留检测：Windows 正常关窗后进程 / 端口 / 系统代理全部清空，Android 强停后进程、服务与 tun 全清。v1.1.13 的 250/250 全量数据与更早版本见[验证记录](docs/verification.md)。
 
 已知限制：
@@ -259,7 +265,7 @@ v1.1.19 为参数采集修复版：版本一致性 **16/16**、pytest **241** �
 - Android 首次使用需在系统弹窗允许 VPN，无法绕过；悬浮窗权限需手动授予一次
 - USB 手机弱网依赖 adb 写全局设置，部分 ROM 会拒绝（报 `WRITE_SECURE_SETTINGS`），可改用 APK 或手动 Wi-Fi 代理
 - USB 路径只影响走系统 HTTP 代理的 App，直连 socket 或自带代理的 App 不受影响
-- Android 仅接管 IPv4，IPv6 流量走真实网络；分片的 IP 包会被丢弃
+- Android 仅接管 IPv4 TCP/UDP；IPv6 **不经过 WeakNet**、不会施加弱网。按 `VpnService` 的规定，某个地址族没有任何地址/路由/DNS 时系统会**阻断该族出站**——我们只加了 IPv4，所以纳管 App 的 IPv6 会被确定性阻断（IPv6-only 环境会无法联网），需要时请关闭 VPN 或改用 IPv4 网络；分片的 IP 包会被丢弃
 - 低带宽 + 高延迟档位的实测吞吐可能高于设定值，判读时请比较「开场景前后」而不是「实测 vs 设定」
 - EXE 为 PyInstaller 单文件，首次启动需解压临时文件，稍慢属正常
 - APK 声明 `QUERY_ALL_PACKAGES` 是为了列出可接管的 App（Android 11+ 包可见性限制）。若计划上架 Google Play，需改用 `<queries>` 精确声明并申报用途；自发布 APK 不受影响
@@ -279,7 +285,13 @@ v1.1.19 为参数采集修复版：版本一致性 **16/16**、pytest **241** �
 - [使用说明](docs/guide.md)：Windows / Android / USB 全功能操作、17 支场景与 13 项参数说明
 - [构建与测试](docs/build.md)：两端构建、版本号约束、pytest 回归
 - [精度声明](docs/precision.md)：模拟层次、各参数真实语义、已知偏差与校准方法
-- [验证记录](docs/verification.md)：v1.1.0 – v1.1.20 实测与已修缺陷
+- [验证记录](docs/verification.md)：v1.1.0 – v1.1.21 实测与已修缺陷
 - [测试入口](docs/testing.md)：四层测试怎么跑、真机脚本选哪个、历史脚本约定
+- [操作序列矩阵](docs/op-matrix.md)：12 个有副作用操作的共享资源与两两组合结论
+- [资源所有权四问](docs/ownership.md)：系统代理 / ADB 映射 / TUN 路由 / 监听端口的所有权判定
+- [平台默认值清单](docs/platform-defaults.md)：Android SDK / HTTP / DNS 不显式设置时的真实默认值，以及被默认值坑到的 9 处
+- [测试期望的来源](docs/test-truth.md)：全绿 ≠ 正确 —— 哪些期望是从实现抄来的，以及每条期望由谁保证
+- [变异测试](docs/mutation.md)：把实现改坏 99 次，测试抓住 89 次；剩下 10 个为什么可以放过
+- [崩溃一致性](docs/crash.md)：进程在写注册表途中被杀，原配置会不会永久丢失
 
 问题与建议请提 [Issue](https://github.com/45944831/weaknet/issues)。

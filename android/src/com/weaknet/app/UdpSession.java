@@ -54,8 +54,10 @@ public class UdpSession {
         this.remoteIpB = IpUtil.ipToBytes(remoteIp);
         this.delay = new DelayLine("udp-delay", 256 << 10);
         this.fastIdx = PortIdx.of(clientPort, remotePort);
+        // 有界队列：无界队列在 DNS/QUIC 突发时会把内存吃光
         ThreadPoolExecutor e = new ThreadPoolExecutor(1, 1, 30L, TimeUnit.SECONDS,
-                new LinkedBlockingQueue<Runnable>());
+                new LinkedBlockingQueue<Runnable>(UDP_QUEUE_CAP),
+                new ThreadPoolExecutor.AbortPolicy());
         e.allowCoreThreadTimeOut(true);
         this.serial = e;
         // 与 TcpSession 同口径：构造即活跃，close() 里成对递减。
@@ -63,6 +65,9 @@ public class UdpSession {
         // 计数不会泄漏。
         WeakNet.I.connActive.incrementAndGet();
     }
+
+    /** 每会话串行队列容量：满则丢（UDP 本来就是可丢的），不无限排队 */
+    private static final int UDP_QUEUE_CAP = 512;
 
     /** 提交一个发送任务（同一会话内严格串行）；会话已关闭时静默丢弃 */
     void submit(Runnable r) {
@@ -124,8 +129,11 @@ public class UdpSession {
                 final InetAddress addr = remoteAddr;
                 final byte[] data = payload;
                 final int len = payloadLen;
-                if (!delay.tryPost(DelayLine.delayMs(true), new Runnable() {
+                if (!delay.tryPost(DelayLine.DIR_UP, DelayLine.delayMs(true), new Runnable() {
                     public void run() {
+                        // 断网窗口：UDP 直接丢，与真实断网一致（没有重传，丢了就是丢了）。
+                        // 只在 send() 入口查一次不够 —— 入队到真正发出之间可能正好进窗口。
+                        if (!WeakNet.I.gateOpen) return;
                         try {
                             ds.send(new DatagramPacket(data, len, addr, remotePort));
                         } catch (Exception e) {
@@ -143,16 +151,31 @@ public class UdpSession {
         final DatagramSocket s = ds;
         Thread t = new Thread(new Runnable() {
             public void run() {
-                byte[] buf = new byte[2048];
+                // 收缓冲必须按 tun MTU 派生。固定 2048 时，MTU 9000/16384 下
+                // 更大的 UDP 报文会被 DatagramSocket.receive 静默截断，再以「新长度」
+                // 写回 tun —— 应用收到的内容与服务器发的不是同一份（校验必然失败）。
+                // 多留 1 字节当「溢出探针」：正常报文不可能超过 MTU-28，
+                // 读满这个长度就说明确实被截断了。
+                final int bufSize = Math.max(2048, VpnNetService.tunMtu() - 28) + 1;
+                byte[] buf = new byte[bufSize];
                 while (!closed.get()) {
                     try {
                         DatagramPacket dp = new DatagramPacket(buf, buf.length);
                         s.receive(dp);
                         lastActive = System.currentTimeMillis();
+                        if (dp.getLength() >= bufSize) {
+                            // 明确拒绝而不是把半截数据当完整报文送回去
+                            noteTruncated();
+                            continue;
+                        }
                         byte[] data = new byte[dp.getLength()];
                         System.arraycopy(dp.getData(), dp.getOffset(), data, 0, dp.getLength());
-                        if (!delay.tryPost(DelayLine.delayMs(false), new Runnable() {
+                        if (!delay.tryPost(DelayLine.DIR_DOWN, DelayLine.delayMs(false), new Runnable() {
                             public void run() {
+                                // 断网窗口：下行也丢。旧实现只在上行查门闸，
+                                // 断网期间上游的回包照样被写回 tun —— 「断网」对
+                                // DNS/QUIC 这类流量等于没发生。
+                                if (!WeakNet.I.gateOpen) return;
                                 vpn.write(IpUtil.buildUdp(remoteIpB, remotePort,
                                         clientIpB, clientPort, data, data.length));
                             }
@@ -176,9 +199,25 @@ public class UdpSession {
         }
     }
 
+    /**
+     * 超出收缓冲的报文：明确丢弃并计数。
+     *
+     * 以前是「静默截断后照常写回 tun」—— 应用拿到一个长度变短、内容被腰斩的
+     * 数据报，看起来像服务器发了错数据，实际是我们在中间切了一刀。
+     */
+    private void noteTruncated() {
+        long n = WeakNet.I.udpTruncated.incrementAndGet();
+        if ((n & (n - 1)) == 0) {
+            WeakNet.I.log("loss", "UDP 报文超过 MTU 收缓冲，已整包丢弃（累计 " + n + "）");
+        }
+    }
+
     void close() {
         if (closed.compareAndSet(false, true)) {
             WeakNet.I.connActive.decrementAndGet();
+            // 立刻从会话表和快表摘掉：等到 120s 定时清理才摘的话，
+            // 这段时间里同四元组的新首包会被派给已关闭的会话，任务静默丢弃。
+            vpn.removeUdp(this);
             vpn.clearUdpFast(fastIdx, this);
             try {
                 serial.shutdownNow();

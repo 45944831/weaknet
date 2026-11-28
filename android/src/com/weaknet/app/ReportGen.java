@@ -53,9 +53,9 @@ public final class ReportGen {
     private static final String[] CAVEATS = {
         "延迟是**逐包注入**的，不是只在建连时加一次；一次往返约等于上行延迟 + 下行延迟。",
         "丢包由停顿（`stall_ms`）实现，**不是 TCP 重传语义**——别按重传模型去推断吞吐。",
-        "上下行字节是引擎对**已接管连接**的计数，不含直通（未接管）流量。",
-        "事件日志是内存环形缓冲（上限 300 条），GUI 只展示最近 60 条；故障计数取全量缓冲（fault_counts_full），本报告导出的是点击那一刻的快照。",
-        "运行时长是**引擎本次启动**至今的时间，不是单个场景的持续时间。"
+        "上下行字节是引擎对**已接管连接**的计数，不含直通（未接管）流量；有会话基线时只统计本次测试的增量。",
+        "五类故障（断连 / DNS / 超时 / 拒连 / 网络切换）取**累计计数**，不受 300 条事件环形缓冲影响；其余事件仍是最新 300 条的快照。",
+        "运行时长是**引擎本次启动**至今的时间；「测试会话」的已运行时间才是本次测试的时长。"
     };
 
     // ------------------------------------------------------------------ 工具
@@ -82,6 +82,14 @@ public final class ReportGen {
         if (sec < 60) return sec + " 秒";
         if (sec < 3600) return (sec / 60) + " 分 " + (sec % 60) + " 秒";
         return (sec / 3600) + " 小时 " + ((sec % 3600) / 60) + " 分";
+    }
+
+    /** 秒级时间戳 -> HH:mm:ss（报告里展示会话开始时刻）；非法值返回 "-"。 */
+    static String clock(Map<String, Object> m, String key) {
+        long sec = l(m, key);
+        if (sec <= 0) return "-";
+        return new java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.getDefault())
+                .format(new java.util.Date(sec * 1000L));
     }
 
     /** Markdown 单元格：转义竖线与换行，避免撑破表格 */
@@ -187,17 +195,57 @@ public final class ReportGen {
                     }
                 }
             }
-            return counts;
+        } else {
+            List<Object> evs = asList(status == null ? null : status.get("events"));
+            if (evs != null) {
+                for (Object item : evs) {
+                    Map<String, Object> e = asMap(item);
+                    String t = e == null ? "?" : s(e, "type", "?");
+                    Integer c = counts.get(t);
+                    counts.put(t, c == null ? 1 : c + 1);
+                }
+            }
         }
-        List<Object> evs = asList(status == null ? null : status.get("events"));
-        if (evs == null) return counts;
-        for (Object item : evs) {
-            Map<String, Object> e = asMap(item);
-            String t = e == null ? "?" : s(e, "type", "?");
-            Integer c = counts.get(t);
-            counts.put(t, c == null ? 1 : c + 1);
+        // 有测试会话时，五类故障覆盖成「本次」的次数：报告是给这次测试看的，
+        // 把上一次测试留下的故障算进来会直接改变有效性结论。
+        Map<String, Object> session = asMap(status == null ? null : status.get("session"));
+        if (session != null && l(session, "seq") > 0) {
+            Map<String, Object> faults = asMap(session.get("faults"));
+            if (faults != null) {
+                for (String t : FAULT_TYPES) {
+                    Object v = faults.get(t);
+                    if (v instanceof Number) {
+                        counts.put(t, Math.max(0, ((Number) v).intValue()));
+                    }
+                }
+            }
         }
         return counts;
+    }
+
+    /** 本次测试会话快照；没有（老快照 / 未开始测试）返回 null。 */
+    static Map<String, Object> sessionOf(Map<String, Object> status) {
+        Map<String, Object> s = asMap(status == null ? null : status.get("session"));
+        return (s != null && l(s, "seq") > 0) ? s : null;
+    }
+
+    /**
+     * 报告统计口径：有会话增量就用增量，否则退回引擎累计值。
+     * 键与 stats 一致，调用处不需要区分两种快照。
+     */
+    static Map<String, Object> countedStats(Map<String, Object> status) {
+        Map<String, Object> raw = asMap(status == null ? null : status.get("stats"));
+        Map<String, Object> s = sessionOf(status);
+        if (s == null) return raw == null ? new LinkedHashMap<String, Object>() : raw;
+        Map<String, Object> out = new LinkedHashMap<String, Object>();
+        out.put("total", Long.valueOf(l(s, "total")));
+        out.put("up", Long.valueOf(l(s, "up")));
+        out.put("down", Long.valueOf(l(s, "down")));
+        out.put("bypass", Long.valueOf(l(s, "bypass")));
+        out.put("active", Long.valueOf(raw == null ? 0L : l(raw, "active")));
+        // 引擎运行时长保持原值；测试会话时长单独在「测试会话」一行展示。
+        out.put("uptime", Long.valueOf(raw == null ? 0L : l(raw, "uptime")));
+        return out;
     }
 
     static String labelOf(String type) {
@@ -207,7 +255,7 @@ public final class ReportGen {
 
     static String conclusion(Map<String, Object> status, Map<String, Integer> counts,
                              List<String> scenes, Map<String, Object> prof) {
-        Map<String, Object> stats = asMap(status == null ? null : status.get("stats"));
+        Map<String, Object> stats = countedStats(status);
         long total = l(stats, "total"), active = l(stats, "active");
         String name = s(prof, "name", "未命名场景");
 
@@ -257,7 +305,7 @@ public final class ReportGen {
      */
     static List<String> interpretation(Map<String, Object> status, Map<String, Integer> counts,
                                        List<String> scenes, Map<String, Object> prof) {
-        Map<String, Object> stats = asMap(status == null ? null : status.get("stats"));
+        Map<String, Object> stats = countedStats(status);
         long total = l(stats, "total"), active = l(stats, "active"), bypass = l(stats, "bypass");
         boolean limitOn = b(status, "limit_on");
 
@@ -293,6 +341,14 @@ public final class ReportGen {
             verdict = "empty";
             lines.add("**数据有效性**：本次未捕获到经过代理的连接，报告仅含配置与状态快照，"
                     + "**不能用于评估弱网效果**——需让被测 App 的流量真正经过代理后再导出。");
+            if (sessionOf(status) != null) {
+                long history = l(asMap(status.get("stats")), "total");
+                if (history > 0) {
+                    // 旧流量冒充本次样本的典型场景：累计有连接，但都是开始测试前的。
+                    lines.add("> 引擎累计有 " + history + " 条历史连接，但**本次测试开始后没有新流量**；"
+                            + "历史连接不计入本次样本。");
+                }
+            }
         } else if (!hasWeaknet) {
             verdict = "direct";
             lines.add("**数据有效性**：捕获 " + total + " 条连接，但未识别到弱网场景或故障注入，"
@@ -302,6 +358,12 @@ public final class ReportGen {
             lines.add("**数据有效性**：**有效**——捕获 " + total + " 条连接"
                     + (injected.isEmpty() ? "" : "，注入 " + join(injected, "、"))
                     + "，可用于评估该场景下的表现。");
+        }
+        Map<String, Object> sess = sessionOf(status);
+        if (sess != null) {
+            lines.add("> 统计口径：自测试会话 #" + l(sess, "seq") + " 开始（"
+                    + clock(sess, "started_at") + "）的**增量**，同一次测试内切场景不重置；"
+                    + "引擎累计值仅作参考。");
         }
 
         // 2. 测过哪些场景
@@ -381,6 +443,7 @@ public final class ReportGen {
         o.append("| 场景 key | `").append(cell(s(status, "preset_key", "-"))).append("` |\n");
         o.append("| 限速开关 | ").append(b(status, "limit_on") ? "开启" : "关闭（已停止）").append(" |\n");
         o.append("| 限速闸门 | ").append(b(status, "gate_open") ? "打开" : "关闭").append(" |\n");
+        o.append("| 覆盖协议 | IPv4 TCP/UDP（TUN 用户态转发）；IPv6 不接管、不施加弱网 |\n");
         o.append("| VPN 接管 | ").append(b(status, "vpn_active") ? "已接管" : "未接管").append(" |\n");
         o.append("| 监听地址 | ").append(cell(s(listen, "host", "-"))).append(":")
          .append(cell(s(listen, "port", "-"))).append(" |\n");
@@ -392,18 +455,41 @@ public final class ReportGen {
             o.append("（").append(cell(join(pkgs, ", "))).append("）");
         }
         o.append(" |\n");
-        o.append("| 运行时长 | ").append(humanDuration(l(stats, "uptime"))).append(" |\n\n");
+        o.append("| 运行时长 | ").append(humanDuration(l(stats, "uptime"))).append(" |\n");
+        Map<String, Object> sess = sessionOf(status);
+        if (sess != null) {
+            o.append("| 测试会话 | #").append(l(sess, "seq")).append("，开始于 ")
+             .append(cell(clock(sess, "started_at"))).append("，已运行 ")
+             .append(humanDuration(l(sess, "elapsed"))).append(" |\n");
+        } else {
+            o.append("| 测试会话 | 老快照（无会话基线，以下统计为引擎累计口径） |\n");
+        }
+        o.append("\n");
 
         // 3. 流量统计
-        o.append("## 流量统计\n\n| 指标 | 数值 |\n|---|---:|\n");
-        o.append("| 连接总数 | ").append(l(stats, "total")).append(" |\n");
+        o.append("## 流量统计\n\n");
+        if (sess != null) {
+            o.append("> 下表为**本次测试增量**（自会话 #").append(l(sess, "seq"))
+             .append(" 开始）；引擎累计值另列，避免把开始测试前的历史流量算进本次样本。\n\n");
+        }
+        o.append("| 指标 | 数值 |\n|---|---:|\n");
+        o.append("| 本次连接数 | ").append(l(stats, "total")).append(" |\n");
         o.append("| 当前活跃 | ").append(l(stats, "active")).append(" |\n");
-        o.append("| 下行字节 | ").append(humanBytes(l(stats, "down")))
+        o.append("| 本次下行字节 | ").append(humanBytes(l(stats, "down")))
          .append("（").append(l(stats, "down")).append(" B） |\n");
-        o.append("| 上行字节 | ").append(humanBytes(l(stats, "up")))
+        o.append("| 本次上行字节 | ").append(humanBytes(l(stats, "up")))
          .append("（").append(l(stats, "up")).append(" B） |\n");
-        o.append("| 直通字节 | ").append(humanBytes(l(stats, "bypass")))
-         .append("（").append(l(stats, "bypass")).append(" B） |\n\n");
+        o.append("| 本次直通字节 | ").append(humanBytes(l(stats, "bypass")))
+         .append("（").append(l(stats, "bypass")).append(" B） |\n");
+        if (sess != null) {
+            Map<String, Object> raw = asMap(status.get("stats"));
+            o.append("| 引擎累计连接（参考） | ").append(l(raw, "total")).append(" |\n");
+            o.append("| 引擎累计下行（参考） | ").append(humanBytes(l(raw, "down")))
+             .append("（").append(l(raw, "down")).append(" B） |\n");
+            o.append("| 引擎累计上行（参考） | ").append(humanBytes(l(raw, "up")))
+             .append("（").append(l(raw, "up")).append(" B） |\n");
+        }
+        o.append("\n");
 
         // 4. 参数快照（非默认项），元数据直接取 SpecGen（与 spec.json 同源）
         o.append("## 参数快照（非默认项）\n\n");
@@ -670,6 +756,7 @@ public final class ReportGen {
         Map<String, Object> scope = new LinkedHashMap<String, Object>();
         scope.put("mode", WeakNet.I.scopeMode);
         scope.put("list", new ArrayList<Object>(WeakNet.I.scopePkgs));
+        scope.put("effective_note", VpnNetService.scopeNote());
         m.put("scope", scope);
         Map<String, Object> stats = new LinkedHashMap<String, Object>();
         stats.put("total", WeakNet.I.connTotal.get());
@@ -678,6 +765,9 @@ public final class ReportGen {
         stats.put("down", WeakNet.I.bytesDown.get());
         stats.put("uptime", (System.currentTimeMillis() - WeakNet.I.startedAt) / 1000);
         m.put("stats", stats);
+        // 本次测试增量：报告优先按它判定有效性。没有会话（还没开始过测试）时
+        // 写 null，老逻辑按 stats 累计口径兜底。
+        m.put("session", WeakNet.I.sessionMap());
         // 与 /api/status.fault_counts_full 同语义：全量事件按 type 聚合，
         // 报告不再因为界面只留最近 60 条而漏算故障次数。
         Map<String, Object> full = new LinkedHashMap<String, Object>();

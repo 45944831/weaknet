@@ -73,6 +73,89 @@ def test_bucket_stop_releases_waiting_consumer():
     assert el < 0.5, "停止限速后排队者 %.2fs 才放行" % el
 
 
+def test_bucket_charges_single_byte(monkeypatch):
+    """尾字节也要计费，且等待时长按 `remain / rate` 算。
+
+    两个变异体靠这条用例杀死：
+      * `while remain > 0` 的 `0` 改成 `1` → 1 字节直接放行，不等待；
+      * `wait_s = remain / rate` 的 `/` 改成 `*` → 1 字节等 0.25s（高 256 倍）。
+    现有用例都是 64KB 级块，看不出尾字节不扣令牌、也算不出等待公式错了。
+    """
+    clock = [1000.0]
+    calls = []
+
+    async def fake_sleep(s):
+        calls.append(s)
+        clock[0] += s
+
+    monkeypatch.setattr(W.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(W.asyncio, "sleep", fake_sleep)
+
+    async def go():
+        bucket = W.Bucket(8)               # 1024 B/s，桶容量 256B
+        bucket.tokens = 0.0
+        bucket.last = clock[0]
+        await bucket.consume(1)
+
+    run_async(go())
+    assert calls, "1 字节没有等待令牌，说明尾字节被白送"
+    assert calls[0] == pytest.approx(1 / 1024.0, rel=0.05), \
+        "等待时长不是 remain/rate：%.6fs" % calls[0]
+
+
+def test_bucket_exact_fit_returns_without_sleeping(monkeypatch):
+    """令牌刚好扣完时立即返回，不能再睡一个最小间隔。
+
+    `if remain <= 0: return` 的 `<=` 改成 `<` 时，remain 归零不返回，会掉到
+    `wait_s = 0` 被夹成 0.001s 再睡一次 —— 「令牌够用」的写全部多等 1ms。
+    这是最常见路径（大块数据里每一次 take == remain），不是边角。
+    """
+    calls = []
+
+    async def fake_sleep(s):
+        calls.append(s)
+
+    monkeypatch.setattr(W.asyncio, "sleep", fake_sleep)
+
+    async def go():
+        bucket = W.Bucket(8)               # 1024 B/s
+        bucket.tokens = 2.0
+        bucket.last = W.time.monotonic()
+        await bucket.consume(2)
+
+    run_async(go())
+    assert calls == [], "令牌刚好够用仍睡了 %r" % (calls,)
+
+
+def test_bucket_last_byte_must_wait(monkeypatch):
+    """差 1 字节也必须等：扣到 1 字节就返回等于白送最后一个字节。
+
+    `if remain <= 0` 的 `0` 改成 `1` 时，上一条用例（remain 归零）不经过这里，
+    单字节用例（take == 0）也不经过 —— 只有「take 用尽令牌、仍剩 1 字节」
+    这一格能把它区分出来。
+    """
+    clock = [1000.0]
+    calls = []
+
+    async def fake_sleep(s):
+        calls.append(s)
+        clock[0] += s
+
+    monkeypatch.setattr(W.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(W.asyncio, "sleep", fake_sleep)
+
+    async def go():
+        bucket = W.Bucket(8)               # 1024 B/s
+        bucket.tokens = 2.0
+        bucket.last = clock[0]
+        await bucket.consume(3)
+
+    run_async(go())
+    assert calls, "差 1 字节却直接放行"
+    assert calls[0] == pytest.approx(1 / 1024.0, rel=0.05), \
+        "补最后 1 字节的等待时长不是 1/rate：%.6fs" % calls[0]
+
+
 def test_burst_credit_is_time_based_not_byte_based():
     """突发额度是「一段时间的配额」，不是「一批固定字节」。
 
@@ -91,6 +174,17 @@ def test_burst_credit_is_time_based_not_byte_based():
     # 折算成秒必须与速率无关，且等于 BURST_SEC
     for b in (b8, b16):
         assert b.cap() / b.rate == pytest.approx(W.Bucket.BURST_SEC)
+
+
+def test_burst_sec_is_a_quarter_second():
+    """BURST_SEC = 0.25s 是实测决策，不是随手写的常数。
+
+    1.0s 时 1MB@4000kbps 冷测超发 1.463×，对齐到 0.25s 后为 1.014×
+    （真机 A/B，见 docs/precision.md §4.6）。这里写死数值：改容量必须有人来
+    解释，并同步 Android 的 Pipe.Bucket.BURST_SEC —— 只改一端会被
+    tests/_t_spec_parity.py 拦住。
+    """
+    assert W.Bucket.BURST_SEC == 0.25
 
 
 def test_nap_wakes_immediately_on_gen_change():

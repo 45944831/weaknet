@@ -32,6 +32,20 @@ public class TcpSession {
             new java.util.concurrent.atomic.AtomicBoolean(false);
     private volatile long lastActive = System.currentTimeMillis();
 
+    /**
+     * 客户端最近一次通告的接收窗口（rwnd）。<=0 表示「不启用流控」。
+     *
+     * 旧实现完全不看它：下游按上游读多快就往 tun 写多快，客户端应用读得慢时
+     * 这些包只能堆在 tun 写队列里 —— 表现是「内存涨、延迟涨、最后丢包」，
+     * 而不是真实网络里那种「发送方被窗口挡住」。
+     */
+    private int clientWindow = 65535;
+    /** 已发出但客户端还没确认的下行字节数（用于窗口判断） */
+    private long unackedDown = 0;
+    /** 两个方向是否已各自结束：TCP 允许半关闭，都结束了才真正拆会话 */
+    private boolean upFin = false;
+    private boolean downFin = false;
+
     private Socket socket;
     private OutputStream sout;
     private InputStream sin;
@@ -87,6 +101,13 @@ public class TcpSession {
         }
     }
 
+    /** 每会话串行队列容量：512 个待执行任务，约几十 KB 引用。
+     *  满了就丢（TCP 会重传），绝不无限排队 —— 无界队列是内存失控的经典入口。 */
+    private static final int SERIAL_QUEUE_CAP = 512;
+    /** 因队列满被丢弃的任务总数（全进程）：过载时的可见证据，进日志用 */
+    static final java.util.concurrent.atomic.AtomicLong serialDropped =
+            new java.util.concurrent.atomic.AtomicLong();
+
     /** 链路延迟队列：数据包按延迟到期后再投递，延迟与带宽解耦 */
     private final DelayLine delay;
     /** 同一方向的到期时间单调不减，保证抖动不会把包打乱 */
@@ -108,8 +129,12 @@ public class TcpSession {
         this.clientIpB = IpUtil.ipToBytes(clientIp);
         this.remoteIpB = IpUtil.ipToBytes(remoteIp);
         this.fastIdx = PortIdx.of(clientPort, remotePort);
+        // 队列必须有界：无界队列在「上行远快于上游消费」时能把内存吃光，
+        // 而且出问题时毫无痕迹。满了就丢任务（TCP 会重传），并计数以便观测。
         ThreadPoolExecutor e = new ThreadPoolExecutor(
-                1, 1, 30L, TimeUnit.SECONDS, new LinkedBlockingQueue<Runnable>());
+                1, 1, 30L, TimeUnit.SECONDS,
+                new LinkedBlockingQueue<Runnable>(SERIAL_QUEUE_CAP),
+                new ThreadPoolExecutor.AbortPolicy());
         e.allowCoreThreadTimeOut(true);
         this.serial = e;
         this.delay = new DelayLine("tcp-delay", 1 << 20);   // 积压超过 1MB 就回压
@@ -152,6 +177,14 @@ public class TcpSession {
     void submit(Runnable r) {
         try {
             serial.execute(r);
+        } catch (java.util.concurrent.RejectedExecutionException e) {
+            // 队列满：丢任务（客户端会重传），但要留下可观测的痕迹，
+            // 否则「偶尔卡一下」永远查不到原因
+            long n = serialDropped.incrementAndGet();
+            if (n == 1 || n % 200 == 0) {
+                WeakNet.I.log("loss", "TCP 串行队列已满，累计丢弃 " + n + " 个任务（"
+                        + remoteIp + ":" + remotePort + "）");
+            }
         } catch (Exception e) {
             // 会话已关闭或线程池已停：丢掉即可，连接本来就要断了
         }
@@ -165,8 +198,24 @@ public class TcpSession {
         return lastActive;
     }
 
+    /** 是否已有一个 start() 在跑：SYN 重传会触发重试，不能让它并发建两条上游 */
+    private final java.util.concurrent.atomic.AtomicBoolean starting =
+            new java.util.concurrent.atomic.AtomicBoolean(false);
+    /** 上次尝试建连的时刻（单调时钟）：给 SYN 重传的重试加个下限，别每来一个就重连一次 */
+    private volatile long lastStartAt = 0;
+
     /** 建立上游连接并回复 SYN-ACK（此处注入连接 RTT、黑洞、拒连） */
     void start() {
+        if (!starting.compareAndSet(false, true)) return;
+        lastStartAt = android.os.SystemClock.elapsedRealtime();
+        try {
+            startInner();
+        } finally {
+            starting.set(false);
+        }
+    }
+
+    private void startInner() {
         Profile p = WeakNet.I.profile;
         if (p.rejectPct > 0 && Math.random() * 100 < p.rejectPct) {
             sendRst();
@@ -226,10 +275,36 @@ public class TcpSession {
             close();
             return;
         }
+        if ((flags & IpUtil.ACK) != 0) {
+            // 用客户端的确认号与窗口调度下行：这是「发送方被接收方窗口挡住」的
+            // 唯一信息来源，不看它就只能盲目往 tun 里灌。
+            long diff = (mySeq - ack) & 0xFFFFFFFFL;
+            if (diff <= (1L << 24)) {        // 超过 16MB 的差值只可能是异常包
+                unackedDown = diff;
+                if (window > 0) clientWindow = window;
+                notifyAll();                 // 唤醒 waitWindow（持锁调用，合法）
+            }
+        }
         boolean syn = (flags & IpUtil.SYN) != 0;
         boolean ackFlag = (flags & IpUtil.ACK) != 0;
         if (syn && !ackFlag) {
-            return;   // SYN 重传，忽略
+            // SYN 重传。以前一律忽略：上一次被判成黑洞/拒连的会话会留在表里最多
+            // 60s，同四元组的 SYN 全被它吞掉 —— 故障撤销后这条连接仍然连不上，
+            // 看起来像「停止弱网也没恢复」。这里改成重新走一遍 start()，
+            // 它会按当前参数重新判定（黑洞/拒连/正常），而不是沿用旧结论。
+            if (!ready && !closed) {
+                long now = android.os.SystemClock.elapsedRealtime();
+                // 客户端 SYN 重传间隔约 1s/2s/4s，这里再加一道 500ms 下限：
+                // 避免同一秒内的重复 SYN 触发多次真实 connect（每次最长 15s）
+                if (now - lastStartAt > 500) {
+                    submit(new Runnable() {
+                        public void run() {
+                            start();
+                        }
+                    });
+                }
+            }
+            return;
         }
         if (payloadLen > 0) {
             if (seq != clientSeq) {
@@ -250,12 +325,21 @@ public class TcpSession {
                     close();
                     return;
                 }
-                WeakNet.I.upBucket.consume(payloadLen);
-                WeakNet.I.bytesUp.addAndGet(payloadLen);
                 final byte[] data = payload;
                 final int len = payloadLen;
-                delay.post(dueDelay(true), new Runnable() {
+                // 用 offer 而不是 post：本方法持有会话锁，既不能内联（job 里会
+                // awaitGate，断网窗口最长等 120s，还会阻塞写 socket —— 跑在会话锁里
+                // 等于把整条连接和 TUN 分发线程一起冻住），也不能阻塞等容量
+                // （同样是在持锁等待）。返回 false = 延迟队列已满，按真实丢包处理：
+                // 不推进 clientSeq、不回 ACK，让客户端自己重传。
+                if (!delay.offer(DelayLine.DIR_UP, dueDelay(true), new Runnable() {
                     public void run() {
+                        // 断网窗口：在真正写上游的地方等门闸。只查建连时那一次的话，
+                        // 窗口内建立的连接会一路照常收发，「网络切换」等于没发生。
+                        if (!WeakNet.I.awaitGate(WeakNet.GATE_WAIT_MAX_MS)) {
+                            close();
+                            return;
+                        }
                         try {
                             sout.write(data, 0, len);
                             sout.flush();
@@ -263,7 +347,12 @@ public class TcpSession {
                             close();
                         }
                     }
-                }, len);
+                }, len)) {
+                    WeakNet.I.log("loss", "上行延迟队列已满，丢弃 " + len + " 字节");
+                    return;
+                }
+                WeakNet.I.upBucket.consume(payloadLen);
+                WeakNet.I.bytesUp.addAndGet(payloadLen);
             } catch (Exception e) {
                 close();
                 return;
@@ -279,7 +368,8 @@ public class TcpSession {
             // 否则「发完数据立刻 FIN」的短连接（curl / nc / HTTP 短连接都这样）
             // 会在数据还在队列里躺着的时候就被 shutdownOutput，对端一个字节都收不到。
             final Socket s = socket;
-            delay.post(dueDelay(true), new Runnable() {
+            final long dFin = dueDelay(true);
+            Runnable finUp = new Runnable() {
                 public void run() {
                     try {
                         if (s != null) s.shutdownOutput();
@@ -287,7 +377,15 @@ public class TcpSession {
                         // ignore
                     }
                 }
-            }, 0);
+            };
+            // 与上行数据同理：持锁期间只入队。队列满时退到串行执行器上补一次，
+            // 保证上游一定能收到 FIN（否则服务端会一直等这个半关闭）。
+            if (!delay.offer(DelayLine.DIR_UP, dFin, finUp, 0)) {
+                submit(finUp);
+            }
+            // 客户端只是半关闭：上行结束了，下行还可能继续（HTTP/1.0 请求、
+            // `nc -N`、curl 的早期版本都这么发）。这里不能关整条会话。
+            markUpFin();
         }
     }
 
@@ -340,12 +438,25 @@ public class TcpSession {
                     seqAt = mySeq;
                     mySeq = (mySeq + n) & 0xFFFFFFFFL;
                 }
+                // 流控必须在**下游读线程**里等，不能放进 DelayLine 的 job：
+                // DelayLine 是每会话单 worker，等窗口要等的 ACK 却也要经过同一 worker
+                // 投递 —— 有链路延迟时形成自锁（worker 卡在 waitWindow，ACK 进不了队列，
+                // 窗口永远等不到），表现为「一开延迟就首字节 0、整条连接假死」。
+                // 下游读线程阻塞只会暂停读上游，ACK 由 TUN 分发线程处理，不会死锁。
+                waitWindow(len);
+                if (closed) { releaseBuf(slot); break; }
+
                 // 延迟到期后再写回 tun；队列积压时 post 会阻塞，
                 // 于是这里停止读上游，背压自然传导到服务器，不会把内存撑爆。
                 // buildTcp 会把 slot 的前 len 字节复制进新报文，job 结束即可归还。
-                delay.post(d, new Runnable() {
+                delay.post(DelayLine.DIR_DOWN, d, new Runnable() {
                     public void run() {
                         try {
+                            // 断网窗口：下行同样在投递处等门闸（与上行同一套语义）
+                            if (!WeakNet.I.awaitGate(WeakNet.GATE_WAIT_MAX_MS)) {
+                                close();
+                                return;
+                            }
                             synchronized (TcpSession.this) {
                                 if (closed) return;
                                 vpn.write(IpUtil.buildTcp(remoteIpB, remotePort,
@@ -364,7 +475,7 @@ public class TcpSession {
         }
         // FIN 同样要排在下行数据之后：上游关了之后，队列里可能还有数据没送达。
         // 直接发 FIN 再 close() 会把这些数据连同队列一起清掉，客户端收不全。
-        delay.post(dueDelay(false), new Runnable() {
+        delay.post(DelayLine.DIR_DOWN, dueDelay(false), new Runnable() {
             public void run() {
                 synchronized (TcpSession.this) {
                     if (!closed) {
@@ -373,9 +484,65 @@ public class TcpSession {
                         mySeq = (mySeq + 1) & 0xFFFFFFFFL;
                     }
                 }
-                close();
+                // 服务端先半关闭时不能顺手把整条会话拆掉：客户端可能还在上传
+                // （HTTP 上传、双向协议都这样）。只有两个方向都结束了才真正关闭。
+                markDownFin();
             }
         }, 0);
+    }
+
+    /**
+     * 下行窗口控制：未确认字节占满客户端窗口时等 ACK。
+     *
+     * 必须在**会话锁外**等待：ACK 是在 onClientPacket（持锁）里更新的，
+     * 持锁等 ACK 就是自锁。wait() 会释放监视器，所以这里可以安全地等。
+     *
+     * 同时必须在**下游读线程**而不是 DelayLine 的 worker 里等：
+     *  ACK 的投递也走同一条 DelayLine，worker 里等 ACK = 等自己，必死锁。
+     * 超时则关掉流控并记一条 —— 客户端长时间不 ACK 时宁可放任，
+     * 也不要让整条连接永久停在这里。
+     */
+    private void waitWindow(int len) {
+        long end = System.currentTimeMillis() + 30000;
+        synchronized (this) {
+            while (!closed && clientWindow > 0 && unackedDown + len > clientWindow) {
+                long left = end - System.currentTimeMillis();
+                if (left <= 0) {
+                    clientWindow = 0;
+                    WeakNet.I.log("loss", "下行流控等待超时，已关闭窗口控制："
+                            + remoteIp + ":" + remotePort);
+                    return;
+                }
+                try {
+                    wait(Math.min(50, left));
+                } catch (InterruptedException e) {
+                    return;
+                }
+            }
+        }
+    }
+
+    private void markUpFin() {
+        synchronized (this) {
+            upFin = true;
+        }
+        maybeClose();
+    }
+
+    private void markDownFin() {
+        synchronized (this) {
+            downFin = true;
+        }
+        maybeClose();
+    }
+
+    /** 两个方向都收到 FIN 才拆会话；单方向结束属于正常半关闭 */
+    private void maybeClose() {
+        boolean both;
+        synchronized (this) {
+            both = upFin && downFin;
+        }
+        if (both) close();
     }
 
     /**
@@ -384,7 +551,9 @@ public class TcpSession {
      */
     private void sendAck(final long ackSeq) {
         long d = DelayLine.delayMs(true) + DelayLine.delayMs(false);
-        delay.post(d, new Runnable() {
+        // offer：调用方可能持有会话锁（onClientPacket），入队即可，别在锁里跑 job。
+        // ACK 因队列满被丢是可接受的：上行队列满时本来就没在确认新数据。
+        delay.offer(DelayLine.DIR_UP, d, new Runnable() {
             public void run() {
                 synchronized (TcpSession.this) {
                     if (closed) return;

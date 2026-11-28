@@ -1580,14 +1580,28 @@ class App(NotesMixin, ScopeMixin, ShareMixin, UsbMixin):
         # "c:<id>" = 弱网组合：选中它就开始按顺序播放若干段场景
         if str(key).startswith(W.COMBO_KEY_PREFIX):
             cid = key[len(W.COMBO_KEY_PREFIX):]
-            try:
-                applied = self._run(W.select_combo(cid))
-            except Exception:
+            combo = W.find_combo(cid)
+            if combo is None:
                 messagebox.showerror("我的弱网组合", "这个组合已不存在，已刷新列表。")
                 self.reload_combo()
                 return
-            combo = W.find_combo(cid)
-            name = combo["name"] if combo else "组合"
+            playable = W.combo_playable_steps(combo)
+            if not playable:
+                # 整支组合的场景都被删了：不能开一个什么都不播的播放器
+                messagebox.showerror(
+                    "我的弱网组合",
+                    "「%s」里引用的场景都已不可用（可能已被删除），无法播放。\n\n"
+                    "请打开组合编辑器，把这些段换成现有场景后再试。" % combo["name"])
+                W.log_event("config", "组合「%s」的场景都已不可用，未播放" % combo["name"])
+                self.reload_combo()
+                return
+            dead = len(combo.get("steps") or []) - len(playable)
+            if dead:
+                # 部分可用：照播，但要说清楚有几段会被跳过，否则用户会以为全程都测了
+                W.log_event("config", "组合「%s」有 %d 段场景已不可用，播放时会跳过"
+                            % (combo["name"], dead))
+            applied = self._run(W.select_combo(cid))
+            name = combo["name"]
             W.log_event("config", ("开始播放组合：" if applied
                                    else "选择组合（未开启限速，未生效）：") + name)
             self.load_current()
@@ -1642,14 +1656,23 @@ class App(NotesMixin, ScopeMixin, ShareMixin, UsbMixin):
         if sys.platform != "win32":
             messagebox.showinfo("提示", "一键接管仅支持 Windows（其它系统请在系统设置里填代理）。")
             return
-        cur = W.sysproxy_enabled()
+        # 判断依据是「本实例有没有接管」，不是「系统代理开没开」：
+        # 用户本来就开着公司代理时，用后者会一进一出就把公司代理关掉。
+        cur = W.sysproxy_owned()
         ok = W.set_sysproxy(not cur)
         if ok:
             W.log_event("config", "已" + ("开启" if not cur else "解除") + "本机流量接管（系统代理）")
             if cur:                       # 刚解除接管：手机那边也一并还原
                 self.usb_disconnect("解除接管")
         else:
-            messagebox.showerror("失败", "修改系统代理失败，请以管理员身份运行。")
+            messagebox.showerror(
+                "失败",
+                "修改系统代理失败。\n\n"
+                "常见原因有两个：\n"
+                "1. 权限不足 —— 以管理员身份重新运行本程序\n"
+                "2. 系统代理被组策略或安全软件锁定 —— 打开"
+                "「Internet 选项 → 连接 → 局域网设置」，"
+                "看能否手动勾选「使用代理服务器」")
         self.refresh_header()
 
     def toggle_lan(self):
@@ -1671,16 +1694,25 @@ class App(NotesMixin, ScopeMixin, ShareMixin, UsbMixin):
                     "请只在可信任的网络（家里 / 公司内网）使用。\n\n"
                     "是否继续？" % (ip, port)):
                 return
-            self._run(W.restart_proxy("0.0.0.0"))
-            W.log_event("config", "代理监听切换为 0.0.0.0（同网段可访问）")
+            # restart_proxy 返回**实际**监听地址；失败时它会把旧监听恢复并抛错，
+            # _run 返回 None。不按返回值判断的话，绑失败也会提示「已开启」，
+            # 而界面上显示的是新地址、实际只有旧地址可用。
+            got = self._run(W.restart_proxy("0.0.0.0"))
             self.refresh_header()
+            if got != "0.0.0.0":
+                W.log_event("error", "局域网监听开启失败，仍保持 %s" % (W.G.proxy_host,))
+                return
+            W.log_event("config", "代理监听切换为 0.0.0.0（同网段可访问）")
             messagebox.showinfo("局域网访问已开启",
                                 "被测设备的 HTTP 代理填：\n\n    %s:%d"
                                 % (ip, port))
         else:
-            self._run(W.restart_proxy("127.0.0.1"))
-            W.log_event("config", "代理监听切换为 127.0.0.1（仅本机）")
+            got = self._run(W.restart_proxy("127.0.0.1"))
             self.refresh_header()
+            if got != "127.0.0.1":
+                W.log_event("error", "切回仅本机失败，仍保持 %s" % (W.G.proxy_host,))
+                return
+            W.log_event("config", "代理监听切换为 127.0.0.1（仅本机）")
 
     def _sync_run_btn(self):
         """限速总开关的按钮态：未开启时是实心主按钮（邀请点开），运行中变成浅底的停止。"""
@@ -1736,7 +1768,8 @@ class App(NotesMixin, ScopeMixin, ShareMixin, UsbMixin):
                 except Exception as e:
                     W.log("退出时还原手机失败：%r" % e)
             try:
-                if W.sysproxy_enabled():
+                # 只还原「自己接管的那份」。用户自己的代理开着时退出，不动注册表。
+                if W.sysproxy_owned():
                     W.set_sysproxy(False)
                     W.log_event("config", "退出：已解除本机流量接管")
             except Exception:
@@ -1795,7 +1828,7 @@ class App(NotesMixin, ScopeMixin, ShareMixin, UsbMixin):
 
     def refresh_header(self):
         try:
-            on = W.sysproxy_enabled()
+            on = W.sysproxy_owned()
         except Exception:
             on = False
         v = S.header_view(W.G.proxy_host, W.G.proxy_port, W.G.lan_ip,

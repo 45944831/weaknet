@@ -119,8 +119,32 @@ while stack:
         continue
     tree.add(pid)
     stack += [p for p, (_, ppid) in procs.items() if ppid == pid]
-check("没有为进程树产生 conhost 控制台宿主", not (tree & set(conhost_parents)),
-      f"tree={sorted(tree)} conhost_parents={conhost_parents[:6]}")
+
+# conhost 本身不代表「黑框」：GUI 进程用 CREATE_NO_WINDOW 拉起 adb.exe 时，
+# Windows 仍会为它分配一个**无窗口**的 console 宿主（usb_phone.run 就是这么做的）。
+# 用户能看到的是「可见的控制台窗口」，所以判定改成枚举进程树里的可见窗口，
+# 而不是「存在 conhost 就失败」—— 后者在有手机连着、USB 接管拉起 adb 时会误报。
+visible = []
+
+
+def _collect(hwnd, _):
+    if u32.IsWindowVisible(hwnd):
+        p = wintypes.DWORD()
+        u32.GetWindowThreadProcessId(hwnd, ctypes.byref(p))
+        if p.value in tree:
+            n = u32.GetWindowTextLengthW(hwnd)
+            buf = ctypes.create_unicode_buffer(n + 1)
+            u32.GetWindowTextW(hwnd, buf, n + 1)
+            cls = ctypes.create_unicode_buffer(64)
+            u32.GetClassNameW(hwnd, cls, 64)
+            visible.append((p.value, cls.value, buf.value))
+    return True
+
+
+u32.EnumWindows(ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND, wintypes.LPARAM)(_collect), 0)
+console_wins = [v for v in visible if v[1] == "ConsoleWindowClass"]
+check("没有为进程树产生可见控制台窗口", not console_wins,
+      f"tree={sorted(tree)} conhost_parents={conhost_parents[:6]} console={console_wins}")
 
 WNDENUMPROC = ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND, wintypes.LPARAM)
 
