@@ -8,8 +8,9 @@
 
 本轮是用户明确授权的**打包发版**流程（此前各轮一律不打包）：升版本 → 全量自动化回归 →
 重打 EXE/APK → 安卓真机 + PC 本机双端联调 → 修复 → 提交 / tag / Push / Release。
-双端联调发现的问题已全部定位并处理，回归全绿；下一步是 README 回填与发版。
-**截至本节写入时仍未 commit、未 push、未发布。**
+双端联调发现的问题已全部定位并处理，回归全绿。已提交 `ee207e2`、打 tag `v1.1.21`
+并推送到 `origin/master`；Release <https://github.com/45944831/weaknet/releases/tag/v1.1.21>
+已上传 EXE/APK，`tests/_t_release.py --strict` **26 通过 / 0 失败**（含 A1–A8 资产真值）。
 
 | 阶段 | 口径 | 结果 |
 |---|---|---|
